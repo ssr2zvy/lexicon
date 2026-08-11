@@ -1,0 +1,219 @@
+###  Translation from RTF performed by UnRTF, version 0.21.10 
+### font table contains 3 fonts total
+
+-----------------
+Use this as the current baseline. Repo root is lexicon-framework/ plus a pending, empty release/ directory; one concrete lexicon-framework/sources/example-source/ shows the mandated source layout. No compiled artifacts (no binaries, no .exe) are committed anywhere in the repo.
+lexicon/
+
+ lexicon-framework/
+  Cargo.toml
+  Cargo.lock
+
+  core/
+  src/
+  lib.rs
+ 
+  get_raw_data/
+   mod.rs
+   api.rs
+   facade.rs
+   run.rs
+ 
+  process_data/
+   mod.rs
+   api.rs
+   facade.rs
+   run.rs
+ 
+  session_engine/
+  mod.rs
+  session_engine.rs
+
+  cli/
+  Cargo.toml
+  src/
+  main.rs
+
+  sources/
+  example-source/
+ 
+  data/
+   raw/
+   
+    <request-timestamp>-<id>/
+     request/
+      metadata.json
+      body
+    
+     response/
+     metadata.json
+     body
+   
+    ...
+  
+   processed/
+   example-source.sqlite
+ 
+  get-raw-data/
+   sessions/
+    ...
+   session_status.json
+  
+   get_raw_data_impl/
+   Cargo.toml
+   Cargo.lock
+   src/
+    main.rs
+ 
+  process-data/
+  sessions/
+   ...
+  session_status.json
+ 
+  process_data_impl/
+  Cargo.toml
+  Cargo.lock
+  src/
+   main.rs
+  processing/
+   ...
+
+ release/
+  (pending — reserved for future setup and release-process source code; empty for now)
+
+README.md
+cli/ under lexicon-framework/ is source code for the lexicon CLI, not a compiled binary. No .exe or other compiled artifact is committed anywhere in this repo; every implementation directory holds source only.
+Lexicon  Begin Here
+" Lexicon is a generic framework for acquiring raw data from independently implemented sources and processing that raw data into source-specific SQLite datasets.
+" Lexicon Core does not define what the data represents. Individual source implementations determine the nature of the acquired and processed data.
+Installation
+" Determine your operating system and CPU architecture.
+" Windows
+ Open PowerShell.
+ Run:echo $env:PROCESSOR_ARCHITECTURE
+ AMD64  windows-x86_64
+ ARM64  windows-arm64
+" Linux
+ Run:uname -m
+ x86_64  linux-x86_64
+ aarch64 or arm64  linux-arm64
+" macOS
+ Run:uname -m
+ x86_64  macos-x86_64
+ arm64  macos-arm64
+" Installation tooling is pending. It will live under release/, which is currently empty and reserved for future setup and release-process source code.
+" Once implemented, setup will:
+ identify this Lexicon installation;
+ build or locate the lexicon CLI from lexicon-framework/cli/;
+ install or link the lexicon command into an appropriate user PATH location;
+ record the location of this Lexicon installation so the command does not depend on the current working directory;
+ report whether installation succeeded.
+" Verify installation with:lexicon --version
+
+Command Structure
+" All normal interaction begins with:lexicon
+" Data operations use:lexicon data
+" Source-management operations use:lexicon source
+Get Raw Data
+" Run:lexicon data --get <source-name>
+" Example:lexicon data --get example-source
+" Lexicon resolves the corresponding native implementation executable under:lexicon-framework/sources/<source-name>/get-raw-data/get_raw_data_impl/
+" Normal execution uses the already-built native executable. Cargo and the Rust compiler are not invoked. This built executable is a local build artifact and is never committed to the repo.
+Process Data
+" Run:lexicon data --process <source-name>
+" Example:lexicon data --process example-source
+" Lexicon resolves the corresponding native implementation executable under:lexicon-framework/sources/<source-name>/process-data/process_data_impl/
+" Processed output is written under:lexicon-framework/sources/<source-name>/data/processed/
+" The final processed dataset for a source is SQLite.
+Background Execution
+" Add:--bg
+" Example:lexicon data --get example-source --bg
+" The same option may be used with processing:lexicon data --process example-source --bg
+Abandon a Previous Failed Session
+" Add:--abandon-past-fail
+" Example:lexicon data --get example-source --abandon-past-fail
+" Options may be combined:lexicon data --get example-source --bg --abandon-past-fail
+Source-Specific Arguments
+" Lexicon-level arguments appear before --.
+" Arguments after -- are passed directly to the selected source implementation.
+" Example:lexicon data --get example-source --bg -- <source-specific arguments>
+" This allows each source implementation to define its own arguments without adding them to the global Lexicon CLI.
+Raw Data Layout
+" Raw acquisition data is stored under:lexicon-framework/sources/<source-name>/data/raw/
+" Each network transaction receives its own directory:data/raw/<request-timestamp>-<id>/
+" Each transaction contains:
+ request/
+ response/
+" request/metadata.json stores structured request metadata such as:
+ timestamp;
+ method;
+ URL;
+ headers;
+ protocol information;
+ payload size and hash where applicable.
+" request/body contains the original request-body bytes when a request body exists.
+" response/metadata.json stores structured response metadata such as:
+ timestamp;
+ HTTP status;
+ headers;
+ protocol information;
+ payload size and hash.
+" response/body contains the response payload bytes as received.
+" The raw layer does not interpret a response body as HTML, JSON, ZIP, audio, text, or any other semantic format merely because its content type is known.
+" Authentication secrets and equivalent credentials must not be persisted unredacted in raw request metadata.
+Sessions
+" Get-raw-data execution/session state is stored under:lexicon-framework/sources/<source-name>/get-raw-data/sessions/
+" Its current session state is tracked in:lexicon-framework/sources/<source-name>/get-raw-data/session_status.json
+" Process-data execution/session state is stored separately under:lexicon-framework/sources/<source-name>/process-data/sessions/
+" Its current session state is tracked in:lexicon-framework/sources/<source-name>/process-data/session_status.json
+" Session records describe execution state. They are separate from the raw request/response data stored under data/raw/.
+Lexicon Core
+" Shared behavior lives under:lexicon-framework/core/
+" core/ is one Rust library crate.
+" Lexicon Core defines the public contracts that source implementations must satisfy.
+" Core contains shared get-raw-data behavior, process-data behavior, fa�ade logic, and session-engine machinery.
+" Internal engine modules are private to the Core crate.
+" Source implementations may depend on Cores public API but may not directly access private engine implementation types.
+" Core must not expose concrete private-engine types through its public contracts.
+Adding a New Source
+" Adding or modifying source implementations requires a Rust development toolchain.
+" Create a source draft with:lexicon source <source-name> --draft
+" The command creates the mandatory source structure, including:
+ data/raw/;
+ data/processed/;
+ get-raw-data session files;
+ process-data session files;
+ get_raw_data_impl/;
+ process_data_impl/;
+ their Cargo manifests;
+ their Rust source entry points;
+ the source-specific processing/ directory.
+Get-Raw-Data Implementation
+" Implement retrieval behavior in:lexicon-framework/sources/<source-name>/get-raw-data/get_raw_data_impl/src/"http://main.rs/"
+" The generated implementation must satisfy the GetRawData contract defined by Lexicon Core.
+" Rusts compiler is responsible for enforcing this contract.
+Process-Data Implementation
+" Implement processing behavior in:lexicon-framework/sources/<source-name>/process-data/process_data_impl/src/"http://main.rs/"
+" The generated implementation must satisfy the ProcessData contract defined by Lexicon Core.
+" Source-specific processing files belong under:lexicon-framework/sources/<source-name>/process-data/process_data_impl/processing/
+Add and Build a Source
+" After implementing the source, run:lexicon source <source-name> --add
+" Lexicon will:
+ locate the sources implementation Cargo projects;
+ compile the implementations against Lexicon Core;
+ allow the Rust compiler to verify the required traits;
+ reject implementations that do not satisfy their Core contracts;
+ link successful implementations into native executables for the current target;
+ place the resulting executables into their respective implementation directories.
+" Adding a source does not require modifying Lexicon Core or registering the source in a central source list.
+Rebuild for the Current Machine
+" A concrete repository containing multiple source implementations may provide:lexicon build
+" This rebuilds all discovered source implementations for the current operating system and CPU architecture.
+" The command discovers implementations from the mandated source-directory structure rather than from a manually maintained registry.
+" This allows the same source repository to be cloned on Windows, Linux, or macOS and rebuilt into native executables appropriate for that machine.
+Runtime Requirements
+" Normal users do not need Rust, Cargo, Zig, Python, the JVM, or another language runtime to execute already-built Lexicon operations.
+" Normal commands execute native binaries directly.
+" Rust/Cargo is required only when creating, changing, validating, or rebuilding Rust source implementations.
+" Cross-target release builds may use additional build tooling, such as Zig-assisted Rust linking, but that tooling is not required for ordinary runtime use.
+This keeps example-source as the sole concrete source example while core/ and the CLI remain completely domain-agnostic.
