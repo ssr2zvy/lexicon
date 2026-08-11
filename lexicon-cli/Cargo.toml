@@ -7,4 +7,4 @@ name = "lexicon"
 path = "src/main.rs"
 
 [dependencies]
-lexicon-core = {path = ../lexicon-framework}
+lexicon-framework = {path = "../lexicon-framework"}

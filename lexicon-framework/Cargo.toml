@@ -1,0 +1,9 @@
+[package]
+name = "lexicon-framework"
+version = "0.1.0"
+
+[lib]
+name = "lexicon_framework"
+path = "src/lib.rs"
+
+[dependencies]

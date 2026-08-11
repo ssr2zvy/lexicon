@@ -1,6 +1,6 @@
 [workspace]
-resolver = "2"
 members = [
-    "core",
-    "cli"
+    "lexicon-framework",
+    "lexicon-cli",
 ]
+resolver = "2"
