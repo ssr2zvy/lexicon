@@ -1,10 +1,10 @@
 [package]
 name = "lexicon-cli"
 version = "0.1.0"
+edition = "2024"
 
 [[bin]]
 name = "lexicon"
 path = "src/main.rs"
 
 [dependencies]
-lexicon-framework = {path = "../lexicon-framework"}
