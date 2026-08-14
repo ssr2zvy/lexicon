@@ -1,3 +1,4 @@
 workspace/
+artifacts/
+making-rust-artifacts/
 target/
-tooling/making-rust-artifacts/

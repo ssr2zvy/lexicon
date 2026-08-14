@@ -1,0 +1,1 @@
+- use tooling/making-rust-artifacts/ to produce artifacts; use the following configuration (in the .toml)

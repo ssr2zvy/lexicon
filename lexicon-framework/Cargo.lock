@@ -3,13 +3,5 @@
 version = 4
 
 [[package]]
-name = "lexicon"
-version = "0.1.0"
-
-[[package]]
-name = "lexicon-cli"
-version = "0.1.0"
-
-[[package]]
 name = "lexicon-framework"
 version = "0.1.0"
