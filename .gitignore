@@ -1,4 +1,4 @@
 workspace/
 artifacts/
-making-rust-artifacts/
+mza/
 target/
