@@ -3,3 +3,9 @@ name = "lexicon-bundle"
 version.workspace = true
 edition.workspace = true
 publish = false
+
+[dependencies]
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
