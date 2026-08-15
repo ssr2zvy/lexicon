@@ -1,12 +1,11 @@
-[package]
-name = "lexicon"
-version = "0.1.0"
-edition = "2024"
-publish = false
-
 [workspace]
-resolve = "2"
+resolver = "2"
 members = [
     "lexicon-cli",
     "lexicon-framework",
+    "lexicon-bundle",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
