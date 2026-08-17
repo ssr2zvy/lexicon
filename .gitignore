@@ -1,4 +1,9 @@
+# host machine
 workspace/
+
+# outputs
 artifacts/
-mza/
 target/
+
+# automation
+mza/

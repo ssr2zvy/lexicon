@@ -62,11 +62,11 @@ fn dispatch(args: &[String]) -> i32 {
         Some("install") => install_command(state, &dest),
         Some("uninstall") => uninstall_command(state, &dest),
         Some("update") => {
-            println!("Update is not implemented.");
+            print_bundle("Update is not implemented.");
             0
         }
         Some("repair") => {
-            println!("Repair is not implemented.");
+            print_bundle("Repair is not implemented.");
             0
         }
         Some("--help") | Some("-h") => {
@@ -74,33 +74,43 @@ fn dispatch(args: &[String]) -> i32 {
             0
         }
         Some(other) => {
-            eprintln!("lexicon-bundle: unknown argument \"{other}\"");
+            print_bundle_err(&format!("unknown argument \"{other}\""));
             print_help();
             2
         }
     }
 }
 
+fn print_bundle(message: impl std::fmt::Display) {
+    println!("[[LEXICON-BUNDLE]] {message}");
+}
+
+fn print_bundle_err(message: impl std::fmt::Display) {
+    eprintln!("[[LEXICON-BUNDLE]] {message}");
+}
+
 fn print_help() {
-    println!("Usage:");
-    println!("  lexicon-bundle");
-    println!("  lexicon-bundle install");
-    println!("  lexicon-bundle uninstall");
-    println!("  lexicon-bundle update    (not implemented)");
-    println!("  lexicon-bundle repair    (not implemented)");
-    println!("  lexicon-bundle --help");
+    print_bundle("Usage:");
+    print_bundle("  lexicon-bundle");
+    print_bundle("  lexicon-bundle install");
+    print_bundle("  lexicon-bundle uninstall");
+    print_bundle("  lexicon-bundle update    (not implemented)");
+    print_bundle("  lexicon-bundle repair    (not implemented)");
+    print_bundle("  lexicon-bundle --help");
 }
 
 fn default_flow(state: InstallState, dest: &Destinations) -> i32 {
     match state {
         InstallState::NotInstalled => {
-            println!("Lexicon is not installed.");
-            print_destinations(dest);
-            if prompt_default_yes("Install Lexicon?") {
-                do_install(dest)
-            } else {
-                println!("Installation cancelled.");
-                0
+            print_bundle("Installation status: Not installed.");
+            loop {
+                print_bundle("1. Install");
+                print_bundle("2. Cancel");
+                match read_line("Select an option: ").trim() {
+                    "1" => return do_install(dest),
+                    "2" => return 0,
+                    _ => print_bundle_err("Invalid selection."),
+                }
             }
         }
         other => show_maintenance_menu(other, dest),
@@ -110,13 +120,15 @@ fn default_flow(state: InstallState, dest: &Destinations) -> i32 {
 fn install_command(state: InstallState, dest: &Destinations) -> i32 {
     match state {
         InstallState::NotInstalled => {
-            println!("Lexicon is not installed.");
-            print_destinations(dest);
-            if prompt_default_yes("Install Lexicon?") {
-                do_install(dest)
-            } else {
-                println!("Installation cancelled.");
-                0
+            print_bundle("Installation status: Not installed.");
+            loop {
+                print_bundle("1. Install");
+                print_bundle("2. Cancel");
+                match read_line("Select an option: ").trim() {
+                    "1" => return do_install(dest),
+                    "2" => return 0,
+                    _ => print_bundle_err("Invalid selection."),
+                }
             }
         }
         other => show_maintenance_menu(other, dest),
@@ -126,7 +138,7 @@ fn install_command(state: InstallState, dest: &Destinations) -> i32 {
 fn uninstall_command(state: InstallState, dest: &Destinations) -> i32 {
     match state {
         InstallState::NotInstalled => {
-            println!("Lexicon is not installed.");
+            print_bundle("Installation status: Not installed.");
             0
         }
         _ => run_uninstall_flow(dest),
@@ -136,41 +148,36 @@ fn uninstall_command(state: InstallState, dest: &Destinations) -> i32 {
 fn show_maintenance_menu(state: InstallState, dest: &Destinations) -> i32 {
     loop {
         match state {
-            InstallState::Damaged => println!("Lexicon has a damaged or incomplete installation.\n"),
-            _ => println!("Lexicon is installed.\n"),
+            InstallState::Damaged => print_bundle("Installation status: Damaged."),
+            _ => print_bundle("Installation status: Installed."),
         }
-        println!("1. Update (not implemented)");
-        println!("2. Repair (not implemented)");
-        println!("3. Uninstall");
-        println!("4. Cancel");
+        print_bundle("1. Uninstall");
+        print_bundle("2. Other");
+        print_bundle("3. Cancel");
 
         match read_line("Select an option: ").trim() {
-            "1" => println!("Update is not implemented."),
-            "2" => println!("Repair is not implemented."),
-            "3" => return run_uninstall_flow(dest),
-            "4" => return 0,
-            _ => eprintln!("Invalid selection."),
+            "1" => return run_uninstall_flow(dest),
+            "2" => {
+                print_bundle("Other is not implemented.");
+                return 0;
+            }
+            "3" => return 0,
+            _ => print_bundle_err("Invalid selection."),
         }
     }
 }
 
 fn run_uninstall_flow(dest: &Destinations) -> i32 {
-    print_destinations(dest);
     if prompt_default_no("Uninstall Lexicon?") {
         do_uninstall(dest)
     } else {
-        println!("Uninstallation cancelled.");
+        print_bundle("Uninstallation cancelled.");
         0
     }
 }
 
-fn print_destinations(dest: &Destinations) {
-    println!("  CLI:       {}", dest.cli.display());
-    println!("  Framework: {}", dest.framework.display());
-}
-
 fn read_line(prompt: &str) -> String {
-    print!("{prompt}");
+    print!("[[LEXICON-BUNDLE]] {prompt}");
     io::stdout().flush().ok();
     let mut input = String::new();
     io::stdin().read_line(&mut input).ok();
@@ -245,16 +252,14 @@ fn do_install(dest: &Destinations) -> i32 {
 
     match result {
         Ok(path_modification) => {
-            println!("Lexicon installed successfully.");
+            print_bundle("Lexicon installed successfully.");
             if !path_modification.method.is_empty() {
-                println!(
-                    "Start a new terminal session for the `lexicon` command to become available."
-                );
+                print_bundle("Start a new terminal session for the `lexicon` command to become available.");
             }
             0
         }
         Err(err) => {
-            eprintln!("lexicon-bundle: installation failed: {err}");
+            print_bundle_err(&format!("installation failed: {err}"));
             1
         }
     }
@@ -439,13 +444,13 @@ fn do_uninstall(dest: &Destinations) -> i32 {
 
     if let Err(err) = fs::remove_file(&dest.cli) {
         if err.kind() != io::ErrorKind::NotFound {
-            eprintln!("lexicon-bundle: failed to remove {}: {err}", dest.cli.display());
+            print_bundle_err(&format!("failed to remove {}: {err}", dest.cli.display()));
             return 1;
         }
     }
     if let Err(err) = fs::remove_file(&dest.framework) {
         if err.kind() != io::ErrorKind::NotFound {
-            eprintln!("lexicon-bundle: failed to remove {}: {err}", dest.framework.display());
+            print_bundle_err(&format!("failed to remove {}: {err}", dest.framework.display()));
             return 1;
         }
     }
@@ -463,11 +468,11 @@ fn do_uninstall(dest: &Destinations) -> i32 {
     remove_if_empty_and_lexicon_owned(dest.record.parent());
 
     if dest.cli.exists() || dest.framework.exists() || dest.record.exists() {
-        eprintln!("lexicon-bundle: uninstallation did not fully complete");
+        print_bundle_err("uninstallation did not fully complete");
         return 1;
     }
 
-    println!("Lexicon uninstalled successfully.");
+    print_bundle("Lexicon uninstalled successfully.");
     0
 }
 
