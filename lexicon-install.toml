@@ -1,0 +1,17 @@
+schema_version = 1
+
+[artifacts]
+cli = "lexicon_cli"
+framework = "lexicon_framework"
+
+[platform.linux]
+base = "home"
+cli = ".local/bin/lexicon"
+framework = ".local/lib/lexicon/runtime/lexicon-framework"
+record = ".local/lib/lexicon/installation-record.toml"
+
+[platform.windows]
+base = "user_program_files"
+cli = "Lexicon/bin/lexicon.exe"
+framework = "Lexicon/runtime/lexicon-framework.exe"
+record = "Lexicon/installation-record.toml"

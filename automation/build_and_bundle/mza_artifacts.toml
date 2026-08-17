@@ -1,13 +1,13 @@
 [[artifact]]
 label = "lexicon_cli"
-crate = "../../lexicon-cli"
-output_path = "../../artifacts/"
+crate = "../../../lexicon-cli"
+output_path = "../../../artifacts/"
 type = "custom"
 
 [[artifact]]
 label = "lexicon_framework"
-crate = "../../lexicon-framework"
-output_path = "../../artifacts/"
+crate = "../../../lexicon-framework"
+output_path = "../../../artifacts/"
 type = "custom"
 
 [[target]]
@@ -17,9 +17,9 @@ arch = "x86_64"
 environment = "musl"
 
 [[bundle]]
-label = "lexicon"
-crate = "../.."
-output_path = "../../artifacts/"
+label = "lexicon_bundle"
+crate = "../../../lexicon-bundle"
+output_path = "../../../artifacts/"
 type = "custom"
 protocol = "cargo-bundler-v0.1.0"
 inputs = [
