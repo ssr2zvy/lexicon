@@ -9,7 +9,7 @@ source "$BUILD_BUNDLE_INSTALL/local_build_variables.sh"
 
 BUNDLE_ARTIFACT_DIR="$ROOT_DIR/artifacts/lexicon_bundle/$BUNDLE_TYPE/$BUNDLE_PROTOCOL/$BUNDLE_VERSION/$BUNDLE_TARGET"
 UPDATE_LOCK_FILE_SCRIPT="$BUILD_BUNDLE_INSTALL/update_lock_file.sh"
-MAKE_ARTIFACT_SCRIPT="$BUILD_BUNDLE_INSTALL/../build_and_bundle/mza/make-artifact.sh"
+MAKE_ARTIFACT_SCRIPT="$BUILD_BUNDLE_INSTALL/../build_bundle_mza/mza/make-artifact.sh"
 INSTALL_SCRIPT="$BUILD_BUNDLE_INSTALL/install.sh"
 
 bbi_echo() {

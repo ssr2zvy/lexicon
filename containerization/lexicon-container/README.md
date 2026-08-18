@@ -6,7 +6,7 @@ Unlike `test-container` (which mounts the whole repo and builds Lexicon from sou
 
 ## The `BUNDLE_TAR` build arg
 
-`BUNDLE_TAR` is a path *relative to the build context* pointing at a `lexicon-bundle-*.tar.xz` produced by `automation/build_and_bundle/mza` (via `automation/build_bundle_install/build_bundle_install.sh`). It gets substituted directly into the Containerfile's `COPY ${BUNDLE_TAR} ...` instruction, so it must exist and be reachable from the build context root. The Containerfile fails the build immediately with a clear error if `BUNDLE_TAR` isn't supplied.
+`BUNDLE_TAR` is a path *relative to the build context* pointing at a `lexicon-bundle-*.tar.xz` produced by `automation/build_bundle_mza/mza` (via `automation/build_bundle_install/build_bundle_install.sh`). It gets substituted directly into the Containerfile's `COPY ${BUNDLE_TAR} ...` instruction, so it must exist and be reachable from the build context root. The Containerfile fails the build immediately with a clear error if `BUNDLE_TAR` isn't supplied.
 
 Because the build context is the repo root (`lexicon/` itself, hence the trailing `.` in the build command), the value is the path from the repo root down to the tar.xz, for example:
 

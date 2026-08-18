@@ -2,7 +2,7 @@
 # pre-built Lexicon bundle tar.xz and keeps running so you can exec into it.
 #
 # BUNDLE_TAR must be a path *relative to the build context* pointing at a
-# lexicon-bundle-*.tar.xz produced by automation/build_and_bundle/mza, e.g.:
+# lexicon-bundle-*.tar.xz produced by automation/build_bundle_mza/mza, e.g.:
 #
 #   podman build -f containerization/lexicon-container/Containerfile \
 #     --build-arg BUNDLE_TAR=artifacts/lexicon_bundle/custom/cargo-bundler-v0.1.0/0.1.0-LOCALSNAPSHOT/x86_64-unknown-linux-musl/lexicon-bundle-0.1.0-LOCALSNAPSHOT-x86_64-unknown-linux-musl.tar.xz \

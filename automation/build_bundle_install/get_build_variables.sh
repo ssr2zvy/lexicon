@@ -3,7 +3,7 @@ set -e
 
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ARTIFACT_FILE="${ARTIFACT_FILE:-$SCRIPT_DIR/../build_and_bundle/mza_artifacts.toml}"
+ARTIFACT_FILE="${ARTIFACT_FILE:-$SCRIPT_DIR/../build_bundle_mza/mza_artifacts.toml}"
 WORKSPACE_CARGO_FILE="${WORKSPACE_CARGO_FILE:-$ROOT_DIR/Cargo.toml}"
 LOCAL_BUILD_VARIABLES_FILE="$SCRIPT_DIR/local_build_variables.sh"
 

@@ -15,7 +15,7 @@ REQUIRED_PATHS=(
     "$REPO_DIR/automation/build_bundle_install/build_bundle_install.sh"
     "$REPO_DIR/automation/build_bundle_install/get_build_variables.sh"
     "$REPO_DIR/automation/build_bundle_install/install.sh"
-    "$REPO_DIR/automation/build_and_bundle/mza"
+    "$REPO_DIR/automation/build_bundle_mza/mza"
 )
 
 tc_echo() {
