@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 
-use crate::install::{do_install, do_uninstall, detect_state, resolve_destinations, Destinations, InstallState};
+use crate::install::{detect_state, do_install, do_uninstall, resolve_destinations};
+use crate::model::{Destinations, InstallState};
 
 pub fn dispatch(args: &[String]) -> i32 {
     let dest = resolve_destinations();
@@ -10,6 +11,8 @@ pub fn dispatch(args: &[String]) -> i32 {
         None => default_flow(state, &dest),
         Some("install") => install_command(state, &dest),
         Some("uninstall") => uninstall_command(state, &dest),
+        Some("--install") => install_flag(state, &dest),
+        Some("--uninstall") => uninstall_flag(state, &dest),
         Some("update") => {
             print_bundle("Update is not implemented.");
             0
@@ -76,6 +79,30 @@ fn uninstall_command(state: InstallState, dest: &Destinations) -> i32 {
     }
 }
 
+/// Non-interactive counterpart to `install`: installs directly with no
+/// menu, and is a no-op if Lexicon is already installed.
+fn install_flag(state: InstallState, dest: &Destinations) -> i32 {
+    match state {
+        InstallState::NotInstalled => do_install(dest),
+        _ => {
+            print_bundle("Installation status: Installed. Nothing to do.");
+            0
+        }
+    }
+}
+
+/// Non-interactive counterpart to `uninstall`: uninstalls directly with no
+/// menu or confirmation prompt, and is a no-op if not installed.
+fn uninstall_flag(state: InstallState, dest: &Destinations) -> i32 {
+    match state {
+        InstallState::NotInstalled => {
+            print_bundle("Installation status: Not installed. Nothing to do.");
+            0
+        }
+        _ => do_uninstall(dest),
+    }
+}
+
 fn show_maintenance_menu(state: InstallState, dest: &Destinations) -> i32 {
     loop {
         match state {
@@ -112,6 +139,8 @@ fn print_help() {
     print_bundle("  lexicon-bundle");
     print_bundle("  lexicon-bundle install");
     print_bundle("  lexicon-bundle uninstall");
+    print_bundle("  lexicon-bundle --install    (non-interactive; no-op if already installed)");
+    print_bundle("  lexicon-bundle --uninstall  (non-interactive; no-op if not installed)");
     print_bundle("  lexicon-bundle update    (not implemented)");
     print_bundle("  lexicon-bundle repair    (not implemented)");
     print_bundle("  lexicon-bundle --help");
@@ -133,6 +162,7 @@ fn read_line(prompt: &str) -> String {
     input
 }
 
+#[allow(dead_code)]
 fn prompt_default_yes(question: &str) -> bool {
     let answer = read_line(&format!("{question} [Y/n] ")).trim().to_lowercase();
     answer.is_empty() || answer == "y" || answer == "yes"

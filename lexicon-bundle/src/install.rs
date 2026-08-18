@@ -1,45 +1,20 @@
 use std::env;
 use std::fs;
-use std::io::{self, Cursor, Write};
+use std::io::{self, Cursor};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
 use tar::Archive;
 use xz2::read::XzDecoder;
 
-use crate::path::{normalize, relative_path, resolve_base_dir, segments};
+use crate::envpath::reverse_path_modification;
+use crate::model::{Destinations, InstallState, InstallationRecord, PathModification};
+use crate::pathutil::{normalize, relative_path, resolve_base_dir, segments};
 
-#[derive(Serialize, Deserialize, Default, Clone)]
-pub struct PathModification {
-    pub entry: String,
-    pub modified_by_lexicon: bool,
-    pub method: String,
-    pub location: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct InstallationRecord {
-    pub schema_version: u32,
-    pub version: String,
-    pub target: String,
-    pub installed_at: String,
-    pub cli: String,
-    pub framework: String,
-    pub path_modification: PathModification,
-}
-
-pub enum InstallState {
-    NotInstalled,
-    Installed,
-    Damaged,
-}
-
-pub struct Destinations {
-    pub cli: PathBuf,
-    pub framework: PathBuf,
-    pub record: PathBuf,
-}
+#[cfg(target_os = "linux")]
+use crate::envpath::ensure_linux_path;
+#[cfg(target_os = "windows")]
+use crate::envpath::ensure_windows_path;
 
 pub fn resolve_destinations() -> Destinations {
     let base_dir = resolve_base_dir(crate::INSTALL_BASE);
@@ -72,16 +47,14 @@ pub fn do_install(dest: &Destinations) -> i32 {
 
     match result {
         Ok(path_modification) => {
-            println!("Lexicon installed successfully.");
-            if !path_modification.method.is_empty() {
-                println!(
-                    "Start a new terminal session for the `lexicon` command to become available."
-                );
+            println!("[[LEXICON-BUNDLE]] Lexicon installed successfully.");
+            if path_modification.method == "profile-append" {
+                println!("[[LEXICON-BUNDLE]] Start a new terminal session for the `lexicon` command to become available.");
             }
             0
         }
         Err(err) => {
-            eprintln!("lexicon-bundle: installation failed: {err}");
+            eprintln!("[[LEXICON-BUNDLE]] installation failed: {err}");
             1
         }
     }
@@ -119,7 +92,7 @@ pub fn do_uninstall(dest: &Destinations) -> i32 {
         return 1;
     }
 
-    println!("Lexicon uninstalled successfully.");
+    println!("[[LEXICON-BUNDLE]] Lexicon uninstalled successfully.");
     0
 }
 
@@ -165,7 +138,7 @@ fn try_install(dest: &Destinations, staging_dir: &Path) -> Result<PathModificati
         .ok_or_else(|| format!("{} has no parent directory", dest.cli.display()))?;
 
     #[cfg(target_os = "linux")]
-    let path_modification = ensure_linux_path(bin_dir)?;
+    let path_modification = ensure_linux_path(bin_dir, &dest.cli)?;
     #[cfg(target_os = "windows")]
     let path_modification = ensure_windows_path(bin_dir)?;
 
@@ -238,6 +211,10 @@ fn validate_archive(archive_bytes: &[u8]) -> Result<(), String> {
     }
 }
 
+/// Decompresses a tar.xz archive; rejects anything but exactly one regular
+/// file (ignoring directory entries, rejecting links/specials), and extracts
+/// that file into `staging_dir` under `dest_file_name` (never the archived
+/// path, so archive contents can never control the install destination).
 fn extract_to_staging(archive_bytes: &[u8], staging_dir: &Path, dest_file_name: &str) -> Result<PathBuf, String> {
     validate_archive(archive_bytes)?;
 
@@ -265,22 +242,6 @@ fn atomic_install(staged: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn reverse_path_modification(path_modification: &PathModification) {
-    let location = Path::new(&path_modification.location);
-    let Ok(contents) = fs::read_to_string(location) else { return };
-
-    let export_line = format!("export PATH=\"{}:$PATH\"", path_modification.entry);
-    let filtered: Vec<&str> = contents
-        .lines()
-        .filter(|line| line.trim() != crate::MARKER && line.trim() != export_line)
-        .collect();
-    let mut new_contents = filtered.join("\n");
-    if !new_contents.is_empty() {
-        new_contents.push('\n');
-    }
-    let _ = fs::write(location, new_contents);
-}
-
 fn remove_if_empty_and_lexicon_owned(dir: Option<&Path>) {
     let Some(dir) = dir else { return };
     let Some(name) = dir.file_name().and_then(|name| name.to_str()) else { return };
@@ -291,118 +252,5 @@ fn remove_if_empty_and_lexicon_owned(dir: Option<&Path>) {
         if entries.next().is_none() {
             let _ = fs::remove_dir(dir);
         }
-    }
-}
-
-#[cfg(target_os = "linux")]
-pub fn ensure_linux_path(bin_dir: &Path) -> Result<PathModification, String> {
-    let entry = bin_dir.display().to_string();
-    let path_var = env::var("PATH").unwrap_or_default();
-    if env::split_paths(&path_var).any(|existing| existing == bin_dir) {
-        return Ok(PathModification {
-            entry,
-            modified_by_lexicon: false,
-            method: String::new(),
-            location: String::new(),
-        });
-    }
-
-    let home = env::var("HOME").map_err(|_| "could not determine $HOME".to_string())?;
-    let profile_path = choose_profile_path(&home);
-    let export_line = format!("export PATH=\"{entry}:$PATH\"\n");
-    let existing = fs::read_to_string(&profile_path).unwrap_or_default();
-    if existing.contains(&export_line) {
-        return Ok(PathModification {
-            entry,
-            modified_by_lexicon: false,
-            method: "profile-append".to_string(),
-            location: profile_path.display().to_string(),
-        });
-    }
-
-    let mut new_contents = existing;
-    if !new_contents.is_empty() && !new_contents.ends_with('\n') {
-        new_contents.push('\n');
-    }
-    new_contents.push_str(crate::MARKER);
-    new_contents.push('\n');
-    new_contents.push_str(&export_line);
-    fs::write(&profile_path, new_contents).map_err(|err| err.to_string())?;
-
-    Ok(PathModification {
-        entry,
-        modified_by_lexicon: true,
-        method: "profile-append".to_string(),
-        location: profile_path.display().to_string(),
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn choose_profile_path(home: &str) -> PathBuf {
-    let shell = env::var("SHELL").unwrap_or_default();
-    if shell.contains("zsh") {
-        PathBuf::from(home).join(".zshrc")
-    } else if shell.contains("bash") {
-        PathBuf::from(home).join(".bashrc")
-    } else {
-        PathBuf::from(home).join(".profile")
-    }
-}
-
-#[cfg(target_os = "windows")]
-pub fn ensure_windows_path(bin_dir: &Path) -> Result<PathModification, String> {
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
-    use winreg::RegKey;
-
-    let entry = bin_dir.display().to_string();
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let env_key = hkcu
-        .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
-        .map_err(|err| format!("failed to open HKCU\\Environment: {err}"))?;
-
-    let current: String = env_key.get_value("Path").unwrap_or_default();
-    let already_present = current.split(';').any(|existing| existing.eq_ignore_ascii_case(&entry));
-    if already_present {
-        return Ok(PathModification {
-            entry,
-            modified_by_lexicon: false,
-            method: "registry".to_string(),
-            location: "HKCU\\Environment\\Path".to_string(),
-        });
-    }
-
-    let new_path = if current.is_empty() { entry.clone() } else { format!("{current};{entry}") };
-    env_key.set_value("Path", &new_path).map_err(|err| format!("failed to update user PATH: {err}"))?;
-
-    broadcast_environment_change();
-
-    Ok(PathModification {
-        entry,
-        modified_by_lexicon: true,
-        method: "registry".to_string(),
-        location: "HKCU\\Environment\\Path".to_string(),
-    })
-}
-
-#[cfg(target_os = "windows")]
-fn broadcast_environment_change() {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
-    };
-
-    let param: Vec<u16> = OsStr::new("Environment").encode_wide().chain(std::iter::once(0)).collect();
-    let mut result: usize = 0;
-    unsafe {
-        SendMessageTimeoutW(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0,
-            param.as_ptr() as isize,
-            SMTO_ABORTIFHUNG,
-            5000,
-            &mut result as *mut usize,
-        );
     }
 }
