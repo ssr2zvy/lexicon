@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PATH="/usr/local/cargo/bin:${PATH}"
+
 LEXICON_ROOT="${LEXICON_ROOT:-/lexicon}"
 REPO_DIR="${REPO_DIR:-$LEXICON_ROOT}"
 

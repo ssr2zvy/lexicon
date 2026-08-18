@@ -5,12 +5,16 @@
 - copy `build_and_bundle/mza_artifact.toml`, created per mza documentation, into `build_and_bundle/mza/artifact.toml`; the current .toml will output created artifacts to `lexicon/artifacts/`
 - Run the entrypoint script within `mza/`. As per mza documentation, the entrypoint is `make-artifact.sh` for Unix-based systems and `make-artifact.ps1` for Windows
 
-# Test Container
+# Containerization
 
-The local container workflow is documented in [test-container/README.md](test-container/README.md).
+Container definitions live under [containerization/](containerization/):
 
-Use the repository root as the Podman build context, not the `test-container` folder itself. This is the important concept behind the working build command:
+- [containerization/test-container/README.md](containerization/test-container/README.md) — for developing, testing, and releasing the Lexicon project itself. Mounts the whole repo and builds Lexicon from source, giving you a persistent, working Rust/Zig toolchain.
+- [containerization/lexicon-container/README.md](containerization/lexicon-container/README.md) — for using the Lexicon project. Bakes a single, already-built bundle tar.xz into the image and installs it at build time; never needs the Rust toolchain at runtime.
 
-- `podman build -f test-container/Containerfile -t lexicon-local-image .`
+Use the repository root as the Podman build context, not the container's own folder. This is the important concept behind the working build commands:
 
-This keeps the repo available to the builder and allows the Containerfile to copy `test-container/entrypoint.sh` from the root context correctly while the container itself runs with the repo mounted at `/lexicon`.
+- `podman build -f containerization/test-container/Containerfile -t lexicon-local-test-image .`
+- `podman build -f containerization/lexicon-container/Containerfile --build-arg BUNDLE_TAR=<path-to-tar.xz> -t lexicon-local-image .`
+
+This keeps the repo available to the builder and allows each Containerfile to copy its own `entrypoint.sh` from the root context correctly.

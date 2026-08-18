@@ -1,7 +1,7 @@
 # Generic container definition for Docker or Podman.
 # Build from the repository root:
-#   docker build -f test-container/Containerfile -t lexicon-local .
-#   podman build -f test-container/Containerfile -t lexicon-local .
+#   docker build -f containerization/test-container/Containerfile -t lexicon-local .
+#   podman build -f containerization/test-container/Containerfile -t lexicon-local .
 #
 # Run long-lived workspace container with the repo mounted at runtime:
 #   docker run -d --name lexicon-local -v "$PWD":/lexicon --workdir /lexicon lexicon-local
@@ -11,6 +11,10 @@
 #   docker exec -it lexicon-local bash -lc 'cd /lexicon && bash automation/build_bundle_install/build_bundle_install.sh skip'
 
 FROM docker.io/library/rust:1-slim-bookworm
+
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+# Login shells (bash -l) re-source /etc/profile and would otherwise drop the ENV PATH above.
+RUN echo 'export PATH="/usr/local/cargo/bin:$PATH"' > /etc/profile.d/cargo-path.sh
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash curl xz-utils tar ca-certificates build-essential \
@@ -30,7 +34,7 @@ WORKDIR /lexicon
 # so the runtime bind mount can overlay cleanly without rootless overlay mount issues.
 RUN mkdir -p /lexicon
 
-COPY test-container/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY containerization/test-container/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

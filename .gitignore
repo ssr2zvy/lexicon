@@ -4,6 +4,8 @@ workspace/
 # outputs
 artifacts/
 target/
+bundles/
 
 # automation
 mza/
+bundles/
