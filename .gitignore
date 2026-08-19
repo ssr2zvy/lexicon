@@ -1,11 +1,12 @@
 # host machine
 workspace/
+sources/
 
 # outputs
-artifacts/
-target/
-bundles/
+**/artifacts/
+**/target/
+**/bundles/
 
 # automation
-mza/
-bundles/
+**/mza/
+**/bundles/

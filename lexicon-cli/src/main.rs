@@ -1,11 +1,12 @@
-use std::env;
-use std::process::Command;
+mod cli;
+
+use cli::{dispatch, Cli};
 use clap::Parser;
 
-#[derive(Parser)]
-#[command(name = "lexicon", version, about = "Lexicon: make data", )]
-
-struct Cli {}
 fn main() {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+    if let Err(err) = dispatch(cli) {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
 }
