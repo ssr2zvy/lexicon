@@ -2,3 +2,10 @@
 name = "lexicon-framework"
 version = "0.1.0-LOCALSNAPSHOT"
 edition = "2024"
+
+[lib]
+path = "core/src/lib.rs"
+
+[[bin]]
+name = "lexicon-framework"
+path = "src/main.rs"

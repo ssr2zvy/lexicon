@@ -1,85 +1,86 @@
-use clap::{ArgGroup, Parser};
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug, Clone)]
-#[command(
-    name = "source",
-    about = "Create or register a source implementation.",
-    group(
-        ArgGroup::new("source_action")
-            .required(true)
-            .args(["draft", "add"])
-    )
-)]
+#[command(name = "source", about = "Create a new source definition and project scaffold.")]
 pub struct SourceCommand {
+    #[command(subcommand)]
+    pub action: SourceAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SourceAction {
+    New(NewSourceCommand),
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct NewSourceCommand {
     pub source_name: String,
 
-    #[arg(long, help = "Create the required source structure and scaffolding.", group = "source_action")]
-    pub draft: bool,
-
-    #[arg(long, help = "Locate, compile, and verify the source implementation.", group = "source_action")]
-    pub add: bool,
+    #[arg(
+        long,
+        default_value = "http",
+        help = "Acquisition protocol for the new source. Only http is supported right now."
+    )]
+    pub protocol: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SourceAction {
-    Draft(String),
-    Add(String),
-}
-
-impl SourceCommand {
-    pub fn action(&self) -> SourceAction {
-        if self.draft {
-            SourceAction::Draft(self.source_name.clone())
-        } else if self.add {
-            SourceAction::Add(self.source_name.clone())
+impl NewSourceCommand {
+    pub fn normalized_protocol(&self) -> Result<String, String> {
+        let value = self.protocol.trim();
+        if value.eq_ignore_ascii_case("http") {
+            Ok("http".to_owned())
         } else {
-            unreachable!("source action is required by clap validation")
+            Err(format!(
+                "unsupported protocol '{}'; only 'http' is currently supported for source creation",
+                self.protocol
+            ))
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{SourceAction, SourceCommand};
     use crate::cli::{Cli, RootCommand};
     use clap::Parser;
 
     #[test]
-    fn parses_draft_source_command() {
-        let cli = Cli::try_parse_from([
-            "lexicon",
-            "source",
-            "example-source",
-            "--draft",
-        ])
-        .expect("lexicon source --draft should parse");
+    fn parses_new_source_command() {
+        let cli = Cli::try_parse_from(["lexicon", "source", "new", "example-source"])
+            .expect("lexicon source new should parse");
 
         match cli.command {
-            Some(RootCommand::Source(command)) => {
+            Some(RootCommand::Source(SourceCommand {
+                action: SourceAction::New(command),
+            })) => {
                 assert_eq!(command.source_name, "example-source");
-                assert!(command.draft);
-                assert!(!command.add);
+                assert_eq!(command.protocol, "http");
             }
-            other => panic!("expected Source subcommand, got {other:?}"),
+            other => panic!("expected Source::New subcommand, got {other:?}"),
         }
     }
 
     #[test]
-    fn parses_add_source_command() {
+    fn parses_new_source_command_with_protocol_flag() {
         let cli = Cli::try_parse_from([
             "lexicon",
             "source",
+            "new",
             "example-source",
-            "--add",
+            "--protocol",
+            "http",
         ])
-        .expect("lexicon source --add should parse");
+        .expect("lexicon source new --protocol http should parse");
 
         match cli.command {
-            Some(RootCommand::Source(command)) => {
+            Some(RootCommand::Source(SourceCommand {
+                action: SourceAction::New(command),
+            })) => {
                 assert_eq!(command.source_name, "example-source");
-                assert!(!command.draft);
-                assert!(command.add);
+                assert_eq!(command.protocol, "http");
+                assert_eq!(command.normalized_protocol().unwrap(), "http");
             }
-            other => panic!("expected Source subcommand, got {other:?}"),
+            other => panic!("expected Source::New subcommand, got {other:?}"),
         }
     }
 }
