@@ -278,7 +278,7 @@ fn format_impl_cargo_toml(package_name: &str) -> String {
     out.push_str("[dependencies]\n");
     out.push_str("lexicon-framework-core = {\n");
     out.push_str("    git = \"https://github.com/ssr2zvy/lexicon\",\n");
-    out.push_str("    tag = \"v0.1.1\"\n");
+    out.push_str("    tag = \"v0.1.2\"\n");
     out.push_str("}\n");
     out
 }
@@ -340,7 +340,7 @@ mod tests {
 
         assert!(manifest.contains("name = \"example-source-get-raw-data\""));
         assert!(manifest.contains("git = \"https://github.com/ssr2zvy/lexicon\""));
-        assert!(manifest.contains("tag = \"v0.1.1\""));
+        assert!(manifest.contains("tag = \"v0.1.2\""));
         assert!(!manifest.contains("tag = \"v0.1.0\""));
         assert!(!manifest.contains("/workspaces/lexicon"));
     }
