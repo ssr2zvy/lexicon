@@ -1,39 +1,27 @@
-# Current status
+The next micro step is not the HTTP call yet. First, make HttpAcquisitionContext know where it must store transactions.
 
-## Verified contract update
-The HTTP acquisition contract has been corrected to the context-based form:
+Use this runtime contract:
 
-```rust
-pub struct HttpAcquisitionContext;
+1. lexicon-framework launches the source executable with:
 
-pub trait HttpAcquisition {
-    fn acquire(
-        &self,
-        context: &mut HttpAcquisitionContext,
-    ) -> Result<(), String>;
+LEXICON_SOURCE_DIRECTORY=<absolute source directory>
+
+2. run_http_source reads that variable and constructs:
+
+pub struct HttpAcquisitionContext {
+    source_directory: PathBuf,
+    raw_data_directory: PathBuf,
 }
-```
 
-The shared runtime helper now constructs the context and calls:
+where:
 
-```rust
-let mut context = HttpAcquisitionContext;
-acquisition.acquire(&mut context)
-```
+raw_data_directory = <source-directory>/data/raw
 
-The generated HTTP source template in [lexicon-framework/src/main.rs](lexicon-framework/src/main.rs) was updated to implement `acquire` instead of the old `run` method.
+3. The generated source implementation receives the populated context without reading the environment variable itself.
+4. Reject missing, relative, or invalid source-directory paths with a clear error.
 
-## Release/tag status
-The portable generated dependency is pinned to the current public tag, not a local checkout path. The generated manifests now target the released tag `v0.1.2`.
+Success criterion: a Core test provides a temporary source directory, constructs the context through the runtime helper, and confirms its raw-data path resolves to:
 
-## Validation status
-Fresh validation was run against a newly initialized external project in `/tmp`:
+<temporary-source>/data/raw
 
-- `lexicon init my-data-project` succeeded
-- `lexicon source new example-source` succeeded
-- both generated source crates passed `cargo check`
-- generated manifests contained the git-tagged dependency with `tag = "v0.1.2"`
-- no `/workspaces/lexicon` path remained in generated manifests
-
-## Current progress
-The contract fix and external-project validation are complete. The remaining next behavioral step is to give `HttpAcquisitionContext` its first real operation: making and recording an HTTP request in a concrete runtime flow.
+After that, implement transaction recording with fake request/response bytes. Add real networking only after the storage behavior works independently.
