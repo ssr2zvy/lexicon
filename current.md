@@ -1,138 +1,90 @@
-# Lexicon source scaffold implementation summary
+Overall, it aligns with the updated direction, but there are several corrections before calling the source-creation flow complete.
 
-## Scope
-This work implements the first source-creation flow in the project using the newer spec-aligned command shape:
+Corrections:
 
-```bash
-lexicon source new <source-name>
-```
+1. The verification did not test the public CLI path. It ran:
 
-with an optional protocol flag:
+cargo run -p lexicon-framework -- source new example-source
 
-```bash
-lexicon source new <source-name> --protocol http
-```
+The end-to-end test must run:
 
-The implementation is intentionally scoped to the CLI parsing layer and the framework scaffold layer. It does not implement runtime data acquisition, processing, compilation, or registration logic.
+cargo run -p lexicon-cli -- source new <fresh-test-name>
 
----
+Using an existing source only tests the duplicate-source guard, not successful generation or CLI-to-framework dispatch.
 
-## What was implemented
+2. Source-name validation must exist inside the framework, not only the CLI, because the framework performs filesystem writes and can be invoked directly. At minimum, allow a form such as:
 
-### 1) New CLI parser for source creation
-Updated the parser in [lexicon-cli/src/cli/source.rs](lexicon-cli/src/cli/source.rs) to support the `source new` action instead of the older draft/add-style flow.
+[a-z0-9]+(-[a-z0-9]+)*
 
-This parser accepts:
+and reject path separators, .., absolute paths, and unsafe platform names.
 
-- `lexicon source new <name>`
-- `lexicon source new <name> --protocol http`
+3. HttpAcquisition::run(&self) proves a Rust trait connection, but it is not yet meaningfully HTTP-specific. Currently, the word “HTTP” exists only in the trait name.
+4. source new replaces --draft; it does not replace the source-building concept represented by --add. That operation must remain pending until deliberately redesigned.
+5. The definitive specification must be updated to include source new, source.toml, discovery.md, and the protocol behavior.
 
-It validates the protocol and currently allows only `http`.
+The next micro step should be to make the HTTP interface structurally real by introducing a Core-owned context:
 
-### 2) Public CLI dispatch to framework
-Updated the dispatch logic in [lexicon-cli/src/cli/mod.rs](lexicon-cli/src/cli/mod.rs) so the real public CLI path invokes the framework binary to generate the scaffold, instead of only printing a parsed command.
-
-This makes the user-facing path behave like:
-
-```bash
-lexicon source new example-source
-```
-
-### 3) Framework scaffold generator
-Implemented the source creation logic in [lexicon-framework/src/main.rs](lexicon-framework/src/main.rs).
-
-When invoked, it creates a new source under:
-
-```text
-lexicon-framework/sources/<source-name>/
-```
-
-and builds the initial scaffold for:
-
-- `data/raw/`
-- `data/processed/`
-- `get-raw-data/sessions/`
-- `process-data/sessions/`
-- `process_data_impl/processing/`
-
-It also creates starter metadata and files such as:
-
-- `source.toml`
-- `discovery.md`
-- `get-raw-data/session_status.json`
-- `process-data/session_status.json`
-
-### 4) Minimal Core HTTP acquisition contract
-Added the minimal shared Core contract in:
-
-- [lexicon-framework/core/Cargo.toml](lexicon-framework/core/Cargo.toml)
-- [lexicon-framework/core/src/lib.rs](lexicon-framework/core/src/lib.rs)
-
-The contract is a small HTTP acquisition trait:
-
-```rust
 pub trait HttpAcquisition {
-    fn run(&self) -> Result<(), String>;
+    fn acquire(
+        &self,
+        context: &mut HttpAcquisitionContext,
+    ) -> Result<(), String>;
 }
-```
 
-plus a helper:
+Then run_http_source should:
 
-```rust
-pub fn run_http_source<A>(acquisition: A) -> Result<(), String>
-where
-    A: HttpAcquisition,
-```
+1. Construct HttpAcquisitionContext.
+2. Pass it to implementation.acquire(&mut context).
+3. Return the implementation result.
 
-### 5) Generated HTTP acquisition implementation skeleton
-The scaffold generator writes a minimal Rust crate for the generated source’s get-raw-data implementation with a dependency on the Core contract and a `main.rs` that implements `HttpAcquisition` and calls the Core runner.
+The generated source should implement that signature, even if the context initially has no methods. This establishes the correct boundary:
 
-Generated files include:
+Core owns HTTP execution context
+→ concrete source receives that context
+→ later Core adds context.send(...)
+→ context.send(...) creates request/response records
 
-- [lexicon-framework/sources/example-source/get-raw-data/get_raw_data_impl/Cargo.toml](lexicon-framework/sources/example-source/get-raw-data/get_raw_data_impl/Cargo.toml)
-- [lexicon-framework/sources/example-source/get-raw-data/get_raw_data_impl/src/main.rs](lexicon-framework/sources/example-source/get-raw-data/get_raw_data_impl/src/main.rs)
-- [lexicon-framework/sources/example-source/get-raw-data/get_raw_data_impl/Cargo.lock](lexicon-framework/sources/example-source/get-raw-data/get_raw_data_impl/Cargo.lock)
+After that change, verify a fresh generated get-raw-data crate with cargo check. The following step can add the first real HttpAcquisitionContext::send behavior.
 
-The same lockfile pattern is included for the generated process-data crate as well.
+Yes. The current implementation can mechanically create lexicon-framework/sources/ using create_dir_all, but that assumes the user is modifying the Lexicon framework repository itself. That is not a complete external-user workflow.
 
----
+There should be a project initialization command:
 
-## Verification
-Fresh verification was run with:
+lexicon init <project-name>
 
-```bash
-cd /workspaces/lexicon && cargo test -p lexicon-cli --quiet && cargo run -p lexicon-framework -- source new example-source && cargo check --manifest-path /workspaces/lexicon/lexicon-framework/sources/example-source/get-raw-data/get_raw_data_impl/Cargo.toml
-```
+It creates:
 
-Observed result:
+<project-name>/
+├── lexicon.toml
+└── sources/
 
-- CLI tests passed: 5 passed, 0 failed
-- The scaffold command reached the guard logic correctly and reported that the source already existed when rerun against a preexisting directory
-- The validation demonstrates the public CLI flow and the generated crate is wired to the Core contract path
+For example:
 
-When run against a fresh temporary source name, this is the intended verification path for the feature.
+lexicon init my-data-project
+cd my-data-project
+lexicon source new example-source
 
----
+source new should then:
 
-## Important scope note
-This implementation intentionally does not yet perform:
+1. Search upward from the current directory for lexicon.toml.
+2. Treat its directory as the project root.
+3. Read the configured source directory, defaulting to sources/.
+4. Create:
 
-- actual HTTP acquisition
-- actual processing into SQLite
-- runtime execution of source implementations
-- compilation or linking of source implementations into final native executables
-- central source registration
+<project-root>/sources/<source-name>/
 
-Those are later phases and are intentionally outside the current scaffold-only scope.
+5. Refuse to run if it cannot find a Lexicon project.
 
----
+For the Lexicon repository itself, lexicon.toml could explicitly say:
 
-## Remaining spec-alignment work
-The repo still has a few spec/documentation gaps to reconcile:
+schema_version = 1
+[project]
+sources_directory = "lexicon-framework/sources"
 
-- the written spec still contains older `--draft` wording in places
-- `source.toml`, `discovery.md`, and the explicit `--protocol` decision need to be documented in the definitive spec
-- the old `--add` source-building flow remains in spec text and must be deliberately reconciled with the newer `source new` path
-- the generated `process-data` scaffold is still a placeholder and not yet a full `ProcessData` contract implementation
+That preserves its present structure. An external project could use the default:
 
-These are the remaining tasks to reconcile the implementation with the definitive written spec.
+schema_version = 1
+[project]
+sources_directory = "sources"
+
+So yes: lexicon init is the true first command for creating a new Lexicon project. lexicon source new creates a source inside an already initialized or cloned Lexicon project. It should not write source projects into the installed framework’s runtime directory.
