@@ -1,10 +1,16 @@
+pub struct HttpAcquisitionContext;
+
 pub trait HttpAcquisition {
-    fn run(&self) -> Result<(), String>;
+    fn acquire(
+        &self,
+        context: &mut HttpAcquisitionContext,
+    ) -> Result<(), String>;
 }
 
 pub fn run_http_source<A>(acquisition: A) -> Result<(), String>
 where
     A: HttpAcquisition,
 {
-    acquisition.run()
+    let mut context = HttpAcquisitionContext;
+    acquisition.acquire(&mut context)
 }

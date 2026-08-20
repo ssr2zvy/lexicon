@@ -50,13 +50,22 @@ This scaffold is produced by the generation logic in [lexicon-framework/src/main
 The shared core contract in [lexicon-framework/core/src/lib.rs](lexicon-framework/core/src/lib.rs) defines the minimal trait-based HTTP acquisition boundary:
 
 ```rust
+pub struct HttpAcquisitionContext;
+
 pub trait HttpAcquisition {
-    fn run(&self) -> Result<(), String>;
+    fn acquire(
+        &self,
+        context: &mut HttpAcquisitionContext,
+    ) -> Result<(), String>;
 }
 
 pub fn run_http_source<A>(acquisition: A) -> Result<(), String>
 where
     A: HttpAcquisition,
+{
+    let mut context = HttpAcquisitionContext;
+    acquisition.acquire(&mut context)
+}
 ```
 
 The corresponding crate metadata is in [lexicon-framework/core/Cargo.toml](lexicon-framework/core/Cargo.toml).
@@ -68,7 +77,7 @@ The scaffold generator writes manifests that depend on the shared core crate via
 [dependencies]
 lexicon-framework-core = {
     git = "https://github.com/ssr2zvy/lexicon",
-    tag = "v0.1.0"
+    tag = "v0.1.1"
 }
 ```
 

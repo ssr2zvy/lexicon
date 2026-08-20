@@ -278,19 +278,21 @@ fn format_impl_cargo_toml(package_name: &str) -> String {
     out.push_str("[dependencies]\n");
     out.push_str("lexicon-framework-core = {\n");
     out.push_str("    git = \"https://github.com/ssr2zvy/lexicon\",\n");
-    out.push_str("    tag = \"v0.1.0\"\n");
+    out.push_str("    tag = \"v0.1.1\"\n");
     out.push_str("}\n");
     out
 }
 
 fn format_get_raw_data_main(source_name: &str) -> String {
     let mut out = String::new();
-    out.push_str("use lexicon_framework_core::{run_http_source, HttpAcquisition};\n\n");
+    out.push_str("use lexicon_framework_core::{run_http_source, HttpAcquisition, HttpAcquisitionContext};\n\n");
     out.push_str("struct SourceImpl;\n\n");
     out.push_str("impl HttpAcquisition for SourceImpl {\n");
-    out.push_str("    fn run(&self) -> Result<(), String> {\n");
+    out.push_str(
+        "    fn acquire(&self, context: &mut HttpAcquisitionContext) -> Result<(), String> {\n",
+    );
     out.push_str(&format!(
-        "        println!(\"{source_name}: HTTP acquisition scaffold is ready\");\n"
+        "        let _ = context;\n        println!(\"{source_name}: HTTP acquisition scaffold is ready\");\n"
     ));
     out.push_str("        Ok(())\n");
     out.push_str("    }\n");
@@ -330,16 +332,26 @@ fn format_cargo_lockfile() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_impl_cargo_toml;
+    use super::{format_get_raw_data_main, format_impl_cargo_toml};
 
     #[test]
-    fn generated_impl_manifest_uses_pinned_portable_core_dependency() {
+    fn generated_impl_manifest_uses_new_portable_core_tag() {
         let manifest = format_impl_cargo_toml("example-source-get-raw-data");
 
         assert!(manifest.contains("name = \"example-source-get-raw-data\""));
         assert!(manifest.contains("git = \"https://github.com/ssr2zvy/lexicon\""));
-        assert!(manifest.contains("tag = \"v0.1.0\""));
+        assert!(manifest.contains("tag = \"v0.1.1\""));
+        assert!(!manifest.contains("tag = \"v0.1.0\""));
         assert!(!manifest.contains("/workspaces/lexicon"));
+    }
+
+    #[test]
+    fn generated_http_template_uses_context_based_acquire_contract() {
+        let source = format_get_raw_data_main("example-source");
+
+        assert!(source.contains("HttpAcquisitionContext"));
+        assert!(source.contains("fn acquire(&self, context: &mut HttpAcquisitionContext)"));
+        assert!(source.contains("if let Err(error) = run_http_source(source)"));
     }
 }
 
