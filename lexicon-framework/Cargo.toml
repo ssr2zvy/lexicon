@@ -3,6 +3,10 @@ name = "lexicon-framework"
 version = "0.1.0-LOCALSNAPSHOT"
 edition = "2024"
 
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
 [lib]
 path = "core/src/lib.rs"
 

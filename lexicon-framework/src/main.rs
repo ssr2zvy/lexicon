@@ -1,6 +1,18 @@
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct LexiconProjectConfig {
+    project: Option<ProjectSection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectSection {
+    sources_directory: Option<String>,
+}
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -51,8 +63,10 @@ fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), Str
     validate_source_name(source_name)?;
     validate_protocol(protocol)?;
 
-    let workspace_root = locate_workspace_root()?;
-    let source_root = workspace_root.join("lexicon-framework").join("sources");
+    let project_root = find_project_root(&env::current_dir().map_err(|error| {
+        format!("failed to determine current directory: {error}")
+    })?)?;
+    let source_root = configured_sources_directory(&project_root)?;
     let source_dir = source_root.join(source_name);
 
     if source_dir.exists() {
@@ -172,16 +186,18 @@ fn validate_protocol(protocol: &str) -> Result<(), String> {
     }
 }
 
-fn locate_workspace_root() -> Result<PathBuf, String> {
-    let mut current = env::current_dir()
-        .map_err(|error| format!("failed to determine current directory: {error}"))?;
+fn find_project_root(start_dir: &Path) -> Result<PathBuf, String> {
+    let mut current = start_dir.to_path_buf();
 
     loop {
-        let candidate = current.join("Cargo.toml");
-        if candidate.is_file() {
-            let contents = fs::read_to_string(&candidate)
-                .map_err(|error| format!("failed to read {}: {error}", candidate.display()))?;
-            if contents.contains("[workspace]") {
+        let config_path = current.join("lexicon.toml");
+        if config_path.is_file() {
+            let contents = fs::read_to_string(&config_path)
+                .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
+            let parsed: LexiconProjectConfig = toml::from_str(&contents).map_err(|error| {
+                format!("failed to parse {}: {error}", config_path.display())
+            })?;
+            if parsed.project.is_some() || contents.contains("[project]") {
                 return Ok(current);
             }
         }
@@ -192,7 +208,38 @@ fn locate_workspace_root() -> Result<PathBuf, String> {
         }
     }
 
-    Err("could not locate the workspace root from the current directory".to_string())
+    Err("could not find a lexicon.toml project file in the current directory or any parent directory; run `lexicon init <project-name>` first".to_string())
+}
+
+fn configured_sources_directory(project_root: &Path) -> Result<PathBuf, String> {
+    let config_path = project_root.join("lexicon.toml");
+    let contents = fs::read_to_string(&config_path)
+        .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
+    let parsed: LexiconProjectConfig = toml::from_str(&contents)
+        .map_err(|error| format!("failed to parse {}: {error}", config_path.display()))?;
+
+    let configured = parsed
+        .project
+        .and_then(|project| project.sources_directory)
+        .unwrap_or_else(|| "sources".to_string());
+
+    let path = Path::new(&configured);
+    if path.is_absolute() {
+        return Err(format!(
+            "invalid sources_directory '{}' in {}: must be a relative path",
+            configured,
+            config_path.display()
+        ));
+    }
+    if path.components().any(|component| matches!(component, Component::ParentDir | Component::RootDir)) {
+        return Err(format!(
+            "invalid sources_directory '{}' in {}: must remain within the project root",
+            configured,
+            config_path.display()
+        ));
+    }
+
+    Ok(project_root.join(path))
 }
 
 fn format_source_toml(source_name: &str, protocol: &str) -> String {
@@ -229,7 +276,10 @@ fn format_impl_cargo_toml(package_name: &str) -> String {
     out.push_str("version = \"0.1.0\"\n");
     out.push_str("edition = \"2024\"\n\n");
     out.push_str("[dependencies]\n");
-    out.push_str("lexicon-framework-core = { path = \"../../../../core\" }\n");
+    out.push_str("lexicon-framework-core = {\n");
+    out.push_str("    git = \"https://github.com/ssr2zvy/lexicon\",\n");
+    out.push_str("    tag = \"v0.1.0\"\n");
+    out.push_str("}\n");
     out
 }
 
@@ -276,6 +326,21 @@ fn format_cargo_lockfile() -> String {
     out.push_str("# It is not intended for manual editing.\n");
     out.push_str("version = 3\n");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_impl_cargo_toml;
+
+    #[test]
+    fn generated_impl_manifest_uses_pinned_portable_core_dependency() {
+        let manifest = format_impl_cargo_toml("example-source-get-raw-data");
+
+        assert!(manifest.contains("name = \"example-source-get-raw-data\""));
+        assert!(manifest.contains("git = \"https://github.com/ssr2zvy/lexicon\""));
+        assert!(manifest.contains("tag = \"v0.1.0\""));
+        assert!(!manifest.contains("/workspaces/lexicon"));
+    }
 }
 
 fn format_session_status_json(source_name: &str, stage: &str) -> String {

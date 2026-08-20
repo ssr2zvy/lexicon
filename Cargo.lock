@@ -212,6 +212,14 @@ dependencies = [
 [[package]]
 name = "lexicon-framework"
 version = "0.1.0-LOCALSNAPSHOT"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "lexicon-framework-core"
+version = "0.1.0"
 
 [[package]]
 name = "libc"

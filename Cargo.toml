@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "lexicon-cli",
     "lexicon-framework",
+    "lexicon-framework/core",
     "lexicon-bundle",
 ]
 

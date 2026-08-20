@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -5,10 +6,12 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 pub mod build;
 pub mod data;
+pub mod init;
 pub mod source;
 
 pub use build::BuildCommand;
 pub use data::{DataCommand, DataMode};
+pub use init::InitCommand;
 pub use source::{SourceAction, SourceCommand};
 
 #[derive(Parser, Debug, Clone)]
@@ -27,6 +30,7 @@ pub struct Cli {
 pub enum RootCommand {
     Data(DataCommand),
     Source(SourceCommand),
+    Init(InitCommand),
     Build(BuildCommand),
 }
 
@@ -81,6 +85,36 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                     Ok(())
                 }
             }
+        }
+        Some(RootCommand::Init(command)) => {
+            let project_root = std::env::current_dir()
+                .map_err(|error| format!("failed to read current directory: {error}"))?
+                .join(&command.project_name);
+            if project_root.exists() {
+                return Err(format!(
+                    "project '{}' already exists at {}",
+                    command.project_name,
+                    project_root.display()
+                ));
+            }
+            fs::create_dir_all(project_root.join("sources")).map_err(|error| {
+                format!(
+                    "failed to create project '{}' at {}: {error}",
+                    command.project_name,
+                    project_root.display()
+                )
+            })?;
+            fs::write(
+                project_root.join("lexicon.toml"),
+                "schema_version = 1\n\n[project]\nsources_directory = \"sources\"\n",
+            )
+            .map_err(|error| format!("failed to write {}: {error}", project_root.display()))?;
+            println!(
+                "Initialized Lexicon project '{}' at {}",
+                command.project_name,
+                project_root.display()
+            );
+            Ok(())
         }
         Some(RootCommand::Build(_)) => {
             println!("Parsed build command: build");
