@@ -1,139 +1,92 @@
-# Implementation report: `lexicon source new --protocol http`
+# Current task: verify and close `lexicon source new --protocol http`
 
-## Files changed
+## Status entering this task
 
-- [lexicon-cli/src/cli/source.rs](lexicon-cli/src/cli/source.rs)
-- [lexicon-cli/src/cli/mod.rs](lexicon-cli/src/cli/mod.rs)
-- [lexicon-framework/src/main.rs](lexicon-framework/src/main.rs)
-- [lexicon-framework/Cargo.toml](lexicon-framework/Cargo.toml)
-- [Cargo.lock](Cargo.lock)
+The production implementation appears substantially complete, but the previous report did not provide the required executable evidence.
 
-## Exact source-code changes
+Do not redesign or expand the feature.
 
-### CLI parsing contract
+This task is primarily a verification and regression-test pass. Modify production source code only if an executable test exposes a real defect.
 
-In [lexicon-cli/src/cli/source.rs](lexicon-cli/src/cli/source.rs), `NewSourceCommand` was changed to require `--protocol` as a named flag with no default:
+## Command under verification
 
-```rust
-#[derive(Parser, Debug, Clone)]
-pub struct NewSourceCommand {
-    #[arg(value_name = "SOURCE_NAME")]
-    pub source_name: String,
-
-    #[arg(
-        long,
-        value_name = "PROTOCOL",
-        required = true,
-        help = "Acquisition protocol for the new source. Only http is supported right now."
-    )]
-    pub protocol: String,
-}
+```bash
+lexicon source new <source-name> --protocol <protocol>
 ```
 
-This preserves the required CLI shape and rejects `lexicon source new example-source` during Clap parse instead of silently defaulting the protocol.
+Both `<source-name>` and `--protocol <protocol>` must be required.
 
-### Public CLI dispatch flow
-
-In [lexicon-cli/src/cli/mod.rs](lexicon-cli/src/cli/mod.rs), the `RootCommand::Source` branch invokes the framework binary with both values and does not emit a duplicate success line after the framework succeeds. The CLI calls the framework as:
-
-```rust
-Command::new(framework_path)
-    .args([
-        "source",
-        "new",
-        &new_command.source_name,
-        "--protocol",
-        &new_command.protocol,
-    ])
-    .status()
-```
-
-The public CLI path now matches the required contract:
+The only currently supported protocol is:
 
 ```text
-lexicon CLI
-→ parse `source new`
-→ require `source_name`
-→ require `--protocol`
-→ invoke framework
-→ framework validates and scaffolds
-→ framework emits `[lexicon]` output
-→ CLI exits without a second success message
+http
 ```
 
-### Framework validation and atomic scaffold creation
+## Required public behavior
 
-The core implementation in [lexicon-framework/src/main.rs](lexicon-framework/src/main.rs) now does the following in order:
+This must succeed:
 
-1. validates the source name
-2. validates the protocol
-3. locates the containing Lexicon project
-4. resolves the configured `sources_directory`
-5. rejects an existing destination path
-6. creates a unique staging directory under the configured sources dir using `tempfile`
-7. writes the source scaffold into the staging directory
-8. renames the staging directory into the final source path
-9. removes only the staging directory created in the current operation if renaming fails
-
-The key entry flow is:
-
-```rust
-fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), String> {
-    validate_source_name(source_name)?;
-    validate_protocol(protocol)?;
-
-    let project_root = find_project_root(&env::current_dir()?)?;
-    let source_root = configured_sources_directory(&project_root)?;
-    let source_dir = source_root.join(source_name);
-
-    if source_dir.exists() {
-        return Err(format!("source '{}' already exists at {}", source_name, source_dir.display()));
-    }
-
-    let staging = tempfile::Builder::new()
-        .prefix(&format!("{source_name}-"))
-        .tempdir_in(&source_root)?;
-    let staging_path = staging.path().to_path_buf();
-
-    // write scaffold files into staging path
-    // rename staging path into source_dir
-    fs::rename(&staging_path, &source_dir)?;
-    Ok(())
-}
+```bash
+lexicon source new example-source --protocol http
 ```
 
-### TOML serialization and required scaffold contents
+This must fail during CLI parsing because `--protocol` is absent:
 
-The generated `source.toml` is now created through TOML serialization rather than unsafe string interpolation:
-
-```rust
-#[derive(Debug, Serialize)]
-struct SourceTomlDocument {
-    schema_version: u32,
-    source: SourceTomlSection,
-}
-
-#[derive(Debug, Serialize)]
-struct SourceTomlSection {
-    name: String,
-    protocol: String,
-}
-
-fn format_source_toml(source_name: &str, protocol: &str) -> String {
-    let document = SourceTomlDocument {
-        schema_version: 1,
-        source: SourceTomlSection {
-            name: source_name.to_owned(),
-            protocol: protocol.to_owned(),
-        },
-    };
-
-    toml::to_string_pretty(&document)
-        .unwrap_or_else(|error| panic!("failed to serialize source.toml: {error}"))
-}
+```bash
+lexicon source new missing-protocol-source
 ```
 
-This yields:
+This must fail because the protocol is unsupported:
+
+```bash
+lexicon source new unsupported-source --protocol browser
+```
+
+Neither failed command may create its requested source directory.
+
+## First step: inspect existing implementation
+
+Before changing code, inspect:
+
+- `lexicon-cli/src/cli/source.rs`
+- `lexicon-cli/src/cli/mod.rs`
+- `lexicon-framework/src/main.rs`
+- Existing CLI and framework tests
+- Generated source templates
+- Existing atomic staging behavior
+
+Determine which requirements already have executable coverage and which do not.
+
+Do not infer coverage from test totals or function names alone. Read the test bodies.
+
+## Required verification matrix
+
+Every requirement below must be mapped to:
+
+1. An executable test function, or
+2. An explicit end-to-end command and observed result.
+
+Add a regression test where neither currently exists.
+
+### CLI parsing
+
+1. `lexicon source new example-source --protocol http` parses successfully.
+2. `lexicon source new example-source` is rejected by Clap.
+3. `lexicon source new example-source --protocol` is rejected by Clap because the value is missing.
+4. The protocol has no hidden default.
+5. The parsed source name and protocol are passed unchanged to the framework command.
+
+### Validation before mutation
+
+6. An unsupported protocol is rejected before creating any source directory.
+7. An unsafe source name is rejected before creating any source directory.
+8. Running outside a Lexicon project fails without creating source files.
+9. An existing source directory is rejected without changing its existing contents.
+
+### Generated scaffold
+
+10. A valid HTTP source produces the complete required directory structure.
+11. `source.toml` contains:
 
 ```toml
 schema_version = 1
@@ -143,176 +96,331 @@ name = "example-source"
 protocol = "http"
 ```
 
-### HTTP acquisition template
+12. `source.toml` is produced through TOML serialization.
+13. `discovery.md` contains the required discovery and attribution prompts.
+14. The generated HTTP crate implements the context-based `HttpAcquisition::acquire` contract.
+15. The generated HTTP crate calls `run_http_source`.
+16. Generated Cargo manifests contain no machine-local absolute repository paths.
+17. The existing portable Core dependency mechanism remains intact.
+18. The generated process-data crate remains separate from the acquisition protocol.
 
-The generated HTTP acquisition implementation matches the required contract in [lexicon-framework/src/main.rs](lexicon-framework/src/main.rs):
+### Atomicity
 
-```rust
-fn format_get_raw_data_main(source_name: &str) -> String {
-    let source_type = to_pascal_case(source_name);
-    let mut out = String::new();
-    out.push_str("use lexicon_framework_core::{\n");
-    out.push_str("    run_http_source,\n");
-    out.push_str("    HttpAcquisition,\n");
-    out.push_str("    HttpAcquisitionContext,\n");
-    out.push_str("};\n\n");
-    out.push_str(&format!("struct {source_type};\n\n"));
-    out.push_str(&format!("impl HttpAcquisition for {source_type} {{\n"));
-    out.push_str(&format!(
-        "    fn acquire(&self, context: &mut HttpAcquisitionContext) -> Result<(), String> {{\n"
-    ));
-    out.push_str("        let _ = context;\n");
-    out.push_str("        todo!(\"implement HTTP acquisition\")\n");
-    out.push_str("    }\n");
-    out.push_str("}\n\n");
-    out.push_str("fn main() {\n");
-    out.push_str(&format!("    let source = {source_type};\n"));
-    out.push_str("    if let Err(error) = run_http_source(source) {\n");
-    out.push_str("        eprintln!(\"[lexicon] ERROR: {error}\");\n");
-    out.push_str("        std::process::exit(1);\n");
-    out.push_str("    }\n");
-    out.push_str("}\n");
-    out
-}
-```
+19. Source generation occurs in a unique staging directory inside the configured sources directory.
+20. A generation failure leaves no task-created staging directory.
+21. Successful generation leaves no staging directory.
+22. A preexisting unrelated temporary directory is never deleted.
+23. The completed staging directory is renamed into the final source path.
+24. A preexisting source is never overwritten.
 
-### Required output contract
+### Compilation
 
-The framework emits the required `[lexicon]` output and no duplicate CLI success message:
+25. The generated HTTP acquisition crate passes `cargo check`.
+26. The generated process-data crate passes `cargo check`.
 
-```text
-[lexicon] Created source 'example-source' at /tmp/.../sources/example-source
-[lexicon] Files to edit next:
-[lexicon]   - /tmp/.../sources/example-source/source.toml
-[lexicon]   - /tmp/.../sources/example-source/discovery.md
-[lexicon]   - /tmp/.../sources/example-source/get-raw-data/get_raw_data_impl/src/main.rs
-[lexicon]   - /tmp/.../sources/example-source/process-data/process_data_impl/src/main.rs
-```
+### Public output
 
-## Tests and verification
+27. The real public CLI reaches the framework scaffold implementation.
+28. The framework is the sole producer of source-creation success output.
+29. Every Lexicon-owned success line begins with `[lexicon]`.
+30. The CLI does not print a duplicate success line.
+31. Failure output follows the established `[lexicon] ERROR:` contract without duplicate reporting.
 
-I ran:
+## Required automated-test quality
 
-```bash
-cd /workspaces/lexicon && cargo test -p lexicon-cli -p lexicon-framework -- --nocapture
-```
+Tests must execute behavior whenever practical.
 
-Fresh results:
-
-- `lexicon-cli`: 13 passed, 0 failed
-- `lexicon-framework` unit tests: 8 passed, 0 failed
-- `lexicon-framework` cargo-core tests: 1 passed, 0 failed
-- total targeted verification: all passed
-
-I also ran the real public command against a temporary Lexicon project:
-
-```bash
-cd /tmp/... && /workspaces/lexicon/target/debug/lexicon-cli source new example-source --protocol http
-```
-
-Observed output:
+Do not claim executable coverage from tests that only search production source files for strings such as:
 
 ```text
-[lexicon] Created source 'example-source' at /tmp/.../sources/example-source
-[lexicon] Files to edit next:
-[lexicon]   - /tmp/.../sources/example-source/source.toml
-[lexicon]   - /tmp/.../sources/example-source/discovery.md
-[lexicon]   - /tmp/.../sources/example-source/get-raw-data/get_raw_data_impl/src/main.rs
-[lexicon]   - /tmp/.../sources/example-source/process-data/process_data_impl/src/main.rs
+"Ok(())"
+"println!"
+"required = true"
 ```
 
-This confirms the public CLI path, required protocol validation, and framework-owned output contract are all working.
+Source-text assertions are acceptable for validating generated template contents, but not as substitutes for running the CLI parser, dispatch path, filesystem behavior, or generated Cargo projects.
 
-## Completion status
+Tests involving filesystem mutation must use isolated temporary directories.
 
-The task is complete for the required `lexicon source new --protocol http` scope. The code and the validation pass according to the repository task contract.
+Tests must verify both the returned result and the resulting filesystem state.
 
+## Required full test command
 
-Required tests
+Run:
 
-Add or update executable tests covering all of the following:
+```bash
+cargo test -p lexicon-cli -p lexicon-framework -- --nocapture
+```
 
-1. lexicon source new example-source --protocol http parses successfully.
-2. Omitting --protocol is rejected by Clap.
-3. Omitting the protocol value is rejected by Clap.
-4. An unsupported protocol is rejected before filesystem mutation.
-5. An unsafe source name is rejected before filesystem mutation.
-6. Running outside a Lexicon project fails without creating files.
-7. A valid HTTP source produces the complete required directory structure.
-8. source.toml contains the correct schema version, source name, and protocol.
-9. The HTTP implementation template uses the context-based acquire contract.
-10. Generated manifests contain no machine-local absolute repository paths.
-11. Both generated Rust crates pass cargo check.
-12. An existing source directory is not overwritten or modified.
-13. A failed generation leaves no task-created staging directory.
-14. A successful generation leaves no staging directory.
-15. The public CLI reaches the real framework scaffold behavior.
-16. Public successful output contains the required [lexicon] lines.
-17. The CLI does not print a duplicate success message.
+Report the exact number of passed and failed tests for:
 
-Tests must exercise behavior rather than merely search the source code for expected strings where an executable test is practical.
+- `lexicon-cli`
+- `lexicon-framework`
+- `lexicon-framework-core`, if it is included by the selected packages
 
-End-to-end verification
+Do not report only an aggregate statement such as “all targeted tests passed.”
 
-Create a fresh temporary parent directory and run the actual public flow:
+## Required end-to-end verification
 
-lexicon init <temporary-parent> demo-project
-cd <temporary-parent>/demo-project
-lexicon source new example-source --protocol http
+Build the real binaries first:
 
-Then verify:
+```bash
+cargo build -p lexicon-cli -p lexicon-framework
+```
 
+Create a fresh temporary parent directory:
+
+```bash
+verification_root="$(mktemp -d)"
+```
+
+Resolve the real binaries from the repository build output:
+
+```bash
+repo_root="$(git rev-parse --show-toplevel)"
+cli_binary="$repo_root/target/debug/lexicon-cli"
+framework_binary="$repo_root/target/debug/lexicon-framework"
+```
+
+Initialize a fresh project using the public CLI:
+
+```bash
+"$cli_binary" init "$verification_root" demo-project
+```
+
+Enter the created project:
+
+```bash
+cd "$verification_root/demo-project"
+```
+
+Create a source through the real public CLI-to-framework path:
+
+```bash
+LEXICON_FRAMEWORK_PATH="$framework_binary" \
+    "$cli_binary" source new example-source --protocol http
+```
+
+Verify that the source exists:
+
+```bash
+test -d sources/example-source
+test -f sources/example-source/source.toml
+test -f sources/example-source/discovery.md
+test -f sources/example-source/get-raw-data/get_raw_data_impl/Cargo.toml
+test -f sources/example-source/get-raw-data/get_raw_data_impl/src/main.rs
+test -f sources/example-source/process-data/process_data_impl/Cargo.toml
+test -f sources/example-source/process-data/process_data_impl/src/main.rs
+```
+
+## Required generated-crate compilation
+
+Run both commands and report each exit result independently:
+
+```bash
 cargo check --manifest-path \
     sources/example-source/get-raw-data/get_raw_data_impl/Cargo.toml
+```
+
+```bash
 cargo check --manifest-path \
     sources/example-source/process-data/process_data_impl/Cargo.toml
+```
 
-Also execute the missing-protocol case:
+The task is not complete unless both commands succeed.
 
-lexicon source new missing-protocol-source
+## Required missing-protocol verification
 
-It must fail through Clap and must not create:
+Run:
 
-sources/missing-protocol-source/
+```bash
+set +e
+LEXICON_FRAMEWORK_PATH="$framework_binary" \
+    "$cli_binary" source new missing-protocol-source
+missing_protocol_status=$?
+set -e
+```
 
-Execute the unsupported-protocol case:
+Verify:
 
-lexicon source new unsupported-source --protocol browser
+```bash
+test "$missing_protocol_status" -ne 0
+test ! -e sources/missing-protocol-source
+```
 
-It must fail and must not create:
+Record:
 
-sources/unsupported-source/
+- The exit status.
+- The relevant Clap error.
+- Confirmation that the source path was not created.
 
-Scope exclusions
+## Required unsupported-protocol verification
+
+Run:
+
+```bash
+set +e
+LEXICON_FRAMEWORK_PATH="$framework_binary" \
+    "$cli_binary" source new unsupported-source --protocol browser
+unsupported_protocol_status=$?
+set -e
+```
+
+Verify:
+
+```bash
+test "$unsupported_protocol_status" -ne 0
+test ! -e sources/unsupported-source
+```
+
+Record:
+
+- The exit status.
+- The relevant Lexicon error.
+- Confirmation that the source path was not created.
+
+## Required existing-source verification
+
+Create a sentinel inside the completed source:
+
+```bash
+printf 'preserve-me\n' > sources/example-source/existing-sentinel.txt
+```
+
+Run the same source command again:
+
+```bash
+set +e
+LEXICON_FRAMEWORK_PATH="$framework_binary" \
+    "$cli_binary" source new example-source --protocol http
+existing_source_status=$?
+set -e
+```
+
+Verify:
+
+```bash
+test "$existing_source_status" -ne 0
+test "$(cat sources/example-source/existing-sentinel.txt)" = "preserve-me"
+```
+
+Confirm that the existing source and its sentinel were not modified or deleted.
+
+## Required staging verification
+
+Before and after successful and failed source-generation attempts, inspect the configured sources directory for task-created staging directories.
+
+Verify that:
+
+- Successful generation leaves none.
+- Unsupported-protocol rejection leaves none.
+- Existing-source rejection leaves none.
+- Unrelated preexisting temporary directories remain unchanged.
+
+If this cannot be verified through an existing automated test, add one.
+
+## Production-code changes
+
+Do not change production source merely to make the report appear complete.
+
+Production changes are permitted only when:
+
+1. A required executable test fails.
+2. The failure demonstrates a real contract violation.
+3. A focused correction is implemented.
+4. The failing test passes afterward.
+5. The full relevant test suite still passes.
+
+If production code changes, report the exact failure that justified each change.
+
+## Scope exclusions
 
 Do not implement or modify:
 
-* Actual HTTP network acquisition.
-* Raw request/response transaction recording.
-* SQLite processing.
-* lexicon source add.
-* lexicon build.
-* Runtime launching of compiled source implementations.
-* MZA.
-* Bundling.
-* Installation or uninstallation.
-* Update behavior.
-* Unrelated init/project-discovery behavior.
+- Actual HTTP requests.
+- Raw transaction recording.
+- SQLite processing.
+- `lexicon source add`.
+- `lexicon build`.
+- Runtime source-executable launching.
+- MZA.
+- Bundling.
+- Installation.
+- Uninstallation.
+- Update behavior.
+- Completed `lexicon init` or project-discovery behavior unless a regression test proves it was broken by this feature.
 
-Required implementation report
+## Required final `current.md` report
 
-After implementation and verification, replace current.md with a function-level report containing:
+After verification, replace this task completely with a clean implementation report.
 
-* Exact files changed.
-* Exact functions and types changed.
-* The final CLI parsing definition.
-* The exact CLI-to-framework call chain.
-* The framework validation and atomic-generation flow.
-* The generated source.toml.
-* The generated HTTP contract implementation shape.
-* Test function names mapped to each requirement.
-* Exact verification commands.
-* Exact test results.
-* Any remaining gap or blocker.
+Do not append the old task instructions after the report.
 
-Do not report the task as complete unless the required protocol is enforced, the scaffold is created atomically, both generated crates compile, and the end-to-end public CLI test succeeds.
+The report must include:
+
+### Files changed
+
+List every file changed during this pass, including:
+
+```text
+current.md
+```
+
+Separate production files from test-only files when applicable.
+
+### Production corrections
+
+For every production-code change, provide:
+
+- The failing executable test or command.
+- The observed incorrect behavior.
+- The exact function corrected.
+- The resulting correct behavior.
+
+If no production changes were required, state that explicitly.
+
+### Test mapping
+
+Provide a table mapping every numbered requirement from 1 through 31 to:
+
+- Exact test function name, or
+- Exact end-to-end command.
+
+Do not use aggregate test totals as a substitute for this mapping.
+
+### Compilation evidence
+
+Report the separate result of:
+
+```text
+get_raw_data_impl cargo check
+process_data_impl cargo check
+```
+
+### End-to-end evidence
+
+Report:
+
+- `lexicon init` result.
+- Valid `source new` result.
+- Missing-protocol exit status and filesystem result.
+- Unsupported-protocol exit status and filesystem result.
+- Existing-source exit status and sentinel result.
+- Staging-directory result.
+- Exact public output.
+- Confirmation that no duplicate success output occurred.
+
+### Final test results
+
+Report the exact commands and package-specific pass/fail totals.
+
+### Completion status
+
+Do not declare completion unless:
+
+- All 31 requirements have executable evidence.
+- Both generated crates compile.
+- All rejection cases leave the filesystem unchanged.
+- Atomic staging behavior is verified.
+- The public output contract is verified.
+- The old task text is not appended to the report.
