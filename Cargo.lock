@@ -232,6 +232,7 @@ name = "lexicon-framework"
 version = "0.1.0-LOCALSNAPSHOT"
 dependencies = [
  "serde",
+ "tempfile",
  "toml",
 ]
 

@@ -74,10 +74,7 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                         .status()
                         .map_err(|error| format!("failed to execute framework binary: {error}"))?;
                     if !status.success() {
-                        return Err(format!(
-                            "framework source scaffold step failed with exit status {}",
-                            status
-                        ));
+                        std::process::exit(status.code().unwrap_or(1));
                     }
                     Ok(())
                 }
@@ -198,7 +195,7 @@ mod tests {
         let output = std::process::Command::new(cli_bin)
             .current_dir(project_root)
             .env("LEXICON_FRAMEWORK_PATH", framework_bin)
-            .args(["source", "new", "example-source"])
+            .args(["source", "new", "example-source", "--protocol", "http"])
             .output()
             .unwrap();
 
@@ -215,7 +212,15 @@ mod tests {
 
     #[test]
     fn dispatch_source_new_produces_only_framework_output() {
-        let cli = Cli::try_parse_from(["lexicon", "source", "new", "example-source"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "lexicon",
+            "source",
+            "new",
+            "example-source",
+            "--protocol",
+            "http",
+        ])
+        .unwrap();
 
         match cli.command {
             Some(RootCommand::Source(SourceCommand {

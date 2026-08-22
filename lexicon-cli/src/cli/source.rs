@@ -14,11 +14,13 @@ pub enum SourceAction {
 
 #[derive(Parser, Debug, Clone)]
 pub struct NewSourceCommand {
+    #[arg(value_name = "SOURCE_NAME")]
     pub source_name: String,
 
     #[arg(
         long,
-        default_value = "http",
+        value_name = "PROTOCOL",
+        required = true,
         help = "Acquisition protocol for the new source. Only http is supported right now."
     )]
     pub protocol: String,
@@ -40,24 +42,14 @@ impl NewSourceCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceAction, SourceCommand};
+    use super::{NewSourceCommand, SourceAction, SourceCommand};
     use crate::cli::{Cli, RootCommand};
     use clap::Parser;
 
     #[test]
-    fn parses_new_source_command() {
-        let cli = Cli::try_parse_from(["lexicon", "source", "new", "example-source"])
-            .expect("lexicon source new should parse");
-
-        match cli.command {
-            Some(RootCommand::Source(SourceCommand {
-                action: SourceAction::New(command),
-            })) => {
-                assert_eq!(command.source_name, "example-source");
-                assert_eq!(command.protocol, "http");
-            }
-            other => panic!("expected Source::New subcommand, got {other:?}"),
-        }
+    fn rejects_new_source_command_when_protocol_is_missing() {
+        let result = Cli::try_parse_from(["lexicon", "source", "new", "example-source"]);
+        assert!(result.is_err(), "--protocol must be required and cannot be omitted");
     }
 
     #[test]
@@ -82,5 +74,15 @@ mod tests {
             }
             other => panic!("expected Source::New subcommand, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_unsupported_protocol_value() {
+        let command = NewSourceCommand {
+            source_name: "example-source".to_owned(),
+            protocol: "browser".to_owned(),
+        };
+
+        assert!(command.normalized_protocol().is_err());
     }
 }

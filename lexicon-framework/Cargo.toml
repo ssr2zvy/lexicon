@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+tempfile = "3"
 
 [lib]
 path = "core/src/lib.rs"
