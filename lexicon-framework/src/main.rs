@@ -172,11 +172,8 @@ fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), Str
         })?;
     }
 
-    let rename_result = fs::rename(&staging_path, &source_dir);
-    let _ = staging.close();
-    if let Err(error) = rename_result {
-        let _ = fs::remove_dir_all(&staging_path);
-        return Err(format!("failed to rename {} to {}: {error}", staging_path.display(), source_dir.display()));
+    if let Err(error) = finalize_source_staging(staging, &source_dir) {
+        return Err(error);
     }
 
     println!("[lexicon] Created source '{}' at {}", source_name, source_dir.display());
@@ -191,6 +188,24 @@ fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), Str
         println!("[lexicon]   - {}", source_dir.join(relative_path).display());
     }
 
+    Ok(())
+}
+
+fn finalize_source_staging(staging: tempfile::TempDir, source_dir: &Path) -> Result<(), String> {
+    let staging_path = staging.path().to_path_buf();
+    let rename_result = fs::rename(&staging_path, source_dir);
+
+    if let Err(error) = rename_result {
+        let _ = fs::remove_dir_all(&staging_path);
+        drop(staging);
+        return Err(format!(
+            "failed to rename {} to {}: {error}",
+            staging_path.display(),
+            source_dir.display()
+        ));
+    }
+
+    drop(staging);
     Ok(())
 }
 
@@ -707,6 +722,59 @@ mod tests {
 
         let result = super::find_descendant_project_root(&root).unwrap();
         assert_eq!(result, Some(nested), "data/raw and data/processed must be ignored while a real nested project under data/ is still detected");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn generated_discovery_markdown_contains_required_prompts() {
+        let markdown = super::format_discovery_markdown("example-source");
+        let required = [
+            "# example-source",
+            "## Source description",
+            "Describe the source and the data it produces.",
+            "## Discovery method",
+            "Document how this source was discovered and why it belongs in this project.",
+            "## Acquisition endpoint or location",
+            "Record the upstream endpoint, dataset, or location used for acquisition.",
+            "## Why HTTP is the correct acquisition protocol",
+            "Explain why HTTP is the correct protocol for this source and how it matches the project contract.",
+            "## Required authentication or access conditions",
+            "List any required credentials, access restrictions, or network constraints.",
+            "## Attribution and usage notes",
+            "Capture attribution, licensing, and usage guidance for this source.",
+            "## Operational observations",
+            "Record operational notes, expected cadence, and troubleshooting observations.",
+        ];
+
+        for fragment in &required {
+            assert!(markdown.contains(fragment), "discovery.md is missing required prompt: {fragment}\n---\n{markdown}");
+        }
+    }
+
+    #[test]
+    fn finalize_source_staging_cleans_up_tempdir_when_rename_fails() {
+        let root = std::env::temp_dir().join(format!("lexicon-stage-cleanup-{}", std::process::id()));
+        let sources_dir = root.join("sources");
+        let source_dir = sources_dir.join("example-source");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&sources_dir).unwrap();
+        fs::write(root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n").unwrap();
+
+        let staging = tempfile::Builder::new()
+            .prefix("example-source-")
+            .tempdir_in(&sources_dir)
+            .unwrap();
+        let staging_path = staging.path().to_path_buf();
+        fs::write(staging_path.join("source.toml"), "schema_version = 1\n").unwrap();
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(source_dir.join("existing.txt"), "preserve-me\n").unwrap();
+
+        let result = super::finalize_source_staging(staging, &source_dir);
+
+        assert!(result.is_err(), "rename should fail when the final directory already exists");
+        assert!(!staging_path.exists(), "staging directory must be removed on rename failure");
+        assert!(source_dir.join("existing.txt").exists(), "existing content must remain untouched");
 
         let _ = fs::remove_dir_all(&root);
     }

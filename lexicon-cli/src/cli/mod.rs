@@ -232,4 +232,78 @@ mod tests {
             other => panic!("expected source new command, got {other:?}"),
         }
     }
+
+    #[test]
+    fn unrelated_preexisting_directory_remains_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        fs::write(project_root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n").unwrap();
+        fs::create_dir_all(project_root.join("sources/preexisting-scratch")).unwrap();
+        fs::write(project_root.join("sources/preexisting-scratch/keep.txt"), "keep-me\n").unwrap();
+
+        let self_exe = std::env::current_exe().unwrap();
+        let cli_bin = self_exe
+            .ancestors()
+            .find_map(|ancestor| {
+                let candidate = ancestor.join("target").join("debug").join("lexicon-cli");
+                candidate.exists().then_some(candidate)
+            })
+            .expect("lexicon-cli binary should exist in the test target directory");
+        let framework_bin = self_exe
+            .ancestors()
+            .find_map(|ancestor| {
+                let candidate = ancestor.join("target").join("debug").join("lexicon-framework");
+                candidate.exists().then_some(candidate)
+            })
+            .expect("lexicon-framework binary should exist in the test target directory");
+
+        let output = std::process::Command::new(cli_bin)
+            .current_dir(project_root)
+            .env("LEXICON_FRAMEWORK_PATH", framework_bin)
+            .args(["source", "new", "example-source", "--protocol", "http"])
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "valid source creation should succeed");
+        assert_eq!(fs::read_to_string(project_root.join("sources/preexisting-scratch/keep.txt")).unwrap(), "keep-me\n");
+        assert!(!project_root.join("sources/preexisting-scratch").read_dir().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn unsupported_protocol_reports_single_lexicon_error_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        fs::write(project_root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n").unwrap();
+
+        let self_exe = std::env::current_exe().unwrap();
+        let cli_bin = self_exe
+            .ancestors()
+            .find_map(|ancestor| {
+                let candidate = ancestor.join("target").join("debug").join("lexicon-cli");
+                candidate.exists().then_some(candidate)
+            })
+            .expect("lexicon-cli binary should exist in the test target directory");
+        let framework_bin = self_exe
+            .ancestors()
+            .find_map(|ancestor| {
+                let candidate = ancestor.join("target").join("debug").join("lexicon-framework");
+                candidate.exists().then_some(candidate)
+            })
+            .expect("lexicon-framework binary should exist in the test target directory");
+
+        let output = std::process::Command::new(cli_bin)
+            .current_dir(project_root)
+            .env("LEXICON_FRAMEWORK_PATH", framework_bin)
+            .args(["source", "new", "unsupported-source", "--protocol", "browser"])
+            .output()
+            .unwrap();
+
+        let combined_bytes = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+        let combined = String::from_utf8_lossy(&combined_bytes);
+
+        assert!(!output.status.success(), "unsupported protocol should fail");
+        assert_eq!(output.status.code(), Some(1), "unsupported protocol should exit 1 from the framework");
+        assert_eq!(combined.matches("[lexicon] ERROR:").count(), 1, "exactly one Lexicon error should be reported: {combined}");
+        assert!(!combined.contains("[lexicon] Created source"), "success output must not be emitted on failure");
+    }
 }
