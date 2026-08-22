@@ -249,13 +249,12 @@ fn should_prune_descendant_directory(path: &Path) -> bool {
         return true;
     }
 
-    if name == "data" {
-        return true;
-    }
-
-    if name == "raw" || name == "processed" {
-        let parent_name = path.parent().and_then(|parent| parent.file_name()).and_then(|value| value.to_str());
-        return parent_name == Some("data");
+    if matches!(name, "raw" | "processed") {
+        return path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            == Some("data");
     }
 
     false
@@ -594,14 +593,22 @@ mod tests {
     #[test]
     fn find_descendant_project_root_prunes_excluded_directories() {
         let root = std::env::temp_dir().join(format!("lexicon-prune-root-{}", std::process::id()));
-        let excluded = root.join("target/ignored");
+        let raw = root.join("data/raw");
+        let processed = root.join("data/processed");
+        let nested = root.join("data/nested-project");
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&excluded).unwrap();
+
+        fs::create_dir_all(&raw).unwrap();
+        fs::create_dir_all(&processed).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+
         fs::write(root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"outer\"\nsources_directory = \"sources\"\n").unwrap();
-        fs::write(excluded.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"ignored\"\nsources_directory = \"sources\"\n").unwrap();
+        fs::write(raw.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"raw\"\nsources_directory = \"sources\"\n").unwrap();
+        fs::write(processed.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"processed\"\nsources_directory = \"sources\"\n").unwrap();
+        fs::write(nested.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"nested\"\nsources_directory = \"sources\"\n").unwrap();
 
         let result = super::find_descendant_project_root(&root).unwrap();
-        assert!(result.is_none(), "excluded generated directories should not be traversed");
+        assert_eq!(result, Some(nested), "data/raw and data/processed must be ignored while a real nested project under data/ is still detected");
 
         let _ = fs::remove_dir_all(&root);
     }
