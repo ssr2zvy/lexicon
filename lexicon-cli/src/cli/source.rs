@@ -53,6 +53,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_new_source_command_when_protocol_value_is_missing() {
+        let result = Cli::try_parse_from([
+            "lexicon",
+            "source",
+            "new",
+            "example-source",
+            "--protocol",
+        ]);
+        assert!(result.is_err(), "--protocol requires a value and must fail without one");
+    }
+
+    #[test]
     fn parses_new_source_command_with_protocol_flag() {
         let cli = Cli::try_parse_from([
             "lexicon",
