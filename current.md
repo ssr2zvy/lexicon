@@ -24,5 +24,9 @@ What was fixed in the code:
    - The project initializer now uses a random tempfile-managed staging directory instead of a predictable ".{project_name}.tmp-<pid>" path.
    - It no longer removes a preexisting unrelated directory and it leaves no temporary directory behind after a successful init.
 
+3. Current working delta
+   - The repository currently has local implementation changes in the Rust code and Cargo lockfile, but they are intentionally left in the working tree for the current task flow.
+   - The committed task record is kept in this file only, so the note is the authoritative change log for the latest response while preserving the live implementation edits.
+
 This file is therefore the single task-tracking source for future updates, and future commits for this workflow should only include this file unless a different instruction explicitly overrides the rule.
 
