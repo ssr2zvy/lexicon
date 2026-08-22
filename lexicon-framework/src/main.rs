@@ -237,14 +237,45 @@ fn find_descendant_project_root(root: &Path) -> Result<Option<PathBuf>, String> 
     Ok(found)
 }
 
+// Lexicon project roots are only legal under user-managed project trees. Generated and
+// data-heavy directories are pruned before descendant discovery to avoid walking unbounded
+// build or cache trees and to keep nested-root detection deterministic.
+fn should_prune_descendant_directory(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+
+    if matches!(name, ".git" | "target" | "artifacts" | "bundles" | "mza") {
+        return true;
+    }
+
+    if name == "data" {
+        return true;
+    }
+
+    if name == "raw" || name == "processed" {
+        let parent_name = path.parent().and_then(|parent| parent.file_name()).and_then(|value| value.to_str());
+        return parent_name == Some("data");
+    }
+
+    false
+}
+
 fn visit_descendants(root: &Path, found: &mut Option<PathBuf>, current: &Path) -> Result<(), String> {
-    for entry in fs::read_dir(current)
+    let mut entries = fs::read_dir(current)
         .map_err(|error| format!("failed to read {}: {error}", current.display()))?
-    {
-        let entry = entry.map_err(|error| format!("failed to read directory entry in {}: {error}", current.display()))?;
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to read directory entry in {}: {error}", current.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
         let path = entry.path();
 
         if path.is_symlink() {
+            continue;
+        }
+
+        if should_prune_descendant_directory(&path) {
             continue;
         }
 
@@ -540,6 +571,39 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn find_project_root_rejects_descendant_nested_project() {
+        let root = std::env::temp_dir().join(format!("lexicon-nested-root-{}", std::process::id()));
+        let nested = root.join("tools/inner");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"outer\"\nsources_directory = \"sources\"\n").unwrap();
+        fs::write(nested.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"inner\"\nsources_directory = \"sources\"\n").unwrap();
+
+        let result = super::find_project_root(&root);
+        assert!(result.is_err(), "nested descendant project should be rejected");
+        let text = result.unwrap_err();
+        assert!(text.contains("Outer project:"));
+        assert!(text.contains("Nested project:"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_descendant_project_root_prunes_excluded_directories() {
+        let root = std::env::temp_dir().join(format!("lexicon-prune-root-{}", std::process::id()));
+        let excluded = root.join("target/ignored");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&excluded).unwrap();
+        fs::write(root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"outer\"\nsources_directory = \"sources\"\n").unwrap();
+        fs::write(excluded.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"ignored\"\nsources_directory = \"sources\"\n").unwrap();
+
+        let result = super::find_descendant_project_root(&root).unwrap();
+        assert!(result.is_none(), "excluded generated directories should not be traversed");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
 

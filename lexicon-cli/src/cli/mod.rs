@@ -79,10 +79,6 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                             status
                         ));
                     }
-                    println!(
-                        "Invoked framework scaffold for source '{}' using protocol '{}'",
-                        new_command.source_name, new_command.protocol
-                    );
                     Ok(())
                 }
             }
@@ -167,4 +163,68 @@ fn locate_workspace_root() -> Result<PathBuf, String> {
     }
 
     Err("could not locate the workspace root from the current directory".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::{Cli, RootCommand};
+    use crate::cli::source::{NewSourceCommand, SourceAction, SourceCommand};
+    use clap::Parser;
+
+    #[test]
+    fn cli_source_new_prints_only_framework_success_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        fs::write(project_root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n").unwrap();
+
+        let self_exe = std::env::current_exe().unwrap();
+        let cli_bin = self_exe
+            .ancestors()
+            .find_map(|ancestor| {
+                let candidate = ancestor.join("target").join("debug").join("lexicon-cli");
+                candidate.exists().then_some(candidate)
+            })
+            .expect("lexicon-cli binary should exist in the test target directory");
+        let framework_bin = self_exe
+            .ancestors()
+            .find_map(|ancestor| {
+                let candidate = ancestor.join("target").join("debug").join("lexicon-framework");
+                candidate.exists().then_some(candidate)
+            })
+            .expect("lexicon-framework binary should exist in the test target directory");
+
+        let output = std::process::Command::new(cli_bin)
+            .current_dir(project_root)
+            .env("LEXICON_FRAMEWORK_PATH", framework_bin)
+            .args(["source", "new", "example-source"])
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "source scaffold command should succeed");
+
+        let combined_bytes = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+        let combined = String::from_utf8_lossy(&combined_bytes);
+
+        assert_eq!(combined.matches("[lexicon] Created source 'example-source'").count(), 1);
+        assert_eq!(combined.matches("[lexicon] Files to edit next:").count(), 1);
+        assert!(combined.matches("[lexicon]   - ").count() >= 1);
+        assert!(!combined.contains("Invoked framework scaffold"));
+    }
+
+    #[test]
+    fn dispatch_source_new_produces_only_framework_output() {
+        let cli = Cli::try_parse_from(["lexicon", "source", "new", "example-source"]).unwrap();
+
+        match cli.command {
+            Some(RootCommand::Source(SourceCommand {
+                action: SourceAction::New(NewSourceCommand { source_name, protocol }),
+            })) => {
+                assert_eq!(source_name, "example-source");
+                assert_eq!(protocol, "http");
+            }
+            other => panic!("expected source new command, got {other:?}"),
+        }
+    }
 }
