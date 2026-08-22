@@ -149,10 +149,10 @@ fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), Str
         })?;
     }
 
-    println!("Created source scaffold for '{}' at {}", source_name, source_dir.display());
-    println!("Files to edit next:");
+    println!("[lexicon] Created source '{}' at {}", source_name, source_dir.display());
+    println!("[lexicon] Files to edit next:");
     for (relative_path, _) in &files {
-        println!("  - {}", source_dir.join(relative_path).display());
+        println!("[lexicon]   - {}", source_dir.join(relative_path).display());
     }
 
     Ok(())
@@ -266,6 +266,72 @@ fn visit_descendants(root: &Path, found: &mut Option<PathBuf>, current: &Path) -
     Ok(())
 }
 
+fn resolve_project_directory(project_root: &Path, configured: &str) -> Result<PathBuf, String> {
+    if configured.trim().is_empty() {
+        return Err("sources_directory must not be empty".to_string());
+    }
+
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve project root: {error}"))?;
+
+    let mut resolved = canonical_root.clone();
+    for component in Path::new(configured).components() {
+        match component {
+            Component::Normal(name) => {
+                let next = resolved.join(name);
+                match fs::symlink_metadata(&next) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        let target = next.canonicalize().map_err(|error| {
+                            format!("failed to resolve '{}': {error}", next.display())
+                        })?;
+                        if !target.starts_with(&canonical_root) {
+                            return Err(format!(
+                                "sources_directory '{}' escapes the project root",
+                                configured
+                            ));
+                        }
+                        resolved = target;
+                    }
+                    Ok(_) => {
+                        resolved = next;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        resolved = next;
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "failed to inspect '{}': {error}",
+                            next.display()
+                        ));
+                    }
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "sources_directory '{}' must be a relative project path",
+                    configured
+                ));
+            }
+        }
+    }
+
+    if !resolved.starts_with(&canonical_root) {
+        return Err(format!(
+            "sources_directory '{}' escapes the project root",
+            configured
+        ));
+    }
+    if resolved.exists() && !resolved.is_dir() {
+        return Err(format!(
+            "sources_directory '{}' is not a directory",
+            resolved.display()
+        ));
+    }
+    Ok(resolved)
+}
+
 fn configured_sources_directory(project_root: &Path) -> Result<PathBuf, String> {
     let config_path = project_root.join("lexicon.toml");
     let contents = fs::read_to_string(&config_path)
@@ -307,7 +373,7 @@ fn configured_sources_directory(project_root: &Path) -> Result<PathBuf, String> 
             config_path.display()
         ));
     }
-    if path.components().any(|component| matches!(component, Component::ParentDir | Component::RootDir)) {
+    if path.components().any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))) {
         return Err(format!(
             "invalid sources_directory '{}' in {}: must remain within the project root",
             configured,
@@ -315,16 +381,7 @@ fn configured_sources_directory(project_root: &Path) -> Result<PathBuf, String> 
         ));
     }
 
-    let resolved = project_root.join(path);
-    let canonical_project_root = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
-    match resolved.strip_prefix(&canonical_project_root) {
-        Ok(_) => Ok(resolved),
-        Err(_) => Err(format!(
-            "invalid sources_directory '{}' in {}: resolves outside the project root",
-            configured,
-            config_path.display()
-        )),
-    }
+    resolve_project_directory(project_root, configured)
 }
 
 fn format_source_toml(source_name: &str, protocol: &str) -> String {
@@ -417,7 +474,9 @@ fn format_cargo_lockfile() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_get_raw_data_main, format_impl_cargo_toml};
+    use std::fs;
+
+    use super::{configured_sources_directory, format_get_raw_data_main, format_impl_cargo_toml};
 
     #[test]
     fn generated_impl_manifest_uses_new_portable_core_tag() {
@@ -437,6 +496,50 @@ mod tests {
         assert!(source.contains("HttpAcquisitionContext"));
         assert!(source.contains("fn acquire(&self, context: &mut HttpAcquisitionContext)"));
         assert!(source.contains("if let Err(error) = run_http_source(source)"));
+    }
+
+    #[test]
+    fn configured_sources_directory_rejects_symlink_escape() {
+        let root = std::env::temp_dir().join(format!("lexicon-sources-symlink-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("lexicon-sources-outside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let symlink_path = root.join("sources");
+        std::os::unix::fs::symlink(&outside, &symlink_path).unwrap();
+        fs::write(root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n").unwrap();
+
+        let result = configured_sources_directory(&root);
+        assert!(result.is_err(), "symlink escape should be rejected");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn configured_sources_directory_rejects_escaping_symlink_then_missing_child() {
+        let root = std::env::temp_dir().join(format!("lexicon-sources-escape-child-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("lexicon-sources-escape-outside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        fs::write(
+            root.join("lexicon.toml"),
+            "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"link/nonexistent-child\"\n",
+        )
+        .unwrap();
+
+        let result = configured_sources_directory(&root);
+        assert!(result.is_err(), "escaped symlink path with missing child should be rejected");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
     }
 }
 

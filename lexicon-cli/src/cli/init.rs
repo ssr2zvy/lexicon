@@ -74,8 +74,13 @@ pub fn initialize_project(parent_path: &Path, project_name: &str) -> Result<Path
         return Err(format!("project '{}' already exists at {}", project_name, project_directory.display()));
     }
 
-    fs::create_dir_all(project_directory.join("sources"))
-        .map_err(|error| format!("failed to create project directory '{}': {error}", project_directory.display()))?;
+    let staging = tempfile::Builder::new()
+        .prefix(&format!(".{project_name}.tmp-"))
+        .tempdir_in(&canonical_parent)
+        .map_err(|error| format!("failed to create temporary project: {error}"))?;
+
+    fs::create_dir(staging.path().join("sources"))
+        .map_err(|error| format!("failed to create sources directory: {error}"))?;
 
     let config = toml::Value::Table({
         let mut root = toml::map::Map::new();
@@ -92,8 +97,14 @@ pub fn initialize_project(parent_path: &Path, project_name: &str) -> Result<Path
     let toml_text = toml::to_string_pretty(&config)
         .map_err(|error| format!("failed to serialize project config: {error}"))?;
 
-    fs::write(project_directory.join("lexicon.toml"), toml_text)
-        .map_err(|error| format!("failed to write {}: {error}", project_directory.join("lexicon.toml").display()))?;
+    fs::write(staging.path().join("lexicon.toml"), toml_text)
+        .map_err(|error| format!("failed to write lexicon.toml: {error}"))?;
+
+    let staging_path = staging.keep();
+    if let Err(error) = fs::rename(&staging_path, &project_directory) {
+        let _ = fs::remove_dir_all(&staging_path);
+        return Err(format!("failed to finalize project '{}': {error}", project_directory.display()));
+    }
 
     Ok(project_directory)
 }
@@ -145,6 +156,38 @@ mod tests {
         assert!(contents.contains("name = \"example-project\""));
         assert!(contents.contains("sources_directory = \"sources\""));
 
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn does_not_delete_stale_pid_style_temp_directory() {
+        let parent = std::env::temp_dir().join(format!("lexicon-init-stale-temp-{}", std::process::id()));
+        let stale = parent.join(".example-project.tmp-12345");
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&stale).unwrap();
+        fs::create_dir_all(&parent).unwrap();
+
+        let _ = initialize_project(&parent, "example-project").unwrap();
+
+        assert!(stale.exists(), "stale temp dir should not be removed");
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn successful_init_leaves_no_temp_directory() {
+        let parent = std::env::temp_dir().join(format!("lexicon-init-temp-clean-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&parent).unwrap();
+
+        let project_dir = initialize_project(&parent, "clean-project").unwrap();
+        let temp_dirs = fs::read_dir(&parent)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".clean-project.tmp-"))
+            .collect::<Vec<_>>();
+
+        assert!(project_dir.exists());
+        assert!(temp_dirs.is_empty(), "no temp directories should remain after successful init");
         let _ = fs::remove_dir_all(parent);
     }
 }

@@ -3,7 +3,7 @@ use std::process::Command;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use crate::cli::init::{initialize_project, validate_project_name};
+use crate::cli::init::initialize_project;
 
 pub mod build;
 pub mod data;
@@ -88,9 +88,8 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
             }
         }
         Some(RootCommand::Init(command)) => {
-            validate_project_name(&command.project_name)?;
             let project_root = initialize_project(&command.parent_path, &command.project_name)?;
-            println!("Initialized Lexicon project '{}' at {}", command.project_name, project_root.display());
+            println!("[lexicon] Initialized project '{}' at {}", command.project_name, project_root.display());
             Ok(())
         }
         Some(RootCommand::Build(_)) => {
