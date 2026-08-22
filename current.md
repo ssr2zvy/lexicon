@@ -1,149 +1,123 @@
+The main init flow is correct. These are the exact changes still needed and why.
 
+1. Correct sources_directory containment
 
-⸻
+Current logic checks the unresolved path text:
 
-Implement the revised lexicon init and project-discovery contract.
+let resolved = project_root.join(path);
+resolved.strip_prefix(&canonical_project_root)
 
-1. Command shape
-
-Change initialization to:
-
-lexicon init <parent-path> <project-name>
+That does not detect a symlink escape.
 
 Example:
 
-lexicon init /projects telugu-data
+project/sources → /somewhere/outside-project
 
-must create:
+The textual path still begins with project/, so the current check accepts it even though writes go outside the project.
 
-/projects/telugu-data/
-├── lexicon.toml
-└── sources/
+Change it so the resolved filesystem location is checked against the canonical project root. Also reject:
 
-<parent-path> identifies the directory that will contain the new project folder. <project-name> supplies both the new folder name and the logical project name.
+* Empty paths.
+* Absolute paths.
+* ...
+* Windows path prefixes such as C:.
+* Existing symlinks that escape the project root.
 
-2. Generated lexicon.toml
+This prevents a configured sources directory from writing outside the project.
 
-Generate exactly this logical structure:
+2. Make initialization atomic
 
-schema_version = 1
-[project]
-name = "telugu-data"
-sources_directory = "sources"
+Current flow creates:
 
-Requirements:
+project/sources/
 
-* Serialize TOML safely rather than interpolating unescaped user input.
-* sources_directory must remain relative to the lexicon.toml location.
-* Do not record the parent path or another absolute project path.
-* Moving the complete project directory must not invalidate its configuration.
+before writing lexicon.toml.
 
-3. Init flow
+If writing the TOML fails, a partially initialized project remains. There is also a race between:
 
-The implementation flow must be:
+project_directory.exists()
 
-1. Clap parses <parent-path> as a PathBuf and <project-name> as a string.
-2. Validate the project name as a safe single directory name.
-3. Reject names containing /, \, .., or absolute-path syntax.
-4. Verify that <parent-path> exists and is a directory.
-5. Canonicalize the parent path.
-6. Calculate:
+and:
 
-project_directory = parent_path / project_name
+create_dir_all(...)
 
-7. Refuse to overwrite an existing target.
-8. Search upward from the parent path for an existing lexicon.toml.
-9. If one exists, reject initialization because the new project would be nested.
-10. Create the project directory.
-11. Create sources/.
-12. Write lexicon.toml.
-13. Report the absolute initialized project path.
+Change the flow to:
 
-A failure must not delete, modify, or “fix” another project automatically.
+1. Create a uniquely named temporary directory beside the intended project.
+2. Create sources/ and lexicon.toml inside it.
+3. Rename the completed temporary directory to the final project name.
+4. Remove only the temporary directory if initialization fails.
 
-4. Project-root discovery
+The final project should either exist completely or not exist at all.
 
-Replace “stop at the first marker” with full nesting validation:
+3. Bound the descendant project scan
 
-1. Starting from the current directory, inspect every ancestor for lexicon.toml.
-2. If more than one ancestor contains it, report nested projects and stop.
-3. If none contains it, report that the command is outside a Lexicon project.
-4. If exactly one exists, treat it as the candidate active project.
-5. Recursively search downward from that root for additional lexicon.toml files.
-6. Do not follow directory symlinks.
-7. If another marker is found, report the outer and nested project paths and stop.
-8. Do not combine their sources or continue the requested operation.
-9. If no nesting exists, parse the root configuration and continue.
+visit_descendants currently traverses every directory below the project, including potentially:
 
-The error should resemble:
+.git/
+target/
+artifacts/
+data/raw/
+data/processed/
 
-Nested Lexicon project detected.
-Outer project: /projects/outer
-Nested project: /projects/outer/tools/inner
-Move the nested project outside the outer project, or remove its
-lexicon.toml if it should belong to the outer project, then rerun.
-No changes were made.
+As acquired data grows, every Lexicon command could scan thousands or millions of files and directories just to detect another lexicon.toml.
 
-5. Configuration validation
+Keep recursive nested-project detection, but define directories that cannot contain valid Lexicon projects and prune them from traversal. Do not follow symlinks.
 
-When reading lexicon.toml, validate:
+Also make the result deterministic—either sort directory entries or collect and sort all nested project paths before reporting them.
 
-* schema_version is supported.
-* project.name is present and valid.
-* project.sources_directory is relative.
-* It contains no parent traversal.
-* Resolving it cannot escape the project root.
+4. Remove duplicate init validation
 
-Then resolve:
+The project name is validated in both:
 
-sources_path = project_root / sources_directory
+dispatch()
+initialize_project()
 
-6. Required tests
+initialize_project() must remain authoritative because it performs the filesystem operation and could be called from somewhere other than this dispatch branch.
 
-Add tests covering:
+The separate dispatch validation is redundant. Remove it or make Clap use the same validator while still retaining validation inside initialize_project().
 
-* Parsing both init arguments.
-* Correct target path construction.
-* Exact generated TOML fields.
-* Rejection of unsafe project names.
-* Rejection of a nonexistent/non-directory parent.
-* Rejection when the target already exists.
-* Rejection when initializing beneath an existing Lexicon project.
-* Discovery from a deeply nested working directory.
-* Detection of two ancestor project markers.
-* Detection of a descendant nested project.
-* Rejection of absolute or escaping sources_directory.
-* Moving a completed project directory and successfully rediscovering it afterward.
-* Confirmation that errors leave existing files unchanged.
+5. Update the stale CLI description
 
-Required return report
+This text is no longer true:
 
-Return an exact function-level flow, using the real function and type names after implementation:
+This parser validates the command interface ... without invoking framework behavior.
 
-CLI parse
-→ command enum variant
-→ dispatch function
-→ init function
-→ path/name validation
-→ nesting detection
-→ directory creation
-→ TOML serialization
+The source command now launches lexicon-framework. Update the description to reflect actual dispatch behavior.
 
-Also return the project-discovery flow:
+6. Add the [lexicon] output contract
 
-current directory
-→ ancestor collection
-→ active-root selection
-→ descendant scan
-→ TOML parsing
-→ sources-directory resolution
+Operational messages should become:
 
-For every step, identify:
+[lexicon] Initialized project 'telugu-data'.
+[lexicon] Created source 'example-source'.
+[lexicon] WARNING: Nested project detected.
+[lexicon] ERROR: No Lexicon project was found.
 
-* The source file.
-* Function/type name.
-* Input.
-* Output or error.
-* Tests that exercise it.
+Specifically:
 
-Include the exact verification commands and results. Do not describe a flow as implemented unless an executable test reaches it.
+* Prefix CLI success messages.
+* Prefix framework success messages.
+* Prefix the final error printed by main().
+* Prefix nested-project and configuration errors.
+* Use stdout for normal messages.
+* Use stderr for warnings and errors.
+* Do not prefix the same framework output again when it passes through the CLI.
+
+7. Add named tests for the actual requirements
+
+“11 tests passed” is insufficient evidence without identifying what they cover. Add or identify tests for:
+
+* Correct <parent-path>/<project-name> creation.
+* Exact TOML fields.
+* Ancestor nesting.
+* Descendant nesting.
+* Existing target rejection.
+* Project movement portability.
+* Symlink escape through sources_directory.
+* Absolute and parent-traversing source paths.
+* Failure without a partial project remaining.
+* Recursive-scan exclusions.
+* [lexicon] success and error formatting.
+
+The two critical correctness changes are secure sources_directory resolution and atomic initialization. The remaining items make discovery scalable, output consistent, and verification credible.
