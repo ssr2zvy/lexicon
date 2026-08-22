@@ -1,123 +1,141 @@
-The main init flow is correct. These are the exact changes still needed and why.
+Do not move to the next feature yet. This implementation still has two correctness bugs.
 
-1. Correct sources_directory containment
+1. The symlink containment fix is incomplete
 
-Current logic checks the unresolved path text:
+This is unsafe:
 
-let resolved = project_root.join(path);
-resolved.strip_prefix(&canonical_project_root)
-
-That does not detect a symlink escape.
+let canonical_candidate = candidate
+    .canonicalize()
+    .unwrap_or_else(|_| candidate.to_path_buf());
 
 Example:
 
-project/sources → /somewhere/outside-project
+project/link → /outside
+sources_directory = "link/new-directory"
 
-The textual path still begins with project/, so the current check accepts it even though writes go outside the project.
+link/new-directory does not exist, so canonicalization fails. The code falls back to the textual path:
 
-Change it so the resolved filesystem location is checked against the canonical project root. Also reject:
+project/link/new-directory
 
-* Empty paths.
-* Absolute paths.
-* ...
-* Windows path prefixes such as C:.
-* Existing symlinks that escape the project root.
+That appears to be inside the project, but creating it writes to:
 
-This prevents a configured sources directory from writing outside the project.
+/outside/new-directory
 
-2. Make initialization atomic
+Replace the fallback with component-by-component resolution:
 
-Current flow creates:
+fn resolve_project_directory(
+    project_root: &Path,
+    configured: &str,
+) -> Result<PathBuf, String> {
+    if configured.trim().is_empty() {
+        return Err("sources_directory must not be empty".to_string());
+    }
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve project root: {error}"))?;
+    let mut resolved = canonical_root.clone();
+    for component in Path::new(configured).components() {
+        match component {
+            Component::Normal(name) => {
+                let next = resolved.join(name);
+                match fs::symlink_metadata(&next) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        let target = next.canonicalize().map_err(|error| {
+                            format!("failed to resolve '{}': {error}", next.display())
+                        })?;
+                        if !target.starts_with(&canonical_root) {
+                            return Err(format!(
+                                "sources_directory '{}' escapes the project root",
+                                configured
+                            ));
+                        }
+                        resolved = target;
+                    }
+                    Ok(_) => {
+                        resolved = next;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        resolved = next;
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "failed to inspect '{}': {error}",
+                            next.display()
+                        ));
+                    }
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "sources_directory '{}' must be a relative project path",
+                    configured
+                ));
+            }
+        }
+    }
+    if !resolved.starts_with(&canonical_root) {
+        return Err(format!(
+            "sources_directory '{}' escapes the project root",
+            configured
+        ));
+    }
+    if resolved.exists() && !resolved.is_dir() {
+        return Err(format!(
+            "sources_directory '{}' is not a directory",
+            resolved.display()
+        ));
+    }
+    Ok(resolved)
+}
 
-project/sources/
+Add a regression test specifically using an escaping symlink followed by a nonexistent child, because that is the case the current test probably misses.
 
-before writing lexicon.toml.
+2. Temporary initialization is unsafe
 
-If writing the TOML fails, a partially initialized project remains. There is also a race between:
+This path is predictable:
 
-project_directory.exists()
+.{project_name}.tmp-<process-id>
 
-and:
+The implementation then deletes it if it already exists:
 
-create_dir_all(...)
+fs::remove_dir_all(&temp_dir)
 
-Change the flow to:
+That can delete a directory this invocation did not create. It also leaves the temporary directory behind if TOML serialization fails, because that failure occurs before the explicit cleanup branches.
 
-1. Create a uniquely named temporary directory beside the intended project.
-2. Create sources/ and lexicon.toml inside it.
-3. Rename the completed temporary directory to the final project name.
-4. Remove only the temporary directory if initialization fails.
+Use an automatically managed random temporary directory:
 
-The final project should either exist completely or not exist at all.
+let staging = tempfile::Builder::new()
+    .prefix(&format!(".{project_name}.tmp-"))
+    .tempdir_in(&canonical_parent)
+    .map_err(|error| format!("failed to create temporary project: {error}"))?;
+fs::create_dir(staging.path().join("sources"))
+    .map_err(|error| format!("failed to create sources directory: {error}"))?;
+fs::write(staging.path().join("lexicon.toml"), toml_text)
+    .map_err(|error| format!("failed to write lexicon.toml: {error}"))?;
+if project_directory.exists() {
+    return Err(format!(
+        "project '{}' already exists at {}",
+        project_name,
+        project_directory.display()
+    ));
+}
+let staging_path = staging.keep();
+if let Err(error) = fs::rename(&staging_path, &project_directory) {
+    let _ = fs::remove_dir_all(&staging_path);
+    return Err(format!(
+        "failed to finalize project '{}': {error}",
+        project_directory.display()
+    ));
+}
 
-3. Bound the descendant project scan
+Add tempfile as a normal dependency of the package containing initialize_project.
 
-visit_descendants currently traverses every directory below the project, including potentially:
+Required regression tests:
 
-.git/
-target/
-artifacts/
-data/raw/
-data/processed/
+* A preexisting directory resembling the old PID-based temporary name is never deleted.
+* A failure before final rename leaves no project directory.
+* A successful initialization leaves no temporary directory.
+* sources_directory = "escaping-symlink/nonexistent-child" is rejected.
 
-As acquired data grows, every Lexicon command could scan thousands or millions of files and directories just to detect another lexicon.toml.
-
-Keep recursive nested-project detection, but define directories that cannot contain valid Lexicon projects and prune them from traversal. Do not follow symlinks.
-
-Also make the result deterministic—either sort directory entries or collect and sort all nested project paths before reporting them.
-
-4. Remove duplicate init validation
-
-The project name is validated in both:
-
-dispatch()
-initialize_project()
-
-initialize_project() must remain authoritative because it performs the filesystem operation and could be called from somewhere other than this dispatch branch.
-
-The separate dispatch validation is redundant. Remove it or make Clap use the same validator while still retaining validation inside initialize_project().
-
-5. Update the stale CLI description
-
-This text is no longer true:
-
-This parser validates the command interface ... without invoking framework behavior.
-
-The source command now launches lexicon-framework. Update the description to reflect actual dispatch behavior.
-
-6. Add the [lexicon] output contract
-
-Operational messages should become:
-
-[lexicon] Initialized project 'telugu-data'.
-[lexicon] Created source 'example-source'.
-[lexicon] WARNING: Nested project detected.
-[lexicon] ERROR: No Lexicon project was found.
-
-Specifically:
-
-* Prefix CLI success messages.
-* Prefix framework success messages.
-* Prefix the final error printed by main().
-* Prefix nested-project and configuration errors.
-* Use stdout for normal messages.
-* Use stderr for warnings and errors.
-* Do not prefix the same framework output again when it passes through the CLI.
-
-7. Add named tests for the actual requirements
-
-“11 tests passed” is insufficient evidence without identifying what they cover. Add or identify tests for:
-
-* Correct <parent-path>/<project-name> creation.
-* Exact TOML fields.
-* Ancestor nesting.
-* Descendant nesting.
-* Existing target rejection.
-* Project movement portability.
-* Symlink escape through sources_directory.
-* Absolute and parent-traversing source paths.
-* Failure without a partial project remaining.
-* Recursive-scan exclusions.
-* [lexicon] success and error formatting.
-
-The two critical correctness changes are secure sources_directory resolution and atomic initialization. The remaining items make discovery scalable, output consistent, and verification credible.
+The report also does not show the claimed bounded descendant traversal or comprehensive [lexicon] error prefixing, so those must be verified with the actual code and named tests rather than inferred from the total test count.
