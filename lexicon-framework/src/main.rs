@@ -6,11 +6,13 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 struct LexiconProjectConfig {
+    schema_version: Option<u32>,
     project: Option<ProjectSection>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ProjectSection {
+    name: Option<String>,
     sources_directory: Option<String>,
 }
 
@@ -188,18 +190,12 @@ fn validate_protocol(protocol: &str) -> Result<(), String> {
 
 fn find_project_root(start_dir: &Path) -> Result<PathBuf, String> {
     let mut current = start_dir.to_path_buf();
+    let mut ancestors = Vec::new();
 
     loop {
         let config_path = current.join("lexicon.toml");
         if config_path.is_file() {
-            let contents = fs::read_to_string(&config_path)
-                .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
-            let parsed: LexiconProjectConfig = toml::from_str(&contents).map_err(|error| {
-                format!("failed to parse {}: {error}", config_path.display())
-            })?;
-            if parsed.project.is_some() || contents.contains("[project]") {
-                return Ok(current);
-            }
+            ancestors.push(current.clone());
         }
 
         match current.parent() {
@@ -208,7 +204,66 @@ fn find_project_root(start_dir: &Path) -> Result<PathBuf, String> {
         }
     }
 
-    Err("could not find a lexicon.toml project file in the current directory or any parent directory; run `lexicon init <project-name>` first".to_string())
+    if ancestors.is_empty() {
+        return Err("No Lexicon project found. The current directory is not inside a Lexicon project.".to_string());
+    }
+
+    if ancestors.len() > 1 {
+        let outer = ancestors.last().cloned().expect("ancestor list should have outermost root");
+        let nested = ancestors.first().cloned().expect("ancestor list should at least contain one project root");
+        return Err(format!(
+            "Nested Lexicon project detected.\nOuter project: {}\nNested project: {}\nMove the nested project outside the outer project, or remove its lexicon.toml if it should belong to the outer project, then rerun.\nNo changes were made.",
+            outer.display(),
+            nested.display()
+        ));
+    }
+
+    let root = ancestors[0].clone();
+    let descendant = find_descendant_project_root(&root)?;
+    if let Some(nested_root) = descendant {
+        return Err(format!(
+            "Nested Lexicon project detected.\nOuter project: {}\nNested project: {}\nMove the nested project outside the outer project, or remove its lexicon.toml if it should belong to the outer project, then rerun.\nNo changes were made.",
+            root.display(),
+            nested_root.display()
+        ));
+    }
+
+    Ok(root)
+}
+
+fn find_descendant_project_root(root: &Path) -> Result<Option<PathBuf>, String> {
+    let mut found = None;
+    visit_descendants(root, &mut found, root)?;
+    Ok(found)
+}
+
+fn visit_descendants(root: &Path, found: &mut Option<PathBuf>, current: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(current)
+        .map_err(|error| format!("failed to read {}: {error}", current.display()))?
+    {
+        let entry = entry.map_err(|error| format!("failed to read directory entry in {}: {error}", current.display()))?;
+        let path = entry.path();
+
+        if path.is_symlink() {
+            continue;
+        }
+
+        if path.is_dir() {
+            let marker = path.join("lexicon.toml");
+            if marker.is_file() && path != root {
+                if found.is_none() {
+                    *found = Some(path.clone());
+                }
+                return Ok(());
+            }
+            visit_descendants(root, found, &path)?;
+            if found.is_some() {
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn configured_sources_directory(project_root: &Path) -> Result<PathBuf, String> {
@@ -218,12 +273,33 @@ fn configured_sources_directory(project_root: &Path) -> Result<PathBuf, String> 
     let parsed: LexiconProjectConfig = toml::from_str(&contents)
         .map_err(|error| format!("failed to parse {}: {error}", config_path.display()))?;
 
-    let configured = parsed
-        .project
-        .and_then(|project| project.sources_directory)
-        .unwrap_or_else(|| "sources".to_string());
+    if parsed.schema_version != Some(1) {
+        return Err(format!(
+            "unsupported schema_version in {}: expected 1 but found {:?}",
+            config_path.display(),
+            parsed.schema_version
+        ));
+    }
 
-    let path = Path::new(&configured);
+    let project = parsed
+        .project
+        .as_ref()
+        .ok_or_else(|| format!("missing [project] section in {}", config_path.display()))?;
+    let project_name = project
+        .name
+        .as_deref()
+        .ok_or_else(|| format!("missing project.name in {}", config_path.display()))?
+        .trim();
+    if project_name.is_empty() || project_name == "." || project_name == ".." || project_name.contains(['/', '\\']) {
+        return Err(format!("invalid project.name '{}' in {}", project_name, config_path.display()));
+    }
+
+    let configured = project
+        .sources_directory
+        .as_deref()
+        .unwrap_or("sources");
+
+    let path = Path::new(configured);
     if path.is_absolute() {
         return Err(format!(
             "invalid sources_directory '{}' in {}: must be a relative path",
@@ -239,7 +315,16 @@ fn configured_sources_directory(project_root: &Path) -> Result<PathBuf, String> 
         ));
     }
 
-    Ok(project_root.join(path))
+    let resolved = project_root.join(path);
+    let canonical_project_root = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
+    match resolved.strip_prefix(&canonical_project_root) {
+        Ok(_) => Ok(resolved),
+        Err(_) => Err(format!(
+            "invalid sources_directory '{}' in {}: resolves outside the project root",
+            configured,
+            config_path.display()
+        )),
+    }
 }
 
 fn format_source_toml(source_name: &str, protocol: &str) -> String {

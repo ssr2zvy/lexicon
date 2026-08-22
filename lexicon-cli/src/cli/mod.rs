@@ -1,8 +1,9 @@
-use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
 use clap::{CommandFactory, Parser, Subcommand};
+
+use crate::cli::init::{initialize_project, validate_project_name};
 
 pub mod build;
 pub mod data;
@@ -87,33 +88,9 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
             }
         }
         Some(RootCommand::Init(command)) => {
-            let project_root = std::env::current_dir()
-                .map_err(|error| format!("failed to read current directory: {error}"))?
-                .join(&command.project_name);
-            if project_root.exists() {
-                return Err(format!(
-                    "project '{}' already exists at {}",
-                    command.project_name,
-                    project_root.display()
-                ));
-            }
-            fs::create_dir_all(project_root.join("sources")).map_err(|error| {
-                format!(
-                    "failed to create project '{}' at {}: {error}",
-                    command.project_name,
-                    project_root.display()
-                )
-            })?;
-            fs::write(
-                project_root.join("lexicon.toml"),
-                "schema_version = 1\n\n[project]\nsources_directory = \"sources\"\n",
-            )
-            .map_err(|error| format!("failed to write {}: {error}", project_root.display()))?;
-            println!(
-                "Initialized Lexicon project '{}' at {}",
-                command.project_name,
-                project_root.display()
-            );
+            validate_project_name(&command.project_name)?;
+            let project_root = initialize_project(&command.parent_path, &command.project_name)?;
+            println!("Initialized Lexicon project '{}' at {}", command.project_name, project_root.display());
             Ok(())
         }
         Some(RootCommand::Build(_)) => {
