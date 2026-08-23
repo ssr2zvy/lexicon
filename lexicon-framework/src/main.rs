@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -10,13 +11,13 @@ struct LexiconProjectConfig {
     project: Option<ProjectSection>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SourceTomlDocument {
     schema_version: u32,
     source: SourceTomlSection,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SourceTomlSection {
     name: String,
     protocol: String,
@@ -46,9 +47,23 @@ fn main() {
         std::process::exit(1);
     }
 
-    if args.len() == 3 && args[0] == "source" && args[1] == "build" {
-        eprintln!("[lexicon] ERROR: source build is not implemented");
-        std::process::exit(1);
+    if args.len() == 5 && args[0] == "source" && args[1] == "build" && args[3] == "--protocol" {
+        if let Err(error) = build_source(&args[2], &args[4]) {
+            eprintln!("[lexicon] ERROR: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if args.len() == 4 && args[0] == "source" && args[1] == "build" {
+        let protocol_flag = &args[3];
+        if let Some(protocol) = protocol_flag.strip_prefix("--protocol=") {
+            if let Err(error) = build_source(&args[2], protocol) {
+                eprintln!("[lexicon] ERROR: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
     }
 
     if args.len() == 5 && args[0] == "source" && args[1] == "create" && args[3] == "--protocol" {
@@ -108,10 +123,12 @@ fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), Str
         Path::new("data/raw"),
         Path::new("data/processed"),
         Path::new("get-raw-data/sessions"),
-        Path::new("get-raw-data/get_raw_data_impl/src"),
+        Path::new("get-raw-data/get-raw-data-impl/src"),
+        Path::new("get-raw-data/runtime"),
         Path::new("process-data/sessions"),
-        Path::new("process-data/process_data_impl/src"),
-        Path::new("process-data/process_data_impl/processing"),
+        Path::new("process-data/process-data-impl/src"),
+        Path::new("process-data/process-data-impl/processing"),
+        Path::new("process-data/runtime"),
     ];
 
     for directory in &directories {
@@ -141,28 +158,36 @@ fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), Str
             format_session_status_json(source_name, "process-data"),
         ),
         (
-            "get-raw-data/get_raw_data_impl/Cargo.toml",
+            "get-raw-data/get-raw-data-impl/Cargo.toml",
             format_impl_cargo_toml(&format!("{source_name}-get-raw-data")),
         ),
         (
-            "get-raw-data/get_raw_data_impl/Cargo.lock",
+            "get-raw-data/get-raw-data-impl/Cargo.lock",
             format_cargo_lockfile(),
         ),
         (
-            "get-raw-data/get_raw_data_impl/src/main.rs",
+            "get-raw-data/get-raw-data-impl/src/main.rs",
             format_get_raw_data_main(source_name),
         ),
         (
-            "process-data/process_data_impl/Cargo.toml",
+            "get-raw-data/runtime/.gitignore",
+            "*\n!.gitignore\n".to_string(),
+        ),
+        (
+            "process-data/process-data-impl/Cargo.toml",
             format_impl_cargo_toml(&format!("{source_name}-process-data")),
         ),
         (
-            "process-data/process_data_impl/Cargo.lock",
+            "process-data/process-data-impl/Cargo.lock",
             format_cargo_lockfile(),
         ),
         (
-            "process-data/process_data_impl/src/main.rs",
+            "process-data/process-data-impl/src/main.rs",
             format_process_data_main(source_name),
+        ),
+        (
+            "process-data/runtime/.gitignore",
+            "*\n!.gitignore\n".to_string(),
         ),
     ];
 
@@ -192,13 +217,223 @@ fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), Str
     let output_files = [
         "source.toml",
         "discovery.md",
-        "get-raw-data/get_raw_data_impl/src/main.rs",
-        "process-data/process_data_impl/src/main.rs",
+        "get-raw-data/get-raw-data-impl/src/main.rs",
+        "process-data/process-data-impl/src/main.rs",
     ];
     for relative_path in &output_files {
         println!("[lexicon]   - {}", protocol_dir.join(relative_path).display());
     }
 
+    Ok(())
+}
+
+fn build_source(source_name: &str, protocol: &str) -> Result<(), String> {
+    validate_source_name(source_name)?;
+    validate_protocol(protocol)?;
+
+    let project_root = find_project_root(&env::current_dir().map_err(|error| {
+        format!("failed to determine current directory: {error}")
+    })?)?;
+    let sources_root = configured_sources_directory(&project_root)?;
+    let source_root = sources_root.join(source_name);
+    let protocol_root = source_root.join(protocol);
+
+    if !source_root.exists() {
+        return Err(format!("source '{}' does not exist", source_name));
+    }
+    if !source_root.is_dir() {
+        return Err(format!("source '{}' does not exist", source_name));
+    }
+    if !protocol_root.exists() {
+        return Err(format!("protocol '{}' does not exist for source '{}'", protocol, source_name));
+    }
+    if !protocol_root.is_dir() {
+        return Err(format!("protocol '{}' does not exist for source '{}'", protocol, source_name));
+    }
+
+    let source_toml = protocol_root.join("source.toml");
+    let _source_doc = load_source_metadata(&source_toml, source_name, protocol)?;
+    let get_manifest = protocol_root.join("get-raw-data/get-raw-data-impl/Cargo.toml");
+    let process_manifest = protocol_root.join("process-data/process-data-impl/Cargo.toml");
+    if !get_manifest.is_file() {
+        return Err("missing get-raw-data implementation manifest".to_owned());
+    }
+    if !process_manifest.is_file() {
+        return Err("missing process-data implementation manifest".to_owned());
+    }
+
+    let get_executable = build_single_crate(&get_manifest, "get-raw-data")?;
+    let process_executable = build_single_crate(&process_manifest, "process-data")?;
+
+    let get_runtime_dir = protocol_root.join("get-raw-data/runtime");
+    let process_runtime_dir = protocol_root.join("process-data/runtime");
+    fs::create_dir_all(&get_runtime_dir).map_err(|error| format!("failed to create {}: {error}", get_runtime_dir.display()))?;
+    fs::create_dir_all(&process_runtime_dir).map_err(|error| format!("failed to create {}: {error}", process_runtime_dir.display()))?;
+
+    let get_staged = stage_runtime_file(&get_runtime_dir, &get_executable, "get-raw-data")?;
+    let process_staged = stage_runtime_file(&process_runtime_dir, &process_executable, "process-data")?;
+
+    let mut get_backup = None;
+    let mut process_backup = None;
+    let get_final = get_runtime_dir.join(get_executable.file_name().unwrap().to_string_lossy().as_ref());
+    let process_final = process_runtime_dir.join(process_executable.file_name().unwrap().to_string_lossy().as_ref());
+
+    if get_final.exists() {
+        get_backup = Some(move_to_backup(&get_final)?);
+    }
+    if process_final.exists() {
+        process_backup = Some(move_to_backup(&process_final)?);
+    }
+
+    if let Err(error) = fs::rename(&get_staged, &get_final) {
+        restore_runtime_after_failure(&get_final, get_backup.as_ref(), &get_staged, &process_staged, &process_final, process_backup.as_ref())?;
+        return Err(format!("source runtime publication failed; previous runtimes were restored: {error}"));
+    }
+    if let Err(error) = fs::rename(&process_staged, &process_final) {
+        let _ = fs::remove_file(&get_final);
+        restore_runtime_after_failure(&get_final, get_backup.as_ref(), &get_staged, &process_staged, &process_final, process_backup.as_ref())?;
+        return Err(format!("source runtime publication failed; previous runtimes were restored: {error}"));
+    }
+
+    if let Some(path) = get_backup.as_ref() {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(path) = process_backup.as_ref() {
+        let _ = fs::remove_file(path);
+    }
+
+    println!("[lexicon] Built source '{}' using protocol '{}'", source_name, protocol);
+    println!("[lexicon] Runtime executables:");
+    println!("[lexicon]   - {}", get_final.canonicalize().unwrap_or_else(|_| get_final.clone()).display());
+    println!("[lexicon]   - {}", process_final.canonicalize().unwrap_or_else(|_| process_final.clone()).display());
+    Ok(())
+}
+
+fn load_source_metadata(path: &Path, expected_name: &str, expected_protocol: &str) -> Result<SourceTomlDocument, String> {
+    if !path.is_file() {
+        return Err("source metadata does not match the requested source and protocol".to_owned());
+    }
+
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let parsed: SourceTomlDocument = toml::from_str(&contents)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+
+    if parsed.schema_version != 1 {
+        return Err("unsupported schema version".to_owned());
+    }
+    if parsed.source.name != expected_name {
+        return Err("source metadata does not match the requested source and protocol".to_owned());
+    }
+    if parsed.source.protocol != expected_protocol {
+        return Err("source metadata does not match the requested source and protocol".to_owned());
+    }
+    Ok(parsed)
+}
+
+fn build_single_crate(manifest_path: &Path, operation_name: &str) -> Result<PathBuf, String> {
+    let manifest = manifest_path.canonicalize().map_err(|error| {
+        format!("failed to resolve {}: {error}", manifest_path.display())
+    })?;
+    let tempdir = tempfile::Builder::new()
+        .prefix(&format!("lexicon-{operation_name}-build-"))
+        .tempdir()
+        .map_err(|error| format!("failed to create temporary build directory: {error}"))?;
+    let target_dir = tempdir.path().to_path_buf();
+
+    let output = Command::new("cargo")
+        .arg("build")
+        .arg("--release")
+        .arg("--locked")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(&target_dir)
+        .arg("--message-format=json-render-diagnostics")
+        .output()
+        .map_err(|_| "[lexicon] ERROR: source build requires Cargo and a Rust development toolchain".to_owned())?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            eprintln!("{stderr}");
+        }
+        return Err(format!("{} implementation build failed", operation_name));
+    }
+
+    let mut executable = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if value.get("reason").and_then(|item| item.as_str()) == Some("compiler-artifact") {
+                let target = value.get("target").and_then(|item| item.get("name")).and_then(|item| item.as_str());
+                if let Some(target_name) = target {
+                    let artifact = value.get("executable").and_then(|item| item.as_str());
+                    if let Some(path) = artifact {
+                        let candidate = PathBuf::from(path);
+                        if candidate.is_file() && candidate.file_name().is_some() && !candidate.ends_with(".d") {
+                            executable = Some(candidate);
+                            if target_name.contains("main") || target_name.contains("get-raw-data") || target_name.contains("process-data") || target_name.contains("-impl") {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let executable = executable.ok_or_else(|| format!("{} implementation build failed", operation_name))?;
+    if !executable.is_file() {
+        return Err(format!("{} implementation build failed", operation_name));
+    }
+
+    let _ = tempdir.close();
+    Ok(executable)
+}
+
+fn stage_runtime_file(runtime_dir: &Path, source_executable: &Path, operation_name: &str) -> Result<PathBuf, String> {
+    let unique = format!(".{}.staging-{}", operation_name, std::process::id());
+    let staged = runtime_dir.join(unique);
+    fs::copy(source_executable, &staged).map_err(|error| {
+        format!("failed to stage {}: {error}", runtime_dir.display())
+    })?;
+    let metadata = fs::metadata(&staged).map_err(|error| format!("failed to inspect staged {}: {error}", staged.display()))?;
+    if !metadata.is_file() {
+        let _ = fs::remove_file(&staged);
+        return Err(format!("{} implementation build failed", operation_name));
+    }
+    Ok(staged)
+}
+
+fn move_to_backup(path: &Path) -> Result<PathBuf, String> {
+    let unique = format!(".backup-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+    let backup = path.parent().unwrap().join(unique);
+    fs::rename(path, &backup).map_err(|error| format!("failed to create backup for {}: {error}", path.display()))?;
+    Ok(backup)
+}
+
+fn restore_runtime_after_failure(
+    get_final: &Path,
+    get_backup: Option<&PathBuf>,
+    get_staged: &Path,
+    process_staged: &Path,
+    process_final: &Path,
+    process_backup: Option<&PathBuf>,
+) -> Result<(), String> {
+    let _ = fs::remove_file(get_staged);
+    let _ = fs::remove_file(process_staged);
+    let _ = fs::remove_file(get_final);
+    let _ = fs::remove_file(process_final);
+    if let Some(path) = get_backup {
+        let restored = get_final;
+        fs::rename(path, restored).map_err(|error| format!("failed to restore get runtime: {error}"))?;
+    }
+    if let Some(path) = process_backup {
+        let restored = process_final;
+        fs::rename(path, restored).map_err(|error| format!("failed to restore process runtime: {error}"))?;
+    }
     Ok(())
 }
 

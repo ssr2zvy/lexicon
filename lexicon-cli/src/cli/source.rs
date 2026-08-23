@@ -31,6 +31,14 @@ pub struct CreateSourceCommand {
 pub struct BuildSourceCommand {
     #[arg(value_name = "SOURCE_NAME")]
     pub source_name: String,
+
+    #[arg(
+        long,
+        value_name = "PROTOCOL",
+        required = true,
+        help = "Protocol implementation to build. Only http is supported right now."
+    )]
+    pub protocol: String,
 }
 
 impl CreateSourceCommand {
@@ -41,6 +49,20 @@ impl CreateSourceCommand {
         } else {
             Err(format!(
                 "unsupported protocol '{}'; only 'http' is currently supported for source creation",
+                self.protocol
+            ))
+        }
+    }
+}
+
+impl BuildSourceCommand {
+    pub fn normalized_protocol(&self) -> Result<String, String> {
+        let value = self.protocol.trim();
+        if value.eq_ignore_ascii_case("http") {
+            Ok("http".to_owned())
+        } else {
+            Err(format!(
+                "unsupported protocol '{}'; only 'http' is currently supported for source build",
                 self.protocol
             ))
         }
@@ -96,18 +118,45 @@ mod tests {
     }
 
     #[test]
-    fn parses_build_source_command_with_source_name() {
-        let cli = Cli::try_parse_from(["lexicon", "source", "build", "example-source"])
-            .expect("lexicon source build example-source should parse");
+    fn parses_build_source_command_with_source_name_and_protocol() {
+        let cli = Cli::try_parse_from([
+            "lexicon",
+            "source",
+            "build",
+            "example-source",
+            "--protocol",
+            "http",
+        ])
+        .expect("lexicon source build example-source --protocol http should parse");
 
         match cli.command {
             Some(RootCommand::Source(SourceCommand {
                 action: SourceAction::Build(command),
             })) => {
                 assert_eq!(command.source_name, "example-source");
+                assert_eq!(command.protocol, "http");
+                assert_eq!(command.normalized_protocol().unwrap(), "http");
             }
             other => panic!("expected Source::Build subcommand, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_build_source_command_without_protocol() {
+        let result = Cli::try_parse_from(["lexicon", "source", "build", "example-source"]);
+        assert!(result.is_err(), "source build requires --protocol");
+    }
+
+    #[test]
+    fn rejects_build_source_command_without_protocol_value() {
+        let result = Cli::try_parse_from([
+            "lexicon",
+            "source",
+            "build",
+            "example-source",
+            "--protocol",
+        ]);
+        assert!(result.is_err(), "--protocol requires a value");
     }
 
     #[test]
@@ -139,11 +188,13 @@ mod tests {
     }
 
     #[test]
-    fn build_command_struct_has_source_name() {
+    fn build_command_struct_has_source_name_and_protocol() {
         let command = BuildSourceCommand {
             source_name: "example-source".to_owned(),
+            protocol: "http".to_owned(),
         };
 
         assert_eq!(command.source_name, "example-source");
+        assert_eq!(command.protocol, "http");
     }
 }

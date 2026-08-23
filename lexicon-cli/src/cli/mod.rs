@@ -77,7 +77,23 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                 }
                 Ok(())
             }
-            SourceAction::Build(_) => Err("[lexicon] ERROR: source build is not implemented".to_owned()),
+            SourceAction::Build(build_command) => {
+                let framework_path = framework_binary_path()?;
+                let status = Command::new(framework_path)
+                    .args([
+                        "source",
+                        "build",
+                        &build_command.source_name,
+                        "--protocol",
+                        &build_command.protocol,
+                    ])
+                    .status()
+                    .map_err(|error| format!("failed to execute framework binary: {error}"))?;
+                if !status.success() {
+                    std::process::exit(status.code().unwrap_or(1));
+                }
+                Ok(())
+            }
         },
         Some(RootCommand::Init(command)) => {
             let project_root = initialize_project(&command.parent_path, &command.project_name)?;
@@ -164,10 +180,75 @@ fn locate_workspace_root() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::process::Command;
 
     use super::{Cli, RootCommand};
     use crate::cli::source::{CreateSourceCommand, SourceAction, SourceCommand};
     use clap::Parser;
+
+    fn resolve_cli_binary() -> std::path::PathBuf {
+        if let Ok(path) = std::env::var("CARGO_BIN_EXE_lexicon-cli") {
+            return std::path::PathBuf::from(path);
+        }
+
+        let current_exe = std::env::current_exe().unwrap();
+        if let Some(path) = current_exe.ancestors().find_map(|ancestor| {
+            let candidate = ancestor.join("target").join("debug").join("lexicon-cli");
+            candidate.exists().then_some(candidate)
+        }) {
+            return path;
+        }
+
+        let workspace_root = current_exe
+            .ancestors()
+            .find_map(|ancestor| {
+                let marker = ancestor.join("Cargo.toml");
+                let is_workspace = marker.exists() && std::fs::read_to_string(&marker).ok().is_some_and(|text| text.contains("[workspace]"));
+                is_workspace.then_some(ancestor.to_path_buf())
+            })
+            .unwrap_or_else(|| std::env::current_dir().unwrap());
+
+        let status = Command::new("cargo")
+            .current_dir(&workspace_root)
+            .args(["build", "-p", "lexicon-cli", "-p", "lexicon-framework"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "building the CLI and framework binaries should succeed");
+
+        workspace_root.join("target").join("debug").join("lexicon-cli")
+    }
+
+    fn resolve_framework_binary() -> std::path::PathBuf {
+        if let Ok(path) = std::env::var("CARGO_BIN_EXE_lexicon-framework") {
+            return std::path::PathBuf::from(path);
+        }
+
+        let current_exe = std::env::current_exe().unwrap();
+        if let Some(path) = current_exe.ancestors().find_map(|ancestor| {
+            let candidate = ancestor.join("target").join("debug").join("lexicon-framework");
+            candidate.exists().then_some(candidate)
+        }) {
+            return path;
+        }
+
+        let workspace_root = current_exe
+            .ancestors()
+            .find_map(|ancestor| {
+                let marker = ancestor.join("Cargo.toml");
+                let is_workspace = marker.exists() && std::fs::read_to_string(&marker).ok().is_some_and(|text| text.contains("[workspace]"));
+                is_workspace.then_some(ancestor.to_path_buf())
+            })
+            .unwrap_or_else(|| std::env::current_dir().unwrap());
+
+        let status = Command::new("cargo")
+            .current_dir(&workspace_root)
+            .args(["build", "-p", "lexicon-cli", "-p", "lexicon-framework"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "building the CLI and framework binaries should succeed");
+
+        workspace_root.join("target").join("debug").join("lexicon-framework")
+    }
 
     #[test]
     fn cli_source_create_prints_only_framework_success_output() {
@@ -175,21 +256,8 @@ mod tests {
         let project_root = temp.path();
         fs::write(project_root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n").unwrap();
 
-        let self_exe = std::env::current_exe().unwrap();
-        let cli_bin = self_exe
-            .ancestors()
-            .find_map(|ancestor| {
-                let candidate = ancestor.join("target").join("debug").join("lexicon-cli");
-                candidate.exists().then_some(candidate)
-            })
-            .expect("lexicon-cli binary should exist in the test target directory");
-        let framework_bin = self_exe
-            .ancestors()
-            .find_map(|ancestor| {
-                let candidate = ancestor.join("target").join("debug").join("lexicon-framework");
-                candidate.exists().then_some(candidate)
-            })
-            .expect("lexicon-framework binary should exist in the test target directory");
+        let cli_bin = resolve_cli_binary();
+        let framework_bin = resolve_framework_binary();
 
         let output = std::process::Command::new(cli_bin)
             .current_dir(project_root)
@@ -240,21 +308,8 @@ mod tests {
         fs::create_dir_all(project_root.join("sources/preexisting-scratch")).unwrap();
         fs::write(project_root.join("sources/preexisting-scratch/keep.txt"), "keep-me\n").unwrap();
 
-        let self_exe = std::env::current_exe().unwrap();
-        let cli_bin = self_exe
-            .ancestors()
-            .find_map(|ancestor| {
-                let candidate = ancestor.join("target").join("debug").join("lexicon-cli");
-                candidate.exists().then_some(candidate)
-            })
-            .expect("lexicon-cli binary should exist in the test target directory");
-        let framework_bin = self_exe
-            .ancestors()
-            .find_map(|ancestor| {
-                let candidate = ancestor.join("target").join("debug").join("lexicon-framework");
-                candidate.exists().then_some(candidate)
-            })
-            .expect("lexicon-framework binary should exist in the test target directory");
+        let cli_bin = resolve_cli_binary();
+        let framework_bin = resolve_framework_binary();
 
         let output = std::process::Command::new(cli_bin)
             .current_dir(project_root)
@@ -274,21 +329,8 @@ mod tests {
         let project_root = temp.path();
         fs::write(project_root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n").unwrap();
 
-        let self_exe = std::env::current_exe().unwrap();
-        let cli_bin = self_exe
-            .ancestors()
-            .find_map(|ancestor| {
-                let candidate = ancestor.join("target").join("debug").join("lexicon-cli");
-                candidate.exists().then_some(candidate)
-            })
-            .expect("lexicon-cli binary should exist in the test target directory");
-        let framework_bin = self_exe
-            .ancestors()
-            .find_map(|ancestor| {
-                let candidate = ancestor.join("target").join("debug").join("lexicon-framework");
-                candidate.exists().then_some(candidate)
-            })
-            .expect("lexicon-framework binary should exist in the test target directory");
+        let cli_bin = resolve_cli_binary();
+        let framework_bin = resolve_framework_binary();
 
         let output = std::process::Command::new(cli_bin)
             .current_dir(project_root)
@@ -307,11 +349,9 @@ mod tests {
     }
 
     #[test]
-    fn source_build_returns_not_implemented_error() {
-        let cli = Cli::try_parse_from(["lexicon", "source", "build", "example-source"]).unwrap();
-        let result = super::dispatch(cli);
+    fn source_build_requires_protocol_flag() {
+        let result = Cli::try_parse_from(["lexicon", "source", "build", "example-source"]);
 
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "[lexicon] ERROR: source build is not implemented");
     }
 }
