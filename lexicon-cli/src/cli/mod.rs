@@ -59,27 +59,26 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
             );
             Ok(())
         }
-        Some(RootCommand::Source(command)) => {
-            match command.action {
-                SourceAction::New(new_command) => {
-                    let framework_path = framework_binary_path()?;
-                    let status = Command::new(framework_path)
-                        .args([
-                            "source",
-                            "new",
-                            &new_command.source_name,
-                            "--protocol",
-                            &new_command.protocol,
-                        ])
-                        .status()
-                        .map_err(|error| format!("failed to execute framework binary: {error}"))?;
-                    if !status.success() {
-                        std::process::exit(status.code().unwrap_or(1));
-                    }
-                    Ok(())
+        Some(RootCommand::Source(command)) => match command.action {
+            SourceAction::Create(create_command) => {
+                let framework_path = framework_binary_path()?;
+                let status = Command::new(framework_path)
+                    .args([
+                        "source",
+                        "create",
+                        &create_command.source_name,
+                        "--protocol",
+                        &create_command.protocol,
+                    ])
+                    .status()
+                    .map_err(|error| format!("failed to execute framework binary: {error}"))?;
+                if !status.success() {
+                    std::process::exit(status.code().unwrap_or(1));
                 }
+                Ok(())
             }
-        }
+            SourceAction::Build(_) => Err("[lexicon] ERROR: source build is not implemented".to_owned()),
+        },
         Some(RootCommand::Init(command)) => {
             let project_root = initialize_project(&command.parent_path, &command.project_name)?;
             println!("[lexicon] Initialized project '{}' at {}", command.project_name, project_root.display());
@@ -167,11 +166,11 @@ mod tests {
     use std::fs;
 
     use super::{Cli, RootCommand};
-    use crate::cli::source::{NewSourceCommand, SourceAction, SourceCommand};
+    use crate::cli::source::{CreateSourceCommand, SourceAction, SourceCommand};
     use clap::Parser;
 
     #[test]
-    fn cli_source_new_prints_only_framework_success_output() {
+    fn cli_source_create_prints_only_framework_success_output() {
         let temp = tempfile::tempdir().unwrap();
         let project_root = temp.path();
         fs::write(project_root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n").unwrap();
@@ -195,7 +194,7 @@ mod tests {
         let output = std::process::Command::new(cli_bin)
             .current_dir(project_root)
             .env("LEXICON_FRAMEWORK_PATH", framework_bin)
-            .args(["source", "new", "example-source", "--protocol", "http"])
+            .args(["source", "create", "example-source", "--protocol", "http"])
             .output()
             .unwrap();
 
@@ -211,11 +210,11 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_source_new_produces_only_framework_output() {
+    fn dispatch_source_create_produces_only_framework_output() {
         let cli = Cli::try_parse_from([
             "lexicon",
             "source",
-            "new",
+            "create",
             "example-source",
             "--protocol",
             "http",
@@ -224,12 +223,12 @@ mod tests {
 
         match cli.command {
             Some(RootCommand::Source(SourceCommand {
-                action: SourceAction::New(NewSourceCommand { source_name, protocol }),
+                action: SourceAction::Create(CreateSourceCommand { source_name, protocol }),
             })) => {
                 assert_eq!(source_name, "example-source");
                 assert_eq!(protocol, "http");
             }
-            other => panic!("expected source new command, got {other:?}"),
+            other => panic!("expected source create command, got {other:?}"),
         }
     }
 
@@ -260,7 +259,7 @@ mod tests {
         let output = std::process::Command::new(cli_bin)
             .current_dir(project_root)
             .env("LEXICON_FRAMEWORK_PATH", framework_bin)
-            .args(["source", "new", "example-source", "--protocol", "http"])
+            .args(["source", "create", "example-source", "--protocol", "http"])
             .output()
             .unwrap();
 
@@ -294,7 +293,7 @@ mod tests {
         let output = std::process::Command::new(cli_bin)
             .current_dir(project_root)
             .env("LEXICON_FRAMEWORK_PATH", framework_bin)
-            .args(["source", "new", "unsupported-source", "--protocol", "browser"])
+            .args(["source", "create", "unsupported-source", "--protocol", "browser"])
             .output()
             .unwrap();
 
@@ -305,5 +304,14 @@ mod tests {
         assert_eq!(output.status.code(), Some(1), "unsupported protocol should exit 1 from the framework");
         assert_eq!(combined.matches("[lexicon] ERROR:").count(), 1, "exactly one Lexicon error should be reported: {combined}");
         assert!(!combined.contains("[lexicon] Created source"), "success output must not be emitted on failure");
+    }
+
+    #[test]
+    fn source_build_returns_not_implemented_error() {
+        let cli = Cli::try_parse_from(["lexicon", "source", "build", "example-source"]).unwrap();
+        let result = super::dispatch(cli);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "[lexicon] ERROR: source build is not implemented");
     }
 }
