@@ -1,30 +1,196 @@
-# Source-build verification report
+# Current task: close the final source-build staging and error-message issues
 
-## Verdict
+## Scope
 
-VERIFIED COMPLETE
+The `lexicon source build` implementation is otherwise verified complete.
 
-## Files changed
+Make only these two focused corrections:
 
-- lexicon-framework/src/main.rs
-- current.md
+1. Replace the predictable PID-only runtime staging filename with a uniquely randomized staging path.
+2. Correct the unsupported-protocol error so it does not incorrectly describe a build operation as source creation.
 
-## Production corrections
+Do not redesign the build flow or modify unrelated behavior.
 
-- The live source-build verification exposed a real lifecycle defect in the temporary Cargo target directory created by `build_single_crate`. The target directory was being dropped before the built binary was copied into the runtime directory, which caused a fresh-project build to fail at staging.
-- The fix was the smallest required correction: retain the `TempDir` for as long as the built binary is staged and published by returning a `BuiltExecutable` wrapper that owns the temporary target directory.
-- The existing Cargo JSON selection, locked Cargo build invocation, and rollback logic were preserved; no redesign or unrelated production changes were introduced.
+## Correction 1: randomized runtime staging
 
-## Real end-to-end command
+The current staging pattern is equivalent to:
+
+```text
+.<executable-name>.staging-<pid>
+```
+
+A process ID alone is not a sufficiently unique staging identifier. A stale file left by an earlier process can collide after the operating system reuses that PID.
+
+Replace the PID-only construction with a randomized tempfile-managed staging file created inside the corresponding runtime directory.
+
+The staging file must remain in the runtime directory so final publication can use a same-filesystem rename.
+
+The resulting behavior must be equivalent to:
+
+```text
+<runtime-directory>/.<executable-name>.staging-<random-unique-suffix>
+```
+
+Use the `tempfile` crate rather than manually combining the PID with a timestamp.
+
+An appropriate design is:
+
+```rust
+tempfile::Builder::new()
+    .prefix(&format!(".{executable_name}.staging-"))
+    .tempfile_in(runtime_directory)
+```
+
+Adapt this to the existing staging and publication functions.
+
+## Staging-file requirements
+
+The corrected staging flow must:
+
+1. Create the staging file inside the final runtime directory.
+2. Use a randomized unique suffix.
+3. Never rely only on the process ID.
+4. Copy the compiled executable bytes into the staging file.
+5. Preserve executable permissions.
+6. Close or persist the temporary file correctly before final rename when required by the platform.
+7. Keep final publication on the same filesystem.
+8. Remove the staging file automatically or explicitly after failure.
+9. Leave no staging file after successful publication.
+10. Preserve unrelated preexisting files.
+11. Preserve `.gitignore`.
+12. Continue working on both Unix and Windows.
+13. Preserve the existing transactional two-runtime rollback behavior.
+
+Do not weaken the existing backup or rollback logic.
+
+## Collision behavior
+
+A preexisting file matching the old PID-only format must not be removed, overwritten, or reused.
+
+For example, if this already exists:
+
+```text
+.<executable-name>.staging-<current-pid>
+```
+
+the new staging flow must create a different randomized path and leave the preexisting file unchanged.
+
+The operation must also be able to create multiple staging files without producing the same path.
+
+## Required staging tests
+
+Add focused tests proving:
+
+1. Two staging-file allocations for the same executable and runtime directory produce different paths.
+2. Both staging paths are inside the requested runtime directory.
+3. The staging basename begins with:
+
+```text
+.<executable-name>.staging-
+```
+
+4. The complete staging basename is not merely:
+
+```text
+.<executable-name>.staging-<current-pid>
+```
+
+5. A preexisting old PID-style staging file remains unchanged.
+6. A failed staging or publication operation removes the newly created randomized staging file.
+7. Successful publication leaves no randomized staging file.
+8. `.gitignore` remains unchanged.
+9. Unrelated runtime files remain unchanged.
+10. The existing second-publication-failure test still restores both previous runtime executables.
+
+Use isolated temporary directories.
+
+Do not verify this only by searching production source code for the word `tempfile`. Execute the staging behavior.
+
+## Correction 2: protocol error wording
+
+The current source-build rejection reports:
+
+```text
+unsupported protocol 'browser'; only 'http' is currently supported for source creation
+```
+
+That is incorrect when the user invoked:
 
 ```bash
-cd /workspaces/lexicon
-cargo build -p lexicon-cli -p lexicon-framework
+lexicon source build example-source --protocol browser
+```
 
+Change the shared validation error to the operation-neutral message:
+
+```text
+unsupported protocol 'browser'; only 'http' is currently supported
+```
+
+The complete public error must be:
+
+```text
+[lexicon] ERROR: unsupported protocol 'browser'; only 'http' is currently supported
+```
+
+Use the same neutral validation message for `source create` and `source build`.
+
+Do not duplicate protocol-validation implementations merely to change the noun in the message.
+
+## Required error tests
+
+Add or update tests proving:
+
+1. This command exits with status `1`:
+
+```bash
+lexicon source build example-source --protocol browser
+```
+
+2. Its combined output contains exactly one:
+
+```text
+[lexicon] ERROR:
+```
+
+3. Its output contains:
+
+```text
+unsupported protocol 'browser'; only 'http' is currently supported
+```
+
+4. Its output does not contain:
+
+```text
+source creation
+```
+
+5. The unsupported build command does not invoke Cargo.
+6. The unsupported build command does not modify either runtime executable.
+7. The unsupported create command uses the same neutral protocol message.
+8. Existing valid HTTP create and build commands remain unaffected.
+
+## Required regression verification
+
+Run:
+
+```bash
+cargo test -p lexicon-cli -p lexicon-framework -- --nocapture
+```
+
+Report package-specific results for:
+
+- `lexicon-cli`
+- `lexicon-framework`
+- `lexicon-framework-core`
+- doc tests
+
+Then repeat the real supported flow:
+
+```bash
+verification_root="$(mktemp -d)"
 repo_root="$(git rev-parse --show-toplevel)"
 cli_binary="$repo_root/target/debug/lexicon-cli"
 framework_binary="$repo_root/target/debug/lexicon-framework"
-verification_root="$(mktemp -d)"
 
 "$cli_binary" init "$verification_root" demo-project
 cd "$verification_root/demo-project"
@@ -36,204 +202,120 @@ LEXICON_FRAMEWORK_PATH="$framework_binary" \
     "$cli_binary" source build example-source --protocol http
 ```
 
-## Source-build output and exit code
+Verify that both runtime executables still exist and are regular executable files.
 
-```text
-BUILD_STATUS=0
-    Updating git repository `https://github.com/ssr2zvy/lexicon`
-     Locking 1 package to latest Rust 1.97.1 compatible version
-    Updating git repository `https://github.com/ssr2zvy/lexicon`
-     Locking 1 package to latest Rust 1.97.1 compatible version
-[lexicon] Built source 'example-source' using protocol 'http'
-[lexicon] Runtime executables:
-[lexicon]   - /tmp/tmp.efdoljcG9a/demo-project/sources/example-source/http/get-raw-data/runtime/example-source-get-raw-data
-[lexicon]   - /tmp/tmp.efdoljcG9a/demo-project/sources/example-source/http/process-data/runtime/example-source-process-data
-```
-
-Exit code: 0.
-
-Second-build failure check:
-
-```text
-FAILED_BUILD_STATUS=1
-   Compiling example-source-process-data v0.1.0 (/tmp/tmp.efdoljcG9a/demo-project/sources/example-source/http/process-data/process-data-impl)
-error: expected one of `!` or `::`, found `<eof>`
- --> src/main.rs:6:1
-  |
-6 | INVALID_SYNTAX
-  | ^^^^^^^^^^^^^^ expected one of `!` or `::`
-
-[lexicon] ERROR: process-data implementation build failed
-```
-
-Exit code: 1.
-
-## Runtime executable paths
-
-```text
-get_executable=sources/example-source/http/get-raw-data/runtime/example-source-get-raw-data
-process_executable=sources/example-source/http/process-data/runtime/example-source-process-data
-```
-
-Verified checks performed in the temp project:
+Then run the corrected rejection:
 
 ```bash
-test -f "$get_executable"
-test -f "$process_executable"
-test -x "$get_executable"
-test -x "$process_executable"
+set +e
+unsupported_output="$(
+    LEXICON_FRAMEWORK_PATH="$framework_binary" \
+        "$cli_binary" source build example-source --protocol browser 2>&1
+)"
+unsupported_status=$?
+set -e
 ```
 
-These checks passed.
-
-## Successful-build hashes
-
-```text
-GET_HASH_BEFORE=93499de4daab02024d832b0256eec095a0a8839d5841c8af8e77518986453490
-PROCESS_HASH_BEFORE=4579906342c7f7d8b88e803687b21eef08d8407ad598686f978f519c1eedebb2
-```
-
-## Failed-second-build preservation
-
-After the successful build, the generated `process-data` implementation file was intentionally broken by appending `INVALID_SYNTAX`, the failed build was run, and the original file was restored immediately afterward.
-
-```text
-GET_HASH_AFTER=93499de4daab02024d832b0256eec095a0a8839d5841c8af8e77518986453490
-PROCESS_HASH_AFTER=4579906342c7f7d8b88e803687b21eef08d8407ad598686f978f519c1eedebb2
-```
-
-Required checks:
+Verify:
 
 ```bash
-test "$get_hash_after" = "$get_hash_before"
-test "$process_hash_after" = "$process_hash_before"
+test "$unsupported_status" -eq 1
+
+test "$(
+    printf '%s\n' "$unsupported_output" |
+        grep -c '\[lexicon\] ERROR:'
+)" -eq 1
+
+printf '%s\n' "$unsupported_output" |
+    grep -F "unsupported protocol 'browser'; only 'http' is currently supported"
+
+if printf '%s\n' "$unsupported_output" | grep -F "source creation"; then
+    exit 1
+fi
 ```
 
-These checks passed, proving neither published runtime changed after the failed second build.
+Confirm the runtime executable hashes remain unchanged after this rejected command.
 
-## Cargo command construction
+## Production-code rule
 
-The exact command constructed in `build_single_crate` is:
+Modify only the functions necessary for:
+
+- Runtime staging-file allocation and lifecycle.
+- Neutral unsupported-protocol wording.
+- Their focused tests.
+
+If another production defect is discovered, document the exact failing executable test before correcting it.
+
+Do not modify unrelated source creation, compilation, Cargo JSON parsing, publication, rollback, MZA, bundle, installer, or data-runtime behavior.
+
+## Scope exclusions
+
+Do not implement:
+
+- Cross-target builds.
+- Root `lexicon build`.
+- Data command execution.
+- HTTP acquisition.
+- Raw transaction recording.
+- SQLite processing.
+- Additional protocols.
+- Adding protocols to existing sources.
+- MZA or bundling changes.
+
+## Required final report
+
+Replace `current.md` completely with one clean report using these sections:
 
 ```text
-cargo build --release --locked --manifest-path <manifest> --target-dir <tempdir> --message-format=json-render-diagnostics
-```
+# Final source-build correction report
 
-The two manifest paths used in the verified run were:
+## Verdict
 
-```text
-/tmp/tmp.efdoljcG9a/demo-project/sources/example-source/http/get-raw-data/get-raw-data-impl/Cargo.toml
-/tmp/tmp.efdoljcG9a/demo-project/sources/example-source/http/process-data/process-data-impl/Cargo.toml
-```
+## Files changed
 
-The temporary target directories are created with a unique prefix:
+## Randomized staging implementation
 
-```text
-lexicon-{operation_name}-build-
-```
+## Staging collision tests
 
-This keeps the two Cargo target directories distinct and uniquely scoped for each crate build.
+## Staging cleanup and rollback tests
 
-## Cargo JSON executable selection
+## Protocol error correction
 
-The relevant function is `select_executable_from_cargo_json` in lexicon-framework/src/main.rs.
+## Unsupported-protocol command evidence
 
-Selection rules:
-
-- parse each JSON line from Cargo output
-- keep only `reason == "compiler-artifact"`
-- require `target.kind` to include `bin`
-- reject `lib`, `test`, `example`, dependency, and custom build entries
-- match the requested operation name via the target name or package id
-- require an `executable` path to exist
-- reject the build if the candidate list is empty
-- reject the build if more than one matching executable is found
-
-Exact test names:
-
-- selects_correct_binary_artifact_from_compiler_json
-- ignores_unrelated_compiler_artifact_json
-- rejects_missing_executable_in_compiler_artifact_json
-- rejects_ambiguous_executable_selection_in_compiler_artifact_json
-
-## Publication rollback tests
-
-The transaction logic is in `publish_runtime_transaction` and `restore_runtime_after_failure` in lexicon-framework/src/main.rs.
-
-Exact proof tests:
-
-1. publication_transaction_publishes_both_executables_successfully
-2. publication_transaction_backs_up_existing_executables
-3. publication_failure_in_second_publish_restores_the_first_runtime
-4. publication_failure_restores_both_previous_runtime_executables
-5. transaction_cleanup_removes_staged_files_after_failure
-6. transaction_cleanup_removes_backup_files_after_success
-7. unrelated_runtime_files_remain_untouched
-8. gitignore_file_remains_untouched_after_runtime_restore
-
-## Temporary-file cleanup
-
-Staged-file pattern used by the runtime publication flow:
-
-```text
-.{}.staging-<pid>
-```
-
-Backup-file pattern:
-
-```text
-.backup-<pid>-<nanoseconds>
-```
-
-Proof of cleanup:
-
-```text
----RUNTIME_TREE---
-sources/example-source/http/get-raw-data/runtime/example-source-get-raw-data
-sources/example-source/http/process-data/runtime/example-source-process-data
----GITIGNORE---
-.  ..  .gitignore  example-source-get-raw-data
-.  ..  .gitignore  example-source-process-data
-```
-
-No `.staging-*` or `.backup-*` files remained, and no temporary `lexicon-*build-*` directories remained in `/tmp` after the run.
-
-## Rejection commands and exit codes
-
-```text
-lexicon source add example-source
-exit code: 2
-error: unrecognized subcommand 'add'
-
-lexicon source build example-source
-exit code: 2
-error: the following required arguments were not provided:
-  --protocol <PROTOCOL>
-
-lexicon source build example-source --protocol browser
-exit code: 1
-[lexicon] ERROR: unsupported protocol 'browser'; only 'http' is currently supported for source creation
-```
-
-These rejection paths did not modify either published runtime executable.
+## Supported end-to-end build
 
 ## Test results
 
-Command run:
-
-```bash
-cargo test -p lexicon-cli -p lexicon-framework -- --nocapture
+## Remaining gaps
 ```
 
-Result:
+Under `## Verdict`, use exactly one of:
 
 ```text
-lexicon-cli: 24 passed, 0 failed
-lexicon-framework: 23 passed, 0 failed
-lexicon-framework-core: 1 passed, 0 failed
-doc tests: 0 failed
+VERIFIED COMPLETE
 ```
 
-## Remaining gaps
+or:
 
-None for the supported `http` source-build contract verified in this workspace.
+```text
+NOT VERIFIED COMPLETE
+```
+
+The report must include:
+
+- The exact staging-allocation function changed.
+- The exact randomized tempfile API used.
+- Exact staging-related test names.
+- Proof that two staging paths differ.
+- Proof that an old PID-style file remains untouched.
+- Proof that failed and successful operations leave no new staging files.
+- The exact corrected unsupported-protocol output.
+- The exact unsupported-protocol exit code.
+- Proof that existing runtime hashes remain unchanged after rejection.
+- Package-specific test totals.
+- Any remaining failure or blocker.
+
+Do not append this task after the report.
+
+Do not declare completion unless both focused corrections and every listed regression check pass.
