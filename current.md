@@ -1,131 +1,407 @@
-# Implementation report for the source-build task
+# Current task: provide conclusive source-build verification
 
-## Scope and outcome
+## Purpose
 
-Implemented the requested `lexicon source build <source-name> --protocol <protocol>` flow, aligned with the repository specification in [instructions.md](instructions.md). The CLI now requires a source name and a `--protocol` flag, forwards the command to the framework, and the framework validates the Lexicon project, source metadata, and protocol-scoped source layout before compiling and publishing both implementation crates.
+The implementation report claims that `lexicon source build` is complete, but it does not provide enough source-build-specific evidence to verify the claim against the preceding task.
 
-## Changed files
+This is a verification-first task.
 
-- [lexicon-cli/src/cli/source.rs](lexicon-cli/src/cli/source.rs)
-- [lexicon-cli/src/cli/mod.rs](lexicon-cli/src/cli/mod.rs)
-- [lexicon-framework/src/main.rs](lexicon-framework/src/main.rs)
-- [lexicon-framework/Cargo.toml](lexicon-framework/Cargo.toml)
-- [current.md](current.md)
+Do not redesign the implementation.
 
-## Final CLI parser and behavior
+Do not modify production code unless one of the required executable checks fails and exposes a real defect.
 
-The parser now exposes:
+The general build/bundle/install automation does not substitute for the source-build-specific verification required here.
 
-- `SourceAction::Build(BuildSourceCommand)`
-- `BuildSourceCommand { source_name: String, protocol: String }`
+## Command being verified
 
-The command is accepted only in the form:
+```bash
+lexicon source build <source-name> --protocol <protocol>
+```
+
+Current supported example:
 
 ```bash
 lexicon source build example-source --protocol http
 ```
 
-and rejected when:
+## Required implementation behavior
 
-- the source name is missing
-- `--protocol` is missing
-- the protocol value is missing
-- the protocol is unsupported
-- the deprecated `source add` command is used
+The command must:
 
-The CLI dispatch sends the framework this exact sequence:
+1. Locate the containing Lexicon project.
+2. Resolve the configured sources directory.
+3. Resolve:
 
 ```text
-source
+sources/<source-name>/<protocol>/
+```
+
+4. Validate `source.toml`.
+5. Build:
+
+```text
+get-raw-data/get-raw-data-impl/
+process-data/process-data-impl/
+```
+
+6. Use native Cargo release builds with `--locked`.
+7. Parse Cargo JSON to identify each binary executable.
+8. Finish both builds before publishing either executable.
+9. Publish each executable into its corresponding sibling runtime directory.
+10. Preserve both existing runtime executables if either compilation fails.
+11. Roll back both runtime outputs if publication fails partway through.
+12. Remove task-created staging and backup files.
+13. Print success only after both runtime executables are published.
+
+## First step: inspect actual code and tests
+
+Inspect the implementation responsible for:
+
+- CLI parsing.
+- CLI-to-framework dispatch.
+- Framework source-build dispatch.
+- Project/source/protocol validation.
+- Cargo command construction.
+- Cargo JSON parsing.
+- Executable selection.
+- Runtime staging.
+- Runtime publication.
+- Backup restoration.
+- Temporary-file cleanup.
+- Success and failure output.
+
+Inspect the bodies of existing tests.
+
+Do not infer coverage from aggregate test totals or test names alone.
+
+## Required real end-to-end flow
+
+Build the real Lexicon executables:
+
+```bash
+cd /workspaces/lexicon
+cargo build -p lexicon-cli -p lexicon-framework
+```
+
+Resolve them:
+
+```bash
+repo_root="$(git rev-parse --show-toplevel)"
+cli_binary="$repo_root/target/debug/lexicon-cli"
+framework_binary="$repo_root/target/debug/lexicon-framework"
+verification_root="$(mktemp -d)"
+```
+
+Initialize a fresh project:
+
+```bash
+"$cli_binary" init "$verification_root" demo-project
+cd "$verification_root/demo-project"
+```
+
+Create the source:
+
+```bash
+LEXICON_FRAMEWORK_PATH="$framework_binary" \
+    "$cli_binary" source create example-source --protocol http
+```
+
+Build the source:
+
+```bash
+LEXICON_FRAMEWORK_PATH="$framework_binary" \
+    "$cli_binary" source build example-source --protocol http
+```
+
+Record:
+
+- Exact source-build exit code.
+- Exact Lexicon-owned output.
+- Exact final get-raw-data executable path.
+- Exact final process-data executable path.
+
+Do not replace these results with a statement such as “the command succeeded.”
+
+## Required runtime checks
+
+Resolve both runtime directories:
+
+```bash
+get_runtime="sources/example-source/http/get-raw-data/runtime"
+process_runtime="sources/example-source/http/process-data/runtime"
+```
+
+Verify that each contains exactly one regular executable file other than `.gitignore`.
+
+On Unix:
+
+```bash
+get_executable="$(
+    find "$get_runtime" -maxdepth 1 -type f ! -name '.gitignore'
+)"
+
+process_executable="$(
+    find "$process_runtime" -maxdepth 1 -type f ! -name '.gitignore'
+)"
+
+test "$(printf '%s\n' "$get_executable" | sed '/^$/d' | wc -l)" -eq 1
+test "$(printf '%s\n' "$process_executable" | sed '/^$/d' | wc -l)" -eq 1
+
+test -f "$get_executable"
+test -f "$process_executable"
+test -x "$get_executable"
+test -x "$process_executable"
+```
+
+Use the platform-equivalent regular-file checks on Windows.
+
+Report the actual filenames rather than placeholders.
+
+## Required successful-build hashes
+
+After the successful build, record:
+
+```bash
+get_hash_before="$(sha256sum "$get_executable" | awk '{print $1}')"
+process_hash_before="$(sha256sum "$process_executable" | awk '{print $1}')"
+```
+
+Report both hashes.
+
+Use the platform-equivalent hashing command on Windows.
+
+## Required failed-second-build verification
+
+Perform this only inside the temporary generated project, never against repository source files.
+
+Introduce a compile error into:
+
+```text
+sources/example-source/http/process-data/process-data-impl/src/main.rs
+```
+
+Preserve its original contents first.
+
+Run:
+
+```bash
+set +e
+LEXICON_FRAMEWORK_PATH="$framework_binary" \
+    "$cli_binary" source build example-source --protocol http
+failed_build_status=$?
+set -e
+```
+
+Restore the generated source file afterward.
+
+Verify:
+
+```bash
+test "$failed_build_status" -ne 0
+
+get_hash_after="$(sha256sum "$get_executable" | awk '{print $1}')"
+process_hash_after="$(sha256sum "$process_executable" | awk '{print $1}')"
+
+test "$get_hash_after" = "$get_hash_before"
+test "$process_hash_after" = "$process_hash_before"
+```
+
+Report:
+
+- Exact failed-build exit code.
+- Get runtime hash before and after.
+- Process runtime hash before and after.
+- Confirmation that neither published runtime changed.
+
+This is the required proof that a successful first compilation followed by a failed second compilation does not partially publish.
+
+## Required Cargo-command evidence
+
+Provide the exact constructed Cargo arguments for both crates.
+
+They must contain:
+
+```text
 build
-<source-name>
---protocol
-<protocol>
+--release
+--locked
+--manifest-path
+--target-dir
+--message-format=json-render-diagnostics
 ```
 
-The CLI no longer emits a duplicate success message after the framework finishes.
+Provide the two exact manifest paths and confirm that the temporary target directories are distinct and uniquely scoped.
 
-## Framework validation flow
+Do not provide only an illustrative command.
 
-The framework now:
+## Required Cargo JSON evidence
 
-- finds the containing project via `lexicon.toml`
-- resolves the configured `sources_directory`
-- validates the source name and protocol
-- ensures the source root and protocol directory exist
-- loads and validates `source.toml`
-- rejects mismatched source/protocol metadata
-- rejects unsupported schema versions
-- rejects symlink/path traversal escapes outside the project root
-- rejects missing implementation manifests before publication
+Identify the exact functions responsible for parsing Cargo JSON.
 
-## Scaffold reconciliation
+Report:
 
-The scaffold generation flow was updated to produce the protocol-scoped structure with the required crate names:
+- The relevant `compiler-artifact` selection rule.
+- How the requested package is matched.
+- How binary targets are distinguished from libraries, tests, examples, dependencies, and build scripts.
+- How a missing executable is rejected.
+- How multiple applicable executables are rejected.
 
-- `get-raw-data/get-raw-data-impl`
-- `process-data/process-data-impl`
+Provide exact test function names for:
 
-It also generates the required runtime sibling directories and `.gitignore` files:
+- Selecting the correct binary artifact.
+- Ignoring unrelated artifacts.
+- Rejecting a missing executable.
+- Rejecting ambiguous executable output.
 
-```gitignore
-*
-!.gitignore
-```
+If any of these tests do not exist, add them.
 
-## Cargo build behavior
+## Required publication rollback evidence
 
-The build path uses the required cargo invocation pattern:
+Identify the exact function responsible for publishing both runtime executables.
+
+Provide exact test function names proving:
+
+1. Both staged executables publish successfully.
+2. Existing runtime executables are backed up.
+3. Failure while publishing the second executable restores the first executable.
+4. Both previous executables are restored.
+5. Staged files are removed.
+6. Backup files are removed.
+7. Unrelated runtime files remain untouched.
+8. `.gitignore` remains untouched.
+
+If publication failure cannot currently be injected deterministically, introduce a narrow test seam around filesystem publication operations.
+
+Do not use unreliable permission manipulation as the primary rollback test.
+
+Modify production code only as much as required to make the existing transaction behavior deterministically testable.
+
+## Required cleanup evidence
+
+After the successful and failed builds, inspect both runtime directories and the temporary build locations.
+
+Report:
+
+- Any filename pattern used for staged files.
+- Any filename pattern used for backup files.
+- The exact command or test assertion used to prove none remain.
+- Confirmation that temporary Cargo target directories were removed.
+- Confirmation that `.gitignore` remains in both runtime directories.
+
+## Required command rejection evidence
+
+Run and report exact exit codes for:
 
 ```bash
-cargo build --release --locked --manifest-path <manifest> --target-dir <temp-dir> --message-format=json-render-diagnostics
+lexicon source add example-source
 ```
-
-It uses isolated temporary target directories and parses Cargo JSON `compiler-artifact` output to identify the runtime executable. It rejects missing or ambiguous output and emits the required Lexicon-owned toolchain error when Cargo is unavailable.
-
-## Publication and rollback
-
-The runtime publication logic:
-
-- builds both crates before altering runtime directories
-- stages both executables in the runtime directory
-- preserves any existing runtime executable with backups
-- performs atomic same-filesystem moves when possible
-- restores previous files and removes staged artifacts during failure
-- only prints success after both successful publications
-
-Final runtime outputs are placed in the protocol-scoped runtime directories for each operation.
-
-## Verification evidence
-
-I validated the implementation with the repo’s relevant Rust test suite and the required build script.
-
-1. Rust validation command:
 
 ```bash
-cd /workspaces/lexicon && pushd /workspaces/lexicon >/dev/null && cargo test -p lexicon-cli -p lexicon-framework -- --nocapture ; popd >/dev/null
+lexicon source build example-source
 ```
-
-Result: all relevant tests passed.
-
-2. Repo-required validation command:
 
 ```bash
-cd /workspaces/lexicon && pushd /workspaces/lexicon >/dev/null && bash ./automation/build_bundle_install/build_bundle_install.sh ; popd >/dev/null
+lexicon source build example-source --protocol browser
 ```
 
-Result: build, bundle, and install completed successfully.
+Confirm that none of these commands modifies either runtime executable.
 
-## Test totals
+## Required test suite
 
-- `lexicon-cli`: 24 passed, 0 failed
-- `lexicon-framework` library tests: 1 passed, 0 failed
-- `lexicon-framework` binary tests: 10 passed, 0 failed
-- total relevant tests: 35 passed, 0 failed
+Run:
 
-## Final notes
+```bash
+cargo test -p lexicon-cli -p lexicon-framework -- --nocapture
+```
 
-- `source create` remains functional and uses the protocol-scoped scaffold.
-- `source add` remains rejected.
-- Root `lexicon build` remains unchanged.
-- No stale runtime staging or backup artifacts from the verification run remain in the repo tree.
+Report package-specific totals:
+
+- `lexicon-cli`
+- `lexicon-framework`
+- `lexicon-framework-core`
+- doc tests
+
+## Production-code modification rule
+
+If all required verification succeeds, do not modify production code.
+
+If a check fails:
+
+1. Record the exact failing command or test.
+2. Explain the violated contract.
+3. Apply the smallest production correction.
+4. Add or preserve a regression test.
+5. Rerun the focused test.
+6. Rerun the complete relevant test suite.
+7. Repeat the end-to-end source-build verification when affected.
+
+## Scope exclusions
+
+Do not implement:
+
+- Cross-target source builds.
+- cargo-zigbuild.
+- MZA integration.
+- Root `lexicon build`.
+- Runtime execution through data commands.
+- Actual HTTP acquisition.
+- Raw transaction recording.
+- SQLite processing.
+- Multiple protocols for one source.
+- Installation or bundling changes.
+
+## Required final report format
+
+Replace `current.md` completely with one report. Do not append this task or duplicate report sections.
+
+Use these exact top-level sections:
+
+```text
+# Source-build verification report
+
+## Verdict
+
+## Files changed
+
+## Production corrections
+
+## Real end-to-end command
+
+## Source-build output and exit code
+
+## Runtime executable paths
+
+## Successful-build hashes
+
+## Failed-second-build preservation
+
+## Cargo command construction
+
+## Cargo JSON executable selection
+
+## Publication rollback tests
+
+## Temporary-file cleanup
+
+## Rejection commands and exit codes
+
+## Test results
+
+## Remaining gaps
+```
+
+Under `## Verdict`, use exactly one of:
+
+```text
+VERIFIED COMPLETE
+```
+
+or:
+
+```text
+NOT VERIFIED COMPLETE
+```
+
+Do not use `VERIFIED COMPLETE` unless every required source-build-specific check in this task succeeds.
+
+The report must contain actual commands, paths, exit codes, hashes, and exact test function names. Aggregate claims such as “all relevant behavior passed” are insufficient.
