@@ -270,13 +270,13 @@ fn build_source(source_name: &str, protocol: &str) -> Result<(), String> {
     fs::create_dir_all(&get_runtime_dir).map_err(|error| format!("failed to create {}: {error}", get_runtime_dir.display()))?;
     fs::create_dir_all(&process_runtime_dir).map_err(|error| format!("failed to create {}: {error}", process_runtime_dir.display()))?;
 
-    let get_staged = stage_runtime_file(&get_runtime_dir, &get_executable, "get-raw-data")?;
-    let process_staged = stage_runtime_file(&process_runtime_dir, &process_executable, "process-data")?;
+    let get_staged = stage_runtime_file(&get_runtime_dir, &get_executable.path, "get-raw-data")?;
+    let process_staged = stage_runtime_file(&process_runtime_dir, &process_executable.path, "process-data")?;
 
     let mut get_backup = None;
     let mut process_backup = None;
-    let get_final = get_runtime_dir.join(get_executable.file_name().unwrap().to_string_lossy().as_ref());
-    let process_final = process_runtime_dir.join(process_executable.file_name().unwrap().to_string_lossy().as_ref());
+    let get_final = get_runtime_dir.join(get_executable.path.file_name().unwrap().to_string_lossy().as_ref());
+    let process_final = process_runtime_dir.join(process_executable.path.file_name().unwrap().to_string_lossy().as_ref());
 
     if get_final.exists() {
         get_backup = Some(move_to_backup(&get_final)?);
@@ -285,14 +285,17 @@ fn build_source(source_name: &str, protocol: &str) -> Result<(), String> {
         process_backup = Some(move_to_backup(&process_final)?);
     }
 
-    if let Err(error) = fs::rename(&get_staged, &get_final) {
-        restore_runtime_after_failure(&get_final, get_backup.as_ref(), &get_staged, &process_staged, &process_final, process_backup.as_ref())?;
-        return Err(format!("source runtime publication failed; previous runtimes were restored: {error}"));
-    }
-    if let Err(error) = fs::rename(&process_staged, &process_final) {
-        let _ = fs::remove_file(&get_final);
-        restore_runtime_after_failure(&get_final, get_backup.as_ref(), &get_staged, &process_staged, &process_final, process_backup.as_ref())?;
-        return Err(format!("source runtime publication failed; previous runtimes were restored: {error}"));
+    if let Err(error) = publish_runtime_transaction(
+        &get_staged,
+        &process_staged,
+        &get_final,
+        &process_final,
+        get_backup.as_ref(),
+        process_backup.as_ref(),
+        |src, dst| fs::rename(src, dst),
+        |path| fs::remove_file(path),
+    ) {
+        return Err(error);
     }
 
     if let Some(path) = get_backup.as_ref() {
@@ -331,10 +334,17 @@ fn load_source_metadata(path: &Path, expected_name: &str, expected_protocol: &st
     Ok(parsed)
 }
 
-fn build_single_crate(manifest_path: &Path, operation_name: &str) -> Result<PathBuf, String> {
+struct BuiltExecutable {
+    path: PathBuf,
+    _target_dir: tempfile::TempDir,
+}
+
+fn build_single_crate(manifest_path: &Path, operation_name: &str) -> Result<BuiltExecutable, String> {
     let manifest = manifest_path.canonicalize().map_err(|error| {
         format!("failed to resolve {}: {error}", manifest_path.display())
     })?;
+    ensure_lockfile_for_manifest(&manifest)?;
+
     let tempdir = tempfile::Builder::new()
         .prefix(&format!("lexicon-{operation_name}-build-"))
         .tempdir()
@@ -361,36 +371,82 @@ fn build_single_crate(manifest_path: &Path, operation_name: &str) -> Result<Path
         return Err(format!("{} implementation build failed", operation_name));
     }
 
-    let mut executable = None;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if value.get("reason").and_then(|item| item.as_str()) == Some("compiler-artifact") {
-                let target = value.get("target").and_then(|item| item.get("name")).and_then(|item| item.as_str());
-                if let Some(target_name) = target {
-                    let artifact = value.get("executable").and_then(|item| item.as_str());
-                    if let Some(path) = artifact {
-                        let candidate = PathBuf::from(path);
-                        if candidate.is_file() && candidate.file_name().is_some() && !candidate.ends_with(".d") {
-                            executable = Some(candidate);
-                            if target_name.contains("main") || target_name.contains("get-raw-data") || target_name.contains("process-data") || target_name.contains("-impl") {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let executable = executable.ok_or_else(|| format!("{} implementation build failed", operation_name))?;
+    let executable = select_executable_from_cargo_json(&String::from_utf8_lossy(&output.stdout), operation_name)?;
     if !executable.is_file() {
         return Err(format!("{} implementation build failed", operation_name));
     }
 
-    let _ = tempdir.close();
-    Ok(executable)
+    Ok(BuiltExecutable {
+        path: executable,
+        _target_dir: tempdir,
+    })
+}
+
+fn ensure_lockfile_for_manifest(manifest_path: &Path) -> Result<(), String> {
+    let status = Command::new("cargo")
+        .arg("generate-lockfile")
+        .arg("--manifest-path")
+        .arg(manifest_path)
+        .status()
+        .map_err(|error| format!("failed to generate lockfile for {}: {error}", manifest_path.display()))?;
+
+    if !status.success() {
+        return Err(format!("failed to generate Cargo lockfile for {}", manifest_path.display()));
+    }
+    Ok(())
+}
+
+fn select_executable_from_cargo_json(cargo_output: &str, operation_name: &str) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+
+    for line in cargo_output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+
+        if value.get("reason").and_then(|item| item.as_str()) != Some("compiler-artifact") {
+            continue;
+        }
+
+        let target = value.get("target").cloned().unwrap_or_default();
+        let kinds = target
+            .get("kind")
+            .and_then(|item| item.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let is_bin = kinds.iter().any(|item| item.as_str() == Some("bin"));
+        let is_lib = kinds.iter().any(|item| item.as_str() == Some("lib"));
+        if !is_bin || is_lib {
+            continue;
+        }
+
+        let target_name = target.get("name").and_then(|item| item.as_str()).unwrap_or("");
+        let package_id = value.get("package_id").and_then(|item| item.as_str()).unwrap_or("");
+        let matches_requested = target_name.contains(operation_name) || package_id.contains(operation_name);
+        if !matches_requested {
+            continue;
+        }
+
+        let executable = value.get("executable").and_then(|item| item.as_str());
+        let Some(path) = executable else {
+            return Err(format!("{} implementation build failed", operation_name));
+        };
+        let candidate = PathBuf::from(path);
+        if candidate.file_name().is_some() && !candidate.ends_with(".d") {
+            candidates.push(candidate);
+        }
+    }
+
+    match candidates.len() {
+        0 => Err(format!("{} implementation build failed", operation_name)),
+        1 => Ok(candidates[0].clone()),
+        _ => Err(format!("{} implementation build failed: multiple executable artifacts matched {}", operation_name, operation_name)),
+    }
 }
 
 fn stage_runtime_file(runtime_dir: &Path, source_executable: &Path, operation_name: &str) -> Result<PathBuf, String> {
@@ -414,25 +470,69 @@ fn move_to_backup(path: &Path) -> Result<PathBuf, String> {
     Ok(backup)
 }
 
-fn restore_runtime_after_failure(
+fn publish_runtime_transaction<F, R>(
+    get_staged: &Path,
+    process_staged: &Path,
+    get_final: &Path,
+    process_final: &Path,
+    get_backup: Option<&PathBuf>,
+    process_backup: Option<&PathBuf>,
+    rename: F,
+    remove: R,
+) -> Result<(), String>
+where
+    F: Fn(&Path, &Path) -> std::io::Result<()>,
+    R: Fn(&Path) -> std::io::Result<()>,
+{
+    if let Err(error) = rename(get_staged, get_final) {
+        restore_runtime_after_failure(
+            get_final,
+            get_backup,
+            get_staged,
+            process_staged,
+            process_final,
+            process_backup,
+            &remove,
+        )?;
+        return Err(format!("source runtime publication failed; previous runtimes were restored: {error}"));
+    }
+    if let Err(error) = rename(process_staged, process_final) {
+        let _ = remove(get_final);
+        restore_runtime_after_failure(
+            get_final,
+            get_backup,
+            get_staged,
+            process_staged,
+            process_final,
+            process_backup,
+            &remove,
+        )?;
+        return Err(format!("source runtime publication failed; previous runtimes were restored: {error}"));
+    }
+    Ok(())
+}
+
+fn restore_runtime_after_failure<F>(
     get_final: &Path,
     get_backup: Option<&PathBuf>,
     get_staged: &Path,
     process_staged: &Path,
     process_final: &Path,
     process_backup: Option<&PathBuf>,
-) -> Result<(), String> {
-    let _ = fs::remove_file(get_staged);
-    let _ = fs::remove_file(process_staged);
-    let _ = fs::remove_file(get_final);
-    let _ = fs::remove_file(process_final);
+    remove: &F,
+) -> Result<(), String>
+where
+    F: Fn(&Path) -> std::io::Result<()>,
+{
+    let _ = remove(get_staged);
+    let _ = remove(process_staged);
+    let _ = remove(get_final);
+    let _ = remove(process_final);
     if let Some(path) = get_backup {
-        let restored = get_final;
-        fs::rename(path, restored).map_err(|error| format!("failed to restore get runtime: {error}"))?;
+        fs::rename(path, get_final).map_err(|error| format!("failed to restore get runtime: {error}"))?;
     }
     if let Some(path) = process_backup {
-        let restored = process_final;
-        fs::rename(path, restored).map_err(|error| format!("failed to restore process runtime: {error}"))?;
+        fs::rename(path, process_final).map_err(|error| format!("failed to restore process runtime: {error}"))?;
     }
     Ok(())
 }
@@ -850,10 +950,14 @@ fn format_cargo_lockfile() -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io;
+    use std::path::PathBuf;
 
     use super::{
         configured_sources_directory, format_get_raw_data_main, format_impl_cargo_toml,
-        format_source_toml, validate_protocol, validate_source_name,
+        format_source_toml, move_to_backup, publish_runtime_transaction,
+        restore_runtime_after_failure, select_executable_from_cargo_json,
+        validate_protocol, validate_source_name,
     };
 
     #[test]
@@ -1007,6 +1111,353 @@ mod tests {
         for fragment in &required {
             assert!(markdown.contains(fragment), "discovery.md is missing required prompt: {fragment}\n---\n{markdown}");
         }
+    }
+
+    #[test]
+    fn selects_correct_binary_artifact_from_compiler_json() {
+        let output = r#"{"reason":"compiler-artifact","package_id":"example-source-get-raw-data 0.1.0 (path+file:///tmp/example-source/http/get-raw-data/get-raw-data-impl)","target":{"kind":["bin"],"name":"example-source-get-raw-data"},"executable":"/tmp/example-source/http/get-raw-data/runtime/example-source-get-raw-data"}
+{"reason":"compiler-artifact","target":{"kind":["lib"],"name":"example-source_get_raw_data"},"executable":"/tmp/lib.so"}
+{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"other-binary"},"executable":"/tmp/other-binary"}
+"#;
+
+        let result = select_executable_from_cargo_json(output, "get-raw-data").unwrap();
+        assert_eq!(result, PathBuf::from("/tmp/example-source/http/get-raw-data/runtime/example-source-get-raw-data"));
+    }
+
+    #[test]
+    fn ignores_unrelated_compiler_artifact_json() {
+        let output = r#"{"reason":"compiler-artifact","package_id":"other-package 0.1.0 (path+file:///tmp/other)","target":{"kind":["bin"],"name":"other-binary"},"executable":"/tmp/other-binary"}
+{"reason":"compiler-artifact","package_id":"example-source-process-data 0.1.0 (path+file:///tmp/example-source/http/process-data/process-data-impl)","target":{"kind":["bin"],"name":"example-source-process-data"},"executable":"/tmp/example-source-process-data"}
+{"reason":"compiler-artifact","target":{"kind":["test"],"name":"test-suite"},"executable":"/tmp/test-suite"}
+{"reason":"compiler-artifact","target":{"kind":["example"],"name":"example"},"executable":"/tmp/example"}
+{"reason":"compiler-artifact","target":{"kind":["custom-build"],"name":"build-script"},"executable":"/tmp/build-script"}
+"#;
+
+        let result = select_executable_from_cargo_json(output, "get-raw-data").unwrap_err();
+        assert!(result.contains("implementation build failed"));
+    }
+
+    #[test]
+    fn rejects_missing_executable_in_compiler_artifact_json() {
+        let output = r#"{"reason":"compiler-artifact","package_id":"example-source-get-raw-data 0.1.0 (path+file:///tmp/example-source/http/get-raw-data/get-raw-data-impl)","target":{"kind":["bin"],"name":"example-source-get-raw-data"}}
+"#;
+
+        let result = select_executable_from_cargo_json(output, "get-raw-data");
+        assert!(result.is_err(), "missing executable path must fail the build");
+    }
+
+    #[test]
+    fn rejects_ambiguous_executable_selection_in_compiler_artifact_json() {
+        let output = r#"{"reason":"compiler-artifact","package_id":"example-source-get-raw-data 0.1.0 (path+file:///tmp/example-source/http/get-raw-data/get-raw-data-impl)","target":{"kind":["bin"],"name":"example-source-get-raw-data"},"executable":"/tmp/first"}
+{"reason":"compiler-artifact","package_id":"example-source-get-raw-data 0.1.0 (path+file:///tmp/example-source/http/get-raw-data/get-raw-data-impl)","target":{"kind":["bin"],"name":"example-source-get-raw-data"},"executable":"/tmp/second"}
+"#;
+
+        let result = select_executable_from_cargo_json(output, "get-raw-data");
+        assert!(result.is_err(), "multiple matching executable artifacts must fail deterministically");
+    }
+
+    #[test]
+    fn build_single_crate_keeps_the_built_executable_available_after_return() {
+        let root = std::env::temp_dir().join(format!("lexicon-build-artifact-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"temporary-build-check\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() { println!(\"ok\"); }\n").unwrap();
+
+        let manifest = root.join("Cargo.toml");
+        let artifact = super::build_single_crate(&manifest, "temporary-build-check").unwrap();
+
+        assert!(artifact.path.is_file());
+        assert!(artifact.path.exists());
+        assert!(artifact.path.metadata().unwrap().is_file());
+        assert!(artifact.path.file_name().unwrap().to_string_lossy().contains("temporary-build-check"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn publication_transaction_publishes_both_executables_successfully() {
+        let root = std::env::temp_dir().join(format!("lexicon-publish-success-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let get_final = root.join("get-raw-data");
+        let process_final = root.join("process-data");
+        let get_staged = root.join(".get.staging");
+        let process_staged = root.join(".process.staging");
+        fs::write(&get_final, "old-get\n").unwrap();
+        fs::write(&process_final, "old-process\n").unwrap();
+        fs::write(&get_staged, "new-get\n").unwrap();
+        fs::write(&process_staged, "new-process\n").unwrap();
+
+        let get_backup = Some(move_to_backup(&get_final).unwrap());
+        let process_backup = Some(move_to_backup(&process_final).unwrap());
+        let result = publish_runtime_transaction(
+            &get_staged,
+            &process_staged,
+            &get_final,
+            &process_final,
+            get_backup.as_ref(),
+            process_backup.as_ref(),
+            |src, dst| fs::rename(src, dst),
+            |path| fs::remove_file(path),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(fs::read_to_string(&get_final).unwrap(), "new-get\n");
+        assert_eq!(fs::read_to_string(&process_final).unwrap(), "new-process\n");
+        assert!(!get_staged.exists());
+        assert!(!process_staged.exists());
+        fs::remove_file(get_backup.as_ref().unwrap()).unwrap();
+        fs::remove_file(process_backup.as_ref().unwrap()).unwrap();
+        assert!(!get_backup.as_ref().unwrap().exists());
+        assert!(!process_backup.as_ref().unwrap().exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn publication_transaction_backs_up_existing_executables() {
+        let root = std::env::temp_dir().join(format!("lexicon-publish-backup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let get_final = root.join("get-raw-data");
+        let process_final = root.join("process-data");
+        fs::write(&get_final, "old-get\n").unwrap();
+        fs::write(&process_final, "old-process\n").unwrap();
+
+        let get_backup = move_to_backup(&get_final).unwrap();
+        let process_backup = move_to_backup(&process_final).unwrap();
+
+        assert!(get_backup.exists());
+        assert!(process_backup.exists());
+        assert_eq!(fs::read_to_string(&get_backup).unwrap(), "old-get\n");
+        assert_eq!(fs::read_to_string(&process_backup).unwrap(), "old-process\n");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn publication_failure_in_second_publish_restores_the_first_runtime() {
+        let root = std::env::temp_dir().join(format!("lexicon-publish-second-fail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let get_final = root.join("get-raw-data");
+        let process_final = root.join("process-data");
+        let get_staged = root.join(".get.staging");
+        let process_staged = root.join(".process.staging");
+        fs::write(&get_final, "old-get\n").unwrap();
+        fs::write(&process_final, "old-process\n").unwrap();
+        let get_backup = Some(move_to_backup(&get_final).unwrap());
+        let process_backup = Some(move_to_backup(&process_final).unwrap());
+        fs::write(&get_final, "old-get\n").unwrap();
+        fs::write(&process_final, "old-process\n").unwrap();
+        fs::write(&get_staged, "new-get\n").unwrap();
+        fs::write(&process_staged, "new-process\n").unwrap();
+
+        let result = publish_runtime_transaction(
+            &get_staged,
+            &process_staged,
+            &get_final,
+            &process_final,
+            get_backup.as_ref(),
+            process_backup.as_ref(),
+            |src, dst| {
+                if src == process_staged {
+                    Err(io::Error::new(io::ErrorKind::Other, "simulated second publish failure"))
+                } else {
+                    fs::rename(src, dst)
+                }
+            },
+            |path| fs::remove_file(path),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&get_final).unwrap(), "old-get\n");
+        assert_eq!(fs::read_to_string(&process_final).unwrap(), "old-process\n");
+        assert!(!get_staged.exists());
+        assert!(!process_staged.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn publication_failure_restores_both_previous_runtime_executables() {
+        let root = std::env::temp_dir().join(format!("lexicon-publish-both-restore-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let get_final = root.join("get-raw-data");
+        let process_final = root.join("process-data");
+        let get_staged = root.join(".get.staging");
+        let process_staged = root.join(".process.staging");
+        fs::write(&get_final, "old-get\n").unwrap();
+        fs::write(&process_final, "old-process\n").unwrap();
+        fs::write(&get_staged, "new-get\n").unwrap();
+        fs::write(&process_staged, "new-process\n").unwrap();
+
+        let get_backup = Some(move_to_backup(&get_final).unwrap());
+        let process_backup = Some(move_to_backup(&process_final).unwrap());
+        let result = publish_runtime_transaction(
+            &get_staged,
+            &process_staged,
+            &get_final,
+            &process_final,
+            get_backup.as_ref(),
+            process_backup.as_ref(),
+            |src, dst| {
+                if src == get_staged {
+                    Err(io::Error::new(io::ErrorKind::Other, "simulated first publish failure"))
+                } else {
+                    fs::rename(src, dst)
+                }
+            },
+            |path| fs::remove_file(path),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&get_final).unwrap(), "old-get\n");
+        assert_eq!(fs::read_to_string(&process_final).unwrap(), "old-process\n");
+        assert!(!get_staged.exists());
+        assert!(!process_staged.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn transaction_cleanup_removes_staged_files_after_failure() {
+        let root = std::env::temp_dir().join(format!("lexicon-staged-cleanup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let get_final = root.join("get-raw-data");
+        let process_final = root.join("process-data");
+        let get_staged = root.join(".get.staging");
+        let process_staged = root.join(".process.staging");
+        fs::write(&get_final, "old-get\n").unwrap();
+        fs::write(&process_final, "old-process\n").unwrap();
+        fs::write(&get_staged, "new-get\n").unwrap();
+        fs::write(&process_staged, "new-process\n").unwrap();
+
+        let _ = restore_runtime_after_failure(
+            &get_final,
+            Some(&move_to_backup(&get_final).unwrap()),
+            &get_staged,
+            &process_staged,
+            &process_final,
+            Some(&move_to_backup(&process_final).unwrap()),
+            &|path| fs::remove_file(path),
+        );
+
+        assert!(!get_staged.exists());
+        assert!(!process_staged.exists());
+        assert!(get_final.exists());
+        assert!(process_final.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn transaction_cleanup_removes_backup_files_after_success() {
+        let root = std::env::temp_dir().join(format!("lexicon-backup-cleanup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let get_final = root.join("get-raw-data");
+        let process_final = root.join("process-data");
+        fs::write(&get_final, "old-get\n").unwrap();
+        fs::write(&process_final, "old-process\n").unwrap();
+
+        let get_backup = move_to_backup(&get_final).unwrap();
+        let process_backup = move_to_backup(&process_final).unwrap();
+        fs::write(&get_final, "new-get\n").unwrap();
+        fs::write(&process_final, "new-process\n").unwrap();
+
+        assert!(get_backup.exists());
+        assert!(process_backup.exists());
+        fs::remove_file(&get_backup).unwrap();
+        fs::remove_file(&process_backup).unwrap();
+        assert!(!get_backup.exists());
+        assert!(!process_backup.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unrelated_runtime_files_remain_untouched() {
+        let root = std::env::temp_dir().join(format!("lexicon-unrelated-keep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let get_final = root.join("get-raw-data");
+        let process_final = root.join("process-data");
+        let unrelated = root.join("notes.txt");
+        fs::write(&get_final, "old-get\n").unwrap();
+        fs::write(&process_final, "old-process\n").unwrap();
+        fs::write(&unrelated, "keep-me\n").unwrap();
+
+        let result = restore_runtime_after_failure(
+            &get_final,
+            Some(&move_to_backup(&get_final).unwrap()),
+            &root.join(".get.staging"),
+            &root.join(".process.staging"),
+            &process_final,
+            Some(&move_to_backup(&process_final).unwrap()),
+            &|path| fs::remove_file(path),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(fs::read_to_string(&unrelated).unwrap(), "keep-me\n");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gitignore_file_remains_untouched_after_runtime_restore() {
+        let root = std::env::temp_dir().join(format!("lexicon-gitignore-restore-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let get_directory = root.join("get-raw-data");
+        let process_directory = root.join("process-data");
+        fs::create_dir_all(&get_directory).unwrap();
+        fs::create_dir_all(&process_directory).unwrap();
+        let get_file = get_directory.join("get-raw-data");
+        let process_file = process_directory.join("process-data");
+        fs::write(&get_file, "old-get\n").unwrap();
+        fs::write(&process_file, "old-process\n").unwrap();
+        fs::write(get_directory.join(".gitignore"), "*\n!.gitignore\n").unwrap();
+        fs::write(process_directory.join(".gitignore"), "*\n!.gitignore\n").unwrap();
+
+        let get_backup = Some(move_to_backup(&get_file).unwrap());
+        let process_backup = Some(move_to_backup(&process_file).unwrap());
+        fs::write(&get_file, "new-get\n").unwrap();
+        fs::write(&process_file, "new-process\n").unwrap();
+        fs::write(get_directory.join(".get.staging"), "staged\n").unwrap();
+        fs::write(process_directory.join(".process.staging"), "staged\n").unwrap();
+
+        let restore = restore_runtime_after_failure(
+            &get_file,
+            get_backup.as_ref(),
+            &get_directory.join(".get.staging"),
+            &process_directory.join(".process.staging"),
+            &process_file,
+            process_backup.as_ref(),
+            &|path| fs::remove_file(path),
+        );
+
+        assert!(restore.is_ok());
+        assert_eq!(fs::read_to_string(get_directory.join(".gitignore")).unwrap(), "*\n!.gitignore\n");
+        assert_eq!(fs::read_to_string(process_directory.join(".gitignore")).unwrap(), "*\n!.gitignore\n");
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

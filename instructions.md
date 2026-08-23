@@ -16,14 +16,24 @@
    git pull --ff-only origin current_tracking
    ```
 
-4. Read `current.md` and plan the implementation.
+4. Ensure the working directory is clean for fresh project validation.
+   - If a stale `telugu-lexicon/` directory exists in the working directory, delete it before continuing.
+   - Initialize a fresh Lexicon project in the working directory with the project name `telugu-lexicon` and the sources directory named `sources/`.
+   - Example:
+   ```bash
+   rm -rf telugu-lexicon
+   lexicon init . telugu-lexicon
+   ```
+   - The resulting project root must be `./telugu-lexicon` and the configured sources directory must be `./telugu-lexicon/sources`.
+
+5. Read `current.md` and plan the implementation.
    - Determine how you will complete the implementation request described in `current.md`.
 
-5. Implement the required source changes.
-   - Keep the implementation aligned with the plan in Step 4.
+6. Implement the required source changes.
+   - Keep the implementation aligned with the plan in Step 5.
    - Do not pivot to a new strategy without clear confirmation from the user if the plan is not producing the intended result.
 
-6. Validate using the required build script.
+7. Validate using the required build script.
    ```bash
    bash automation/build_bundle_install/build_bundle_install.sh
    ```
