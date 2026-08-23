@@ -16,10 +16,25 @@ i_echo() {
 }
 
 chmod +x ./lexicon-bundle
-i_echo "Triggering installation maintenance by executing lexicon-bundle"
-./lexicon-bundle
 
-i_echo "Verifying installation status by checking lexicon version"
-lexicon -V
+if [ "$#" -gt 0 ]; then
+    i_echo "Triggering installation maintenance by executing lexicon-bundle with args: $*"
+else
+    i_echo "Triggering installation maintenance by executing lexicon-bundle (interactive when no args are supplied)"
+fi
 
-i_echo "Installed."
+./lexicon-bundle "$@"
+
+case "${1:-}" in
+    install|--install|"")
+        i_echo "Verifying installation status by checking lexicon version"
+        lexicon -V
+        i_echo "Installed."
+        ;;
+    uninstall|--uninstall)
+        i_echo "Uninstall flow completed."
+        ;;
+    *)
+        i_echo "Command completed."
+        ;;
+esac

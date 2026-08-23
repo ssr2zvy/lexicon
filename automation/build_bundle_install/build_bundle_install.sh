@@ -55,6 +55,15 @@ bbi_echo "Extracting bundle archive from $(basename "$ARCHIVE_PATH")"
 tar -xf "$ARCHIVE_PATH" -C "$BUILD_BUNDLE_INSTALL/bundles/"
 
 cd "$BUILD_BUNDLE_INSTALL"
-bash "$INSTALL_SCRIPT"
+
+if command -v lexicon >/dev/null 2>&1; then
+    bbi_echo "Lexicon is installed; uninstalling current version before reinstall"
+    bash "$INSTALL_SCRIPT" --uninstall
+else
+    bbi_echo "Lexicon is not installed; skipping uninstall step"
+fi
+
+bbi_echo "Installing bundle"
+bash "$INSTALL_SCRIPT" --install
 
 bbi_echo "Build, bundle, install process completed successfully"
