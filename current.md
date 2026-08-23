@@ -1,36 +1,161 @@
-# Final implementation report
+# Current task: implement `lexicon source build`
 
-## Files changed
+## Objective
 
-- lexicon-cli/src/cli/source.rs
-- lexicon-cli/src/cli/mod.rs
-- lexicon-framework/src/main.rs
-- current.md
+Implement the single-source native build command:
 
-## Renamed command surface
+```bash
+lexicon source build <source-name> --protocol <protocol>
+```
 
-The public source command surface was updated from the legacy source-new and source-add names to the required create/build contract:
+Example:
 
-- source new -> source create
-- source add -> source build
+```bash
+lexicon source build example-source --protocol http
+```
 
-The final parser structure is:
+This command compiles the source’s get-raw-data and process-data implementation crates for the machine currently running Lexicon, then publishes the resulting executables into the corresponding runtime directories.
+
+The only currently supported protocol remains:
+
+```text
+http
+```
+
+## Required lifecycle terminology
+
+The public source lifecycle is:
+
+```text
+lexicon source create <source-name> --protocol <protocol>
+lexicon source build <source-name> --protocol <protocol>
+```
+
+Meanings:
+
+- `source create` generates the editable source scaffold.
+- The developer edits the generated implementation crates.
+- `source build` compiles both implementation crates and publishes their native executables.
+
+The obsolete command must remain rejected:
+
+```bash
+lexicon source add <source-name>
+```
+
+Do not retain `add` as an alias.
+
+Root:
+
+```bash
+lexicon build
+```
+
+remains a separate future command for building every discovered source. Do not implement it in this task.
+
+## Required source structure
+
+Implement `source build` against this protocol-scoped structure:
+
+```text
+sources/
+└── <source-name>/
+    └── <protocol>/
+        ├── source.toml
+        ├── discovery.md
+        ├── data/
+        │   ├── raw/
+        │   └── processed/
+        ├── get-raw-data/
+        │   ├── sessions/
+        │   ├── session_status.json
+        │   ├── get-raw-data-impl/
+        │   │   ├── Cargo.toml
+        │   │   ├── Cargo.lock
+        │   │   └── src/
+        │   │       └── main.rs
+        │   └── runtime/
+        │       └── .gitignore
+        └── process-data/
+            ├── sessions/
+            ├── session_status.json
+            ├── process-data-impl/
+            │   ├── Cargo.toml
+            │   ├── Cargo.lock
+            │   ├── src/
+            │   │   └── main.rs
+            │   └── processing/
+            └── runtime/
+                └── .gitignore
+```
+
+The implementation crates and runtime directories are siblings:
+
+```text
+get-raw-data/
+├── get-raw-data-impl/
+└── runtime/
+```
+
+```text
+process-data/
+├── process-data-impl/
+└── runtime/
+```
+
+A `runtime/` directory is not a Cargo crate. It is the final local output directory for the compiled executable belonging to that operation.
+
+## Required scaffold reconciliation
+
+Before implementing the build flow, inspect the current `source create` implementation.
+
+If it still generates either old crate name:
+
+```text
+get_raw_data_impl
+process_data_impl
+```
+
+replace them with:
+
+```text
+get-raw-data-impl
+process-data-impl
+```
+
+Ensure `source create` generates both sibling runtime directories:
+
+```text
+get-raw-data/runtime/
+process-data/runtime/
+```
+
+Each generated runtime directory must contain:
+
+```text
+.gitignore
+```
+
+with contents equivalent to:
+
+```gitignore
+*
+!.gitignore
+```
+
+This keeps the runtime directory represented in source control while preventing compiled executables from being committed.
+
+Do not commit generated runtime executables.
+
+## Required CLI parsing
+
+The source-specific build command must require both source name and protocol.
+
+The CLI structure should be equivalent to:
 
 ```rust
 #[derive(Parser, Debug, Clone)]
-pub struct SourceCommand {
-    #[command(subcommand)]
-    pub action: SourceAction,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub enum SourceAction {
-    Create(CreateSourceCommand),
-    Build(BuildSourceCommand),
-}
-
-#[derive(Parser, Debug, Clone)]
-pub struct CreateSourceCommand {
+pub struct BuildSourceCommand {
     #[arg(value_name = "SOURCE_NAME")]
     pub source_name: String,
 
@@ -38,240 +163,607 @@ pub struct CreateSourceCommand {
         long,
         value_name = "PROTOCOL",
         required = true,
-        help = "Acquisition protocol for the source. Only http is supported right now."
+        help = "Protocol implementation to build. Only http is supported right now."
     )]
     pub protocol: String,
 }
-
-#[derive(Parser, Debug, Clone)]
-pub struct BuildSourceCommand {
-    #[arg(value_name = "SOURCE_NAME")]
-    pub source_name: String,
-}
 ```
 
-The CLI and framework both reject the obsolete forms:
+The public syntax is:
 
-- lexicon source new example-source --protocol http -> rejected
-- lexicon source add example-source -> rejected
+```bash
+lexicon source build <source-name> --protocol <protocol>
+```
 
-## source build placeholder behavior
+These must be rejected by Clap:
 
-`lexicon source build <source-name>` is accepted by Clap and dispatches to the placeholder implementation, which returns exactly:
+```bash
+lexicon source build
+lexicon source build example-source
+lexicon source build example-source --protocol
+```
+
+This must be rejected by protocol validation before Cargo runs:
+
+```bash
+lexicon source build example-source --protocol browser
+```
+
+## Required CLI-to-framework flow
+
+The real execution path must be:
 
 ```text
-[lexicon] ERROR: source build is not implemented
+lexicon CLI
+→ parse `source build`
+→ require source name and protocol
+→ invoke lexicon-framework
+→ framework parses `source build`
+→ framework locates the Lexicon project
+→ framework resolves sources_directory
+→ framework validates source and protocol metadata
+→ framework resolves both implementation manifests
+→ framework compiles both crates into temporary build locations
+→ framework verifies both executable outputs
+→ framework transactionally publishes both executables
+→ framework prints the final runtime paths
+→ CLI exits without duplicate success output
 ```
 
-This placeholder intentionally performs no project mutation and exits nonzero. It is implemented in `lexicon-cli/src/cli/mod.rs` and does not invoke Cargo, cargo-zigbuild, or the framework build runtime.
-
-## source create flow
-
-The CLI dispatch path invokes the framework using the exact argument sequence:
+The CLI must invoke the framework with:
 
 ```text
 source
-create
+build
 <source-name>
 --protocol
 <protocol>
 ```
 
-The CLI then exits with the framework process status and emits no duplicate success output. The framework entrypoint in `lexicon-framework/src/main.rs` performs the actual validation and filesystem work.
+Remove the existing not-implemented `source build` placeholder.
 
-## Protocol-scoped scaffold tree
+The framework owns source-build success output.
 
-A successful command:
+The CLI must not print another success message after the framework completes.
+
+## Project and source resolution
+
+Starting from the current directory:
+
+1. Locate the containing Lexicon project through the existing `lexicon.toml` discovery logic.
+2. Resolve the configured `sources_directory`.
+3. Validate `<source-name>` using the existing safe source-name rules.
+4. Validate `<protocol>`.
+5. Resolve:
+
+```text
+<sources_directory>/<source-name>/<protocol>/
+```
+
+6. Require that the source root exists and is a directory.
+7. Require that the protocol root exists and is a directory.
+8. Parse:
+
+```text
+<sources_directory>/<source-name>/<protocol>/source.toml
+```
+
+9. Require:
+
+```toml
+schema_version = 1
+
+[source]
+name = "<source-name>"
+protocol = "<protocol>"
+```
+
+10. Reject a mismatch between command arguments and `source.toml`.
+11. Reject symlink or path traversal that resolves outside the configured project sources directory.
+
+For HTTP, resolve these exact manifests:
+
+```text
+<sources/<source-name>/http/get-raw-data/get-raw-data-impl/Cargo.toml
+sources/<source-name>/http/process-data/process-data-impl/Cargo.toml
+```
+
+Missing or invalid manifests must fail before runtime publication.
+
+## Native-target scope
+
+`source build` builds for the current machine only.
+
+Use Cargo’s native default target. Do not pass a cross-compilation `--target` value.
+
+Use:
 
 ```bash
-lexicon source create example-source --protocol http
+cargo build --release --locked
 ```
 
-creates the protocol-scoped structure:
+for each implementation crate.
+
+Every Cargo invocation must include:
 
 ```text
-<project-root>/
-└── sources/
-    └── example-source/
-        └── http/
-            ├── source.toml
-            ├── discovery.md
-            ├── data/
-            │   ├── raw/
-            │   └── processed/
-            ├── get-raw-data/
-            │   ├── sessions/
-            │   ├── session_status.json
-            │   └── get_raw_data_impl/
-            │       ├── Cargo.toml
-            │       ├── Cargo.lock
-            │       └── src/
-            │           └── main.rs
-            └── process-data/
-                ├── sessions/
-                ├── session_status.json
-                └── process_data_impl/
-                    ├── Cargo.toml
-                    ├── Cargo.lock
-                    ├── src/
-                    │   └── main.rs
-                    └── processing/
+--release
+--locked
+--manifest-path
+--message-format=json-render-diagnostics
 ```
 
-The old direct layout under `sources/example-source/` is intentionally absent. The implementation enforces `sources/<source-name>/<protocol>/` as the generation target.
+Do not use cargo-zigbuild in this command.
 
-## Atomic staging and rename behavior
+Do not invoke MZA.
 
-The framework validates the source name and protocol, discovers the containing Lexicon project, resolves the configured sources directory, and then creates a tempfile staging directory inside the configured sources root. Once the complete protocol subtree is written successfully, it renames the staging directory to the final source root.
+Cross-target release builds remain outside `source build`.
 
-Safety guarantees:
+## Cargo availability
 
-- invalid source names are rejected before mutation
-- unsupported protocols are rejected before mutation
-- an existing `sources/<source-name>` directory is rejected without overwriting
-- rename failures remove the task-created staging directory
-- unrelated preexisting directories remain untouched
-- successful creation leaves no lingering staging directory
+If `cargo` cannot be executed, return a clear Lexicon error explaining that building source implementations requires a Rust development toolchain.
 
-## Output and error contracts
-
-Success output comes only from the framework:
+Equivalent output:
 
 ```text
-[lexicon] Created source 'example-source' using protocol 'http' at <absolute-path>/sources/example-source/http
-[lexicon] Files to edit next:
-[lexicon]   - <absolute-path>/sources/example-source/http/source.toml
-[lexicon]   - <absolute-path>/sources/example-source/http/discovery.md
-[lexicon]   - <absolute-path>/sources/example-source/http/get-raw-data/get_raw_data_impl/src/main.rs
-[lexicon]   - <absolute-path>/sources/example-source/http/process-data/process_data_impl/src/main.rs
+[lexicon] ERROR: source build requires Cargo and a Rust development toolchain
 ```
 
-Failure output remains a single Lexicon-owned line in the form:
+Do not report this as a generic missing-file or framework error.
+
+Cargo and compiler diagnostics may pass through directly. The final Lexicon-owned failure summary must use the `[lexicon] ERROR:` prefix exactly once.
+
+## Locked builds
+
+Each generated implementation crate is required to have its own committed:
 
 ```text
-[lexicon] ERROR: ...
+Cargo.lock
 ```
 
-The unsupported protocol path was verified to exit with code 1 and emit exactly one `[lexicon] ERROR:` line.
+Run both builds with `--locked`.
 
-## Tests and requirement mapping
+A missing or stale lockfile must cause the build to fail.
 
-The following executable tests were added or updated and pass under the relevant package suite:
+Do not silently regenerate or update a lockfile during `source build`.
 
-1. `cli::source::tests::parses_create_source_command_with_protocol_flag`
-2. `cli::source::tests::rejects_create_source_command_when_protocol_is_missing`
-3. `cli::source::tests::rejects_create_source_command_when_protocol_value_is_missing`
-4. `cli::source::tests::rejects_unsupported_protocol_value`
-5. `cli::source::tests::rejects_old_source_new_command`
-6. `cli::source::tests::parses_build_source_command_with_source_name`
-7. `cli::source::tests::rejects_old_source_add_command`
-8. `cli::source::tests::rejects_build_command_without_source_name`
-9. `cli::tests::source_build_returns_not_implemented_error` (exit nonzero)
-10. `cli::tests::source_build_returns_not_implemented_error` (single `[lexicon] ERROR:` line)
-11. `cli::tests::source_build_returns_not_implemented_error` (no project mutation)
-12. `cli::tests::dispatch_source_create_produces_only_framework_output`
-13. `cli::tests::cli_source_create_prints_only_framework_success_output`
-14. `cli::source::tests::rejects_old_source_new_command`
-15. `lexicon-framework/src/main.rs` validation tests for unsafe names
-16. `lexicon-framework/src/main.rs` project-root discovery tests for outside-project failures
-17. `lexicon-framework/src/main.rs` scaffold generation tests for `sources/example-source/http/`
-18. `lexicon-framework/src/main.rs` scaffold structure assertions under `http/`
-19. `lexicon-framework/src/main.rs` old-path absence assertions
-20. `lexicon-framework/src/main.rs` `format_source_toml` contract test
-21. `lexicon-framework/src/main.rs` `generated_discovery_markdown_contains_required_prompts`
-22. `lexicon-framework/src/main.rs` data-path generation checks
-23. `lexicon-framework/src/main.rs` generated crate existence asserts
-24. `lexicon-framework/src/main.rs` `generated_http_template_uses_context_based_acquire_contract`
-25. `lexicon-framework/src/main.rs` `generated_impl_manifest_uses_new_portable_core_tag`
-26. `lexicon-framework/src/main.rs` existing-root rejection checks
-27. `lexicon-framework/src/main.rs` `finalize_source_staging_cleans_up_tempdir_when_rename_fails`
-28. `lexicon-framework/src/main.rs` successful creation with no staging directory check
-29. `cli::tests::unrelated_preexisting_directory_remains_untouched`
-30. `cli::tests::cli_source_create_prints_only_framework_success_output`
-31. `cli::tests::cli_source_create_prints_only_framework_success_output`
-32. `cli::tests::unsupported_protocol_reports_single_lexicon_error_line`
+Do not retry without `--locked`.
 
-The requirement set is covered by actual parser, dispatch, filesystem, and generated-template tests; there are no text-only substitutions standing in for runtime behavior.
+## Temporary build directories
 
-## Exact end-to-end commands and exit codes
+Do not rely on an assumed Cargo output path such as:
 
-Build and test commands executed successfully:
+```text
+target/release/<package-name>
+```
+
+Build each crate with an isolated temporary target directory.
+
+Equivalent command shape:
+
+```bash
+cargo build \
+    --release \
+    --locked \
+    --manifest-path <absolute-manifest-path> \
+    --target-dir <temporary-target-directory> \
+    --message-format=json-render-diagnostics
+```
+
+Use uniquely scoped temporary directories so concurrent source builds cannot collide.
+
+Temporary build output must not be created inside:
+
+```text
+runtime/
+```
+
+The runtime directories contain only published final executables and their `.gitignore` files.
+
+Temporary Cargo build directories must be cleaned after success or failure.
+
+## Executable discovery
+
+Determine the produced executable from Cargo’s JSON messages.
+
+Parse `compiler-artifact` messages and use the `executable` field belonging to the requested package’s binary target.
+
+Do not construct the executable path by assuming:
+
+```text
+target/release/<name>
+```
+
+For each implementation crate:
+
+1. Resolve its Cargo package and targets.
+2. Require exactly one applicable binary target.
+3. Run Cargo with JSON messages.
+4. locate exactly one executable artifact belonging to that binary target.
+5. Require the executable path to exist.
+6. Require it to be a regular file.
+7. Reject missing or ambiguous executable results.
+
+Do not treat libraries, build scripts, examples, tests, or dependency artifacts as the runtime executable.
+
+## Build order and publication boundary
+
+Compile both implementation crates before changing either runtime directory.
+
+Required order:
+
+```text
+resolve and validate both manifests
+→ build get-raw-data implementation
+→ verify get-raw-data executable
+→ build process-data implementation
+→ verify process-data executable
+→ stage both runtime executables
+→ publish both runtime executables
+```
+
+If either Cargo build fails:
+
+- Return a nonzero status.
+- Do not replace either existing runtime executable.
+- Preserve both previously working runtime executables exactly.
+- Clean all task-created temporary files.
+
+A successful first build followed by a failed second build must not update the first runtime.
+
+## Final runtime filenames
+
+Preserve the binary target filename reported by Cargo.
+
+Publish the acquisition executable at:
+
+```text
+sources/<source-name>/<protocol>/get-raw-data/runtime/<cargo-binary-name>
+```
+
+Publish the processing executable at:
+
+```text
+sources/<source-name>/<protocol>/process-data/runtime/<cargo-binary-name>
+```
+
+On Windows, preserve Cargo’s `.exe` extension.
+
+Because each operation owns a separate runtime directory, the two binary targets may use different names without collision.
+
+Do not rename `.exe` files to extensionless names.
+
+## Runtime staging
+
+After both builds succeed:
+
+1. Create a staged runtime file beside each final runtime output.
+2. Copy the verified Cargo executable into that staged file.
+3. Preserve executable permissions.
+4. Verify the staged output is a regular file.
+5. Only then replace the corresponding final runtime executable.
+6. Remove task-created staged files after any failure.
+7. Preserve each runtime directory’s `.gitignore`.
+
+Use unique staged filenames. Do not use a predictable PID-only name.
+
+## Transactional publication
+
+Publishing two executables requires rollback protection.
+
+Before replacing existing runtime executables:
+
+1. Record whether each final executable already exists.
+2. Move each existing executable to a unique temporary backup in the same runtime directory.
+3. Move the staged get-raw-data executable into its final path.
+4. Move the staged process-data executable into its final path.
+5. If every move succeeds, delete the temporary backups.
+6. If any move fails:
+   - remove any newly published executable from this attempt,
+   - restore every previous executable from its backup,
+   - remove remaining staged files,
+   - return an error.
+
+Never leave one newly built runtime paired with one previous runtime after a publication failure.
+
+Never delete a previous runtime executable until both new executables have been compiled and staged successfully.
+
+Runtime publication must use same-filesystem renames within each runtime directory where possible.
+
+## Successful output
+
+After both executables have been published successfully, print:
+
+```text
+[lexicon] Built source 'example-source' using protocol 'http'
+[lexicon] Runtime executables:
+[lexicon]   - <absolute-path>/sources/example-source/http/get-raw-data/runtime/<get-binary>
+[lexicon]   - <absolute-path>/sources/example-source/http/process-data/runtime/<process-binary>
+```
+
+Print success only after both runtime executables are finalized.
+
+Do not print partial success after the first build.
+
+The CLI must not print duplicate success output.
+
+## Failure behavior
+
+Failures must:
+
+- Exit nonzero.
+- Preserve existing runtime executables when either compilation fails.
+- Clean task-created build, staging, and backup files.
+- Produce one final Lexicon-owned error line.
+- Never report a partial source build as successful.
+
+Examples include:
+
+```text
+[lexicon] ERROR: source 'example-source' does not exist
+[lexicon] ERROR: protocol 'http' does not exist for source 'example-source'
+[lexicon] ERROR: source metadata does not match the requested source and protocol
+[lexicon] ERROR: get-raw-data implementation build failed
+[lexicon] ERROR: process-data implementation build failed
+[lexicon] ERROR: source runtime publication failed; previous runtimes were restored
+```
+
+Cargo diagnostics may appear before the final Lexicon error and do not require the `[lexicon]` prefix.
+
+## Required parser tests
+
+Add executable tests proving:
+
+1. `lexicon source build example-source --protocol http` parses successfully.
+2. Missing source name is rejected.
+3. Missing `--protocol` is rejected.
+4. Missing protocol value is rejected.
+5. Unsupported protocol is rejected before Cargo runs.
+6. `lexicon source add example-source` is rejected.
+7. Parsed source name and protocol are forwarded unchanged to the framework.
+8. The framework directly accepts `source build`.
+
+## Required resolution tests
+
+Add tests proving:
+
+9. Running outside a Lexicon project fails without mutation.
+10. A missing source is rejected.
+11. A missing protocol directory is rejected.
+12. A missing `source.toml` is rejected.
+13. A mismatched source name in `source.toml` is rejected.
+14. A mismatched protocol in `source.toml` is rejected.
+15. An unsupported schema version is rejected.
+16. A missing get-raw-data manifest is rejected.
+17. A missing process-data manifest is rejected.
+18. Symlink or traversal escapes are rejected.
+19. No Cargo process starts when validation fails.
+
+## Required build tests
+
+Add tests proving:
+
+20. Both Cargo commands include `--release`.
+21. Both Cargo commands include `--locked`.
+22. Both Cargo commands use their exact manifest paths.
+23. Both Cargo commands use isolated temporary target directories.
+24. Cargo JSON executable discovery selects the binary target executable.
+25. Dependency, test, example, library, and build-script artifacts are ignored.
+26. Missing executable output is rejected.
+27. Ambiguous binary executable output is rejected.
+28. A missing Cargo executable produces the dedicated toolchain error.
+29. A get-raw-data compilation failure prevents the process build and publication.
+30. A process-data compilation failure preserves the previous get and process runtimes.
+31. Successful compilation of both crates reaches publication.
+32. Temporary Cargo build directories are cleaned after success and failure.
+
+Use controlled fixture crates or a controllable command-runner boundary for failure-path tests. Do not depend on intentionally breaking the developer’s real generated source tree.
+
+## Required publication tests
+
+Add filesystem tests proving:
+
+33. Runtime executables are placed in their corresponding runtime directories.
+34. Cargo-reported executable filenames are preserved.
+35. Windows `.exe` filenames are preserved by platform-independent path logic.
+36. Existing runtime executables are not changed when either build fails.
+37. Staged runtime files are cleaned after failure.
+38. Backups are deleted after successful publication.
+39. A failure while publishing the second executable restores both previous executables.
+40. A preexisting unrelated runtime file is not deleted.
+41. Each runtime `.gitignore` remains unchanged.
+42. Published Unix executables retain executable permissions where Unix permission checks are available.
+43. No partial runtime pair is reported as successful.
+
+## Required public-flow tests
+
+Add tests proving:
+
+44. The public CLI reaches the real framework source-build flow.
+45. The framework is the sole producer of success output.
+46. Successful output contains both final runtime paths.
+47. Successful output contains no duplicate lines.
+48. A failed build produces exactly one final `[lexicon] ERROR:` line.
+49. Root `lexicon build` behavior remains unchanged.
+50. `source create` behavior and protocol-scoped scaffold tests continue to pass.
+
+Tests must execute behavior where practical.
+
+Source-text searches are not sufficient substitutes for parser, command invocation, Cargo-message parsing, filesystem, rollback, or public-output tests.
+
+## Required end-to-end verification
+
+Build the real Lexicon binaries:
+
+```bash
+cargo build -p lexicon-cli -p lexicon-framework
+```
+
+Create a fresh project:
+
+```bash
+verification_root="$(mktemp -d)"
+repo_root="$(git rev-parse --show-toplevel)"
+cli_binary="$repo_root/target/debug/lexicon-cli"
+framework_binary="$repo_root/target/debug/lexicon-framework"
+
+"$cli_binary" init "$verification_root" demo-project
+cd "$verification_root/demo-project"
+```
+
+Create the source:
+
+```bash
+LEXICON_FRAMEWORK_PATH="$framework_binary" \
+    "$cli_binary" source create example-source --protocol http
+```
+
+Confirm the implementation crates and runtime directories exist:
+
+```bash
+test -f sources/example-source/http/get-raw-data/get-raw-data-impl/Cargo.toml
+test -d sources/example-source/http/get-raw-data/runtime
+test -f sources/example-source/http/process-data/process-data-impl/Cargo.toml
+test -d sources/example-source/http/process-data/runtime
+```
+
+Build the source:
+
+```bash
+LEXICON_FRAMEWORK_PATH="$framework_binary" \
+    "$cli_binary" source build example-source --protocol http
+```
+
+Verify both runtime directories contain one published executable in addition to `.gitignore`.
+
+On Unix:
+
+```bash
+get_runtime="sources/example-source/http/get-raw-data/runtime"
+process_runtime="sources/example-source/http/process-data/runtime"
+
+get_executable="$(
+    find "$get_runtime" -maxdepth 1 -type f ! -name '.gitignore' | head -n 1
+)"
+process_executable="$(
+    find "$process_runtime" -maxdepth 1 -type f ! -name '.gitignore' | head -n 1
+)"
+
+test -n "$get_executable"
+test -n "$process_executable"
+test -f "$get_executable"
+test -f "$process_executable"
+test -x "$get_executable"
+test -x "$process_executable"
+```
+
+Verify exactly one runtime executable per operation:
+
+```bash
+test "$(
+    find "$get_runtime" -maxdepth 1 -type f ! -name '.gitignore' | wc -l
+)" -eq 1
+
+test "$(
+    find "$process_runtime" -maxdepth 1 -type f ! -name '.gitignore' | wc -l
+)" -eq 1
+```
+
+Record the initial runtime hashes:
+
+```bash
+get_hash_before="$(sha256sum "$get_executable" | awk '{print $1}')"
+process_hash_before="$(sha256sum "$process_executable" | awk '{print $1}')"
+```
+
+Introduce a temporary process implementation compilation error, preserving the original source so it can be restored:
+
+```bash
+process_main="sources/example-source/http/process-data/process-data-impl/src/main.rs"
+cp "$process_main" "$process_main.verification-backup"
+printf '\nthis_will_not_compile!\n' >> "$process_main"
+```
+
+Run the build again:
+
+```bash
+set +e
+LEXICON_FRAMEWORK_PATH="$framework_binary" \
+    "$cli_binary" source build example-source --protocol http
+failed_build_status=$?
+set -e
+```
+
+Restore the source immediately:
+
+```bash
+mv "$process_main.verification-backup" "$process_main"
+```
+
+Verify:
+
+```bash
+test "$failed_build_status" -ne 0
+test "$(sha256sum "$get_executable" | awk '{print $1}')" = "$get_hash_before"
+test "$(sha256sum "$process_executable" | awk '{print $1}')" = "$process_hash_before"
+```
+
+Confirm no staged or backup runtime files remain.
+
+Run the full relevant test suite:
 
 ```bash
 cargo test -p lexicon-cli -p lexicon-framework -- --nocapture
 ```
 
-Result: 33 relevant tests passed, 0 failed.
+## Scope exclusions
 
-Fresh end-to-end verification also succeeded in a temporary Lexicon project:
+Do not implement:
 
-```bash
-cargo build -p lexicon-cli -p lexicon-framework
-verification_root="$(mktemp -d)"
-repo_root="$(git rev-parse --show-toplevel)"
-cli_binary="$repo_root/target/debug/lexicon-cli"
-framework_binary="$repo_root/target/debug/lexicon-framework"
-"$cli_binary" init "$verification_root" demo-project
-cd "$verification_root/demo-project"
-LEXICON_FRAMEWORK_PATH="$framework_binary" \
-    "$cli_binary" source create example-source --protocol http
-```
+- Cross-target source builds.
+- cargo-zigbuild integration.
+- MZA integration.
+- Root `lexicon build`.
+- Runtime execution through `lexicon data --get`.
+- Runtime execution through `lexicon data --process`.
+- Actual HTTP acquisition.
+- Raw transaction recording.
+- SQLite processing.
+- Multiple protocols for one existing source.
+- Protocol fallback or selection.
+- Installation or bundling changes.
 
-Exit code: 0
+## Required final report
 
-Validation of unsupported protocol:
+After implementation and verification, replace `current.md` completely with a clean function-level report containing:
 
-```bash
-LEXICON_FRAMEWORK_PATH="$framework_binary" \
-    "$cli_binary" source create unsupported-source --protocol browser
-```
+- Every changed file, including `current.md`.
+- Final CLI parser types and variants.
+- Exact CLI-to-framework build argument flow.
+- Project, source, protocol, and metadata validation flow.
+- Cargo commands and temporary-target behavior.
+- Cargo JSON executable-discovery logic.
+- Transactional runtime publication and rollback flow.
+- Final runtime directory structure.
+- Test names mapped to all 50 requirements.
+- Exact package-specific test totals.
+- Exact end-to-end commands and exit codes.
+- Final runtime executable paths.
+- Successful runtime hashes.
+- Failed-build preservation hashes.
+- Confirmation that no staging or backup files remain.
+- Any remaining gap or blocker.
 
-Exit code: 1
+Do not append the previous task text after the report.
 
-Validation of placeholder build command:
+Do not claim completion unless:
 
-```bash
-"$cli_binary" source build example-source
-```
-
-Exit code: 1 with output:
-
-```text
-[lexicon] ERROR: source build is not implemented
-```
-
-Validation of old command names:
-
-```bash
-"$cli_binary" source new rejected-source --protocol http
-"$cli_binary" source add rejected-source
-```
-
-Both exit nonzero and leave no created directory.
-
-## Generated crates and cargo check results
-
-The generated crates compile from their protocol-scoped paths:
-
-```bash
-cargo check --manifest-path sources/example-source/http/get-raw-data/get_raw_data_impl/Cargo.toml
-cargo check --manifest-path sources/example-source/http/process-data/process_data_impl/Cargo.toml
-```
-
-Both completed successfully.
-
-## Remaining gap
-
-The only intentionally unimplemented behavior is actual source compilation for `source build`. This task deliberately stops at the required placeholder error contract and does not implement protocol selection, additional protocols, runtime execution, or root `lexicon build` behavior.
-
-## Completion status
-
-The requested task is complete and verified:
-
-- source create generates the protocol-scoped tree
-- source new is rejected
-- source build parses and returns the single not-implemented error
-- source add is rejected
-- the old non-protocol layout is absent
-- staging is atomic and non-overwriting
-- the relevant tests pass
+- Both implementation crates build successfully with `--release --locked`.
+- Cargo JSON identifies exactly one executable per crate.
+- Both runtime executables are published to their corresponding runtime directories.
+- A failed second build preserves both previous runtime executables.
+- Runtime publication rollback is tested.
+- `source create` remains functional.
+- `source add` remains rejected.
+- Root `lexicon build` remains unchanged.
+- All relevant tests pass.
