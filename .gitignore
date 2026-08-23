@@ -1,6 +1,7 @@
 # host machine
-workspace/
-sources/
+**/workspace/
+**/sources/
+**/telugu-lexicon/
 
 # outputs
 **/artifacts/
