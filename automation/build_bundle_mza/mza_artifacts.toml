@@ -4,12 +4,6 @@ crate = "../../../lexicon-cli"
 output_path = "../../../artifacts/"
 type = "custom"
 
-[[artifact]]
-label = "lexicon_framework"
-crate = "../../../lexicon-framework"
-output_path = "../../../artifacts/"
-type = "custom"
-
 [[target]]
 label = "linux-x86_64-musl"
 os = "linux"
@@ -24,5 +18,4 @@ type = "custom"
 protocol = "cargo-bundler-v0.1.0"
 inputs = [
     "lexicon_cli",
-    "lexicon_framework",
 ]

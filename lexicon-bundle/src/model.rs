@@ -17,7 +17,6 @@ pub struct InstallationRecord {
     pub target: String,
     pub installed_at: String,
     pub cli: String,
-    pub framework: String,
     pub path_modification: PathModification,
 }
 
@@ -29,6 +28,5 @@ pub enum InstallState {
 
 pub struct Destinations {
     pub cli: PathBuf,
-    pub framework: PathBuf,
     pub record: PathBuf,
 }

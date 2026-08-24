@@ -10,8 +10,4 @@ toml = "0.8"
 tempfile = "3"
 
 [lib]
-path = "core/src/lib.rs"
-
-[[bin]]
-name = "lexicon-framework"
-path = "src/main.rs"
+path = "src/lib.rs"

@@ -9,7 +9,7 @@ use xz2::read::XzDecoder;
 
 use crate::envpath::reverse_path_modification;
 use crate::model::{Destinations, InstallState, InstallationRecord, PathModification};
-use crate::pathutil::{normalize, relative_path, resolve_base_dir, segments};
+use crate::pathutil::resolve_base_dir;
 
 #[cfg(target_os = "linux")]
 use crate::envpath::ensure_linux_path;
@@ -20,15 +20,14 @@ pub fn resolve_destinations() -> Destinations {
     let base_dir = resolve_base_dir(crate::INSTALL_BASE);
     Destinations {
         cli: base_dir.join(crate::CLI_INSTALL_PATH),
-        framework: base_dir.join(crate::FRAMEWORK_INSTALL_PATH),
         record: base_dir.join(crate::RECORD_INSTALL_PATH),
     }
 }
 
 pub fn detect_state(dest: &Destinations) -> InstallState {
     let record_exists = dest.record.is_file();
-    let executables_exist = dest.cli.is_file() && dest.framework.is_file();
-    match (record_exists, executables_exist) {
+    let cli_exists = dest.cli.is_file();
+    match (record_exists, cli_exists) {
         (false, false) => InstallState::NotInstalled,
         (true, true) => InstallState::Installed,
         _ => InstallState::Damaged,
@@ -36,7 +35,11 @@ pub fn detect_state(dest: &Destinations) -> InstallState {
 }
 
 pub fn do_install(dest: &Destinations) -> i32 {
-    let staging_dir = env::temp_dir().join(format!("lexicon-bundle-install-{}-{}", std::process::id(), now_unix()));
+    let staging_dir = env::temp_dir().join(format!(
+        "lexicon-bundle-install-{}-{}",
+        std::process::id(),
+        now_unix()
+    ));
     if let Err(err) = fs::create_dir_all(&staging_dir) {
         eprintln!("lexicon-bundle: failed to create staging directory: {err}");
         return 1;
@@ -65,13 +68,10 @@ pub fn do_uninstall(dest: &Destinations) -> i32 {
 
     if let Err(err) = fs::remove_file(&dest.cli) {
         if err.kind() != io::ErrorKind::NotFound {
-            eprintln!("lexicon-bundle: failed to remove {}: {err}", dest.cli.display());
-            return 1;
-        }
-    }
-    if let Err(err) = fs::remove_file(&dest.framework) {
-        if err.kind() != io::ErrorKind::NotFound {
-            eprintln!("lexicon-bundle: failed to remove {}: {err}", dest.framework.display());
+            eprintln!(
+                "lexicon-bundle: failed to remove {}: {err}",
+                dest.cli.display()
+            );
             return 1;
         }
     }
@@ -84,10 +84,9 @@ pub fn do_uninstall(dest: &Destinations) -> i32 {
 
     let _ = fs::remove_file(&dest.record);
     remove_if_empty_and_lexicon_owned(dest.cli.parent());
-    remove_if_empty_and_lexicon_owned(dest.framework.parent());
     remove_if_empty_and_lexicon_owned(dest.record.parent());
 
-    if dest.cli.exists() || dest.framework.exists() || dest.record.exists() {
+    if dest.cli.exists() || dest.record.exists() {
         eprintln!("lexicon-bundle: uninstallation did not fully complete");
         return 1;
     }
@@ -104,33 +103,17 @@ pub fn find_input(label: &str) -> &'static [u8] {
         .unwrap_or_else(|| panic!("lexicon-bundle: no embedded input with label \"{label}\""))
 }
 
-pub fn verify_framework_reachable(cli_dest: &Path, framework_dest: &Path) -> bool {
-    let Some(bin_dir) = cli_dest.parent() else { return false };
-    let mut cli_parent_segments = segments(crate::CLI_INSTALL_PATH);
-    cli_parent_segments.pop();
-    let framework_segments = segments(crate::FRAMEWORK_INSTALL_PATH);
-    let relative = relative_path(&cli_parent_segments, &framework_segments);
-    normalize(&bin_dir.join(relative)) == normalize(framework_dest)
-}
-
 fn try_install(dest: &Destinations, staging_dir: &Path) -> Result<PathModification, String> {
     let cli_file_name = file_name_of(&dest.cli)?;
-    let framework_file_name = file_name_of(&dest.framework)?;
 
     let cli_archive = find_input(crate::CLI_ARTIFACT_LABEL);
-    let framework_archive = find_input(crate::FRAMEWORK_ARTIFACT_LABEL);
 
     let staged_cli = extract_to_staging(cli_archive, staging_dir, &cli_file_name)?;
-    let staged_framework = extract_to_staging(framework_archive, staging_dir, &framework_file_name)?;
 
     atomic_install(&staged_cli, &dest.cli)?;
-    atomic_install(&staged_framework, &dest.framework)?;
 
     #[cfg(unix)]
-    {
-        set_executable(&dest.cli)?;
-        set_executable(&dest.framework)?;
-    }
+    set_executable(&dest.cli)?;
 
     let bin_dir = dest
         .cli
@@ -142,11 +125,8 @@ fn try_install(dest: &Destinations, staging_dir: &Path) -> Result<PathModificati
     #[cfg(target_os = "windows")]
     let path_modification = ensure_windows_path(bin_dir)?;
 
-    if !dest.cli.is_file() || !dest.framework.is_file() {
-        return Err("installed files are missing after installation".to_string());
-    }
-    if !verify_framework_reachable(&dest.cli, &dest.framework) {
-        return Err("the installed CLI cannot reach the installed framework".to_string());
+    if !dest.cli.is_file() {
+        return Err("installed CLI is missing after installation".to_string());
     }
 
     let record = InstallationRecord {
@@ -155,7 +135,6 @@ fn try_install(dest: &Destinations, staging_dir: &Path) -> Result<PathModificati
         target: env!("LEXICON_TARGET_TRIPLE").to_string(),
         installed_at: now_unix().to_string(),
         cli: dest.cli.display().to_string(),
-        framework: dest.framework.display().to_string(),
         path_modification: path_modification.clone(),
     };
     write_record(&dest.record, &record)?;
@@ -170,18 +149,23 @@ fn file_name_of(path: &Path) -> Result<String, String> {
 }
 
 fn now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(unix)]
 fn set_executable(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(|err| err.to_string())
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .map_err(|err| err.to_string())
 }
 
 pub fn write_record(record_path: &Path, record: &InstallationRecord) -> Result<(), String> {
     if let Some(parent) = record_path.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
     }
     let contents = toml::to_string_pretty(record).map_err(|err| err.to_string())?;
     fs::write(record_path, contents).map_err(|err| err.to_string())
@@ -201,7 +185,11 @@ fn validate_archive(archive_bytes: &[u8]) -> Result<(), String> {
         match entry.header().entry_type() {
             tar::EntryType::Directory => continue,
             tar::EntryType::Regular => regular_count += 1,
-            other => return Err(format!("archive contains a disallowed entry type: {other:?}")),
+            other => {
+                return Err(format!(
+                    "archive contains a disallowed entry type: {other:?}"
+                ))
+            }
         }
     }
     match regular_count {
@@ -215,7 +203,11 @@ fn validate_archive(archive_bytes: &[u8]) -> Result<(), String> {
 /// file (ignoring directory entries, rejecting links/specials), and extracts
 /// that file into `staging_dir` under `dest_file_name` (never the archived
 /// path, so archive contents can never control the install destination).
-fn extract_to_staging(archive_bytes: &[u8], staging_dir: &Path, dest_file_name: &str) -> Result<PathBuf, String> {
+fn extract_to_staging(
+    archive_bytes: &[u8],
+    staging_dir: &Path,
+    dest_file_name: &str,
+) -> Result<PathBuf, String> {
     validate_archive(archive_bytes)?;
 
     let decoder = XzDecoder::new(Cursor::new(archive_bytes));
@@ -233,7 +225,8 @@ fn extract_to_staging(archive_bytes: &[u8], staging_dir: &Path, dest_file_name: 
 
 fn atomic_install(staged: &Path, dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
     }
     if fs::rename(staged, dest).is_err() {
         fs::copy(staged, dest).map_err(|err| err.to_string())?;
@@ -244,7 +237,9 @@ fn atomic_install(staged: &Path, dest: &Path) -> Result<(), String> {
 
 fn remove_if_empty_and_lexicon_owned(dir: Option<&Path>) {
     let Some(dir) = dir else { return };
-    let Some(name) = dir.file_name().and_then(|name| name.to_str()) else { return };
+    let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
     if !name.eq_ignore_ascii_case("lexicon") {
         return;
     }
