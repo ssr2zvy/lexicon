@@ -1,5 +1,7 @@
 mod cli;
 
+include!(concat!(env!("OUT_DIR"), "/lexicon_runtime_layout.rs"));
+
 use cli::{dispatch, Cli};
 use clap::Parser;
 

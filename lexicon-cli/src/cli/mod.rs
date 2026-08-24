@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::process::Command;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -23,6 +22,13 @@ pub use source::{SourceAction, SourceCommand};
     long_about = "Lexicon CLI for raw-data acquisition, processing, source management, and build orchestration.\n\nThis parser validates the command interface defined by the project spec without invoking framework behavior."
 )]
 pub struct Cli {
+    #[arg(
+        global = true,
+        long = "framework-path",
+        value_name = "PATH",
+        help = "Path to the installed lexicon-framework binary; this value is remembered for future CLI invocations."
+    )]
+    pub framework_path: Option<std::path::PathBuf>,
     #[command(subcommand)]
     pub command: Option<RootCommand>,
 }
@@ -36,6 +42,8 @@ pub enum RootCommand {
 }
 
 pub fn dispatch(cli: Cli) -> Result<(), String> {
+    let framework_path_override = cli.framework_path.clone();
+
     match cli.command {
         None => {
             let mut command = Cli::command();
@@ -61,7 +69,7 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
         }
         Some(RootCommand::Source(command)) => match command.action {
             SourceAction::Create(create_command) => {
-                let framework_path = framework_binary_path()?;
+                let framework_path = framework_binary_path(framework_path_override.as_deref())?;
                 let status = Command::new(framework_path)
                     .args([
                         "source",
@@ -78,7 +86,7 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                 Ok(())
             }
             SourceAction::Build(build_command) => {
-                let framework_path = framework_binary_path()?;
+                let framework_path = framework_binary_path(framework_path_override.as_deref())?;
                 let status = Command::new(framework_path)
                     .args([
                         "source",
@@ -107,74 +115,70 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
     }
 }
 
-fn framework_binary_path() -> Result<String, String> {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_lexicon-framework") {
-        return Ok(path);
-    }
-    if let Ok(path) = std::env::var("LEXICON_FRAMEWORK_PATH") {
-        return Ok(path);
-    }
+fn framework_state_path() -> Result<std::path::PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| "HOME or USERPROFILE is not set".to_string())?;
+    let base = std::path::PathBuf::from(home).join(".local").join("share").join("lexicon");
+    Ok(base.join("framework-path"))
+}
 
-    if let Ok(current_exe) = std::env::current_exe() {
-        let direct = current_exe
-            .parent()
-            .map(|dir| dir.join("lexicon-framework"))
-            .filter(|path| path.exists());
-        if let Some(path) = direct {
+fn read_framework_path() -> Result<Option<std::path::PathBuf>, String> {
+    let state_path = framework_state_path()?;
+    if !state_path.is_file() {
+        return Ok(None);
+    }
+    let contents = std::fs::read_to_string(&state_path)
+        .map_err(|error| format!("failed to read framework state {}: {error}", state_path.display()))?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(std::path::PathBuf::from(trimmed)))
+}
+
+fn write_framework_path(path: &std::path::Path) -> Result<(), String> {
+    let state_path = framework_state_path()?;
+    if let Some(parent) = state_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    std::fs::write(&state_path, path.to_string_lossy().as_ref())
+        .map_err(|error| format!("failed to write {}: {error}", state_path.display()))?;
+    Ok(())
+}
+
+fn framework_binary_path(explicit_path: Option<&std::path::Path>) -> Result<String, String> {
+    if let Some(path) = explicit_path {
+        if path.is_file() {
+            write_framework_path(path)?;
             return Ok(path.to_string_lossy().into_owned());
         }
-
-        if let Some(path) = current_exe.ancestors().find_map(|ancestor| {
-            let candidate = ancestor.join("target").join("debug").join("lexicon-framework");
-            candidate.exists().then_some(candidate)
-        }) {
-            return Ok(path.to_string_lossy().into_owned());
-        }
-    }
-
-    let workspace_root = locate_workspace_root()?;
-    let binary = workspace_root.join("target").join("debug").join("lexicon-framework");
-
-    let status = Command::new("cargo")
-        .current_dir(&workspace_root)
-        .args(["build", "-p", "lexicon-framework"])
-        .status()
-        .map_err(|error| format!("failed to build lexicon-framework: {error}"))?;
-    if !status.success() {
         return Err(format!(
-            "failed to build lexicon-framework for source scaffolding (exit code: {status})"
+            "framework path '{}' was provided but the framework binary does not exist",
+            path.display()
         ));
     }
 
-    if binary.exists() {
-        Ok(binary.to_string_lossy().into_owned())
-    } else {
-        Err("could not locate the lexicon-framework binary after build".to_string())
-    }
-}
-
-fn locate_workspace_root() -> Result<PathBuf, String> {
-    let current = std::env::current_dir()
-        .map_err(|error| format!("failed to determine current directory: {error}"))?;
-    let mut dir = current;
-
-    loop {
-        let manifest = dir.join("Cargo.toml");
-        if manifest.is_file() {
-            let contents = std::fs::read_to_string(&manifest)
-                .map_err(|error| format!("failed to read {}: {error}", manifest.display()))?;
-            if contents.contains("[workspace]") {
-                return Ok(dir);
-            }
+    if let Some(path) = read_framework_path()? {
+        if path.is_file() {
+            return Ok(path.to_string_lossy().into_owned());
         }
+        let _ = std::fs::remove_file(framework_state_path()?);
+    }
 
-        match dir.parent() {
-            Some(parent) => dir = parent.to_path_buf(),
-            None => break,
+    if let Ok(current_exe) = std::env::current_exe() {
+        let candidate = current_exe
+            .parent()
+            .map(|dir| dir.join(crate::FRAMEWORK_FROM_CLI))
+            .filter(|path| path.is_file());
+        if let Some(path) = candidate {
+            write_framework_path(&path)?;
+            return Ok(path.to_string_lossy().into_owned());
         }
     }
 
-    Err("could not locate the workspace root from the current directory".to_string())
+    Err("no framework binary path was provided, no remembered CLI framework path exists, and no installed framework binary was found next to the lexicon CLI; pass --framework-path <path> to the CLI".to_string())
 }
 
 #[cfg(test)]
@@ -234,6 +238,30 @@ mod tests {
         assert!(status.success(), "building the CLI and framework binaries should succeed");
 
         workspace_root.join("target").join("debug").join("lexicon-framework")
+    }
+
+    #[test]
+    fn cli_requires_explicit_or_local_install_framework_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let cli_home = tempfile::tempdir().unwrap();
+        fs::write(project_root.join("lexicon.toml"), "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n").unwrap();
+
+        let cli_bin = resolve_cli_binary();
+        let output = std::process::Command::new(&cli_bin)
+            .current_dir(project_root)
+            .env("HOME", cli_home.path())
+            .env("USERPROFILE", cli_home.path())
+            .args(["source", "create", "example-source", "--protocol", "http"])
+            .output()
+            .unwrap();
+
+        let combined_bytes = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+        let combined = String::from_utf8_lossy(&combined_bytes);
+
+        assert!(!output.status.success(), "CLI should fail when no framework path is available");
+        assert!(combined.contains("framework binary") || combined.contains("--framework-path"), "missing framework error should mention the required path: {combined}");
+        assert!(!combined.contains("cargo build"), "CLI should not build the framework from the workspace when no real install path exists: {combined}");
     }
 
     #[test]
@@ -299,8 +327,9 @@ mod tests {
 
         let output = std::process::Command::new(cli_bin)
             .current_dir(project_root)
-            .env("LEXICON_FRAMEWORK_PATH", framework_bin)
-            .args(["source", "create", "example-source", "--protocol", "http"])
+            .env("HOME", temp.path())
+            .env("USERPROFILE", temp.path())
+            .args(["--framework-path", framework_bin.to_str().unwrap(), "source", "create", "example-source", "--protocol", "http"])
             .output()
             .unwrap();
 
@@ -320,15 +349,17 @@ mod tests {
 
         let create_output = std::process::Command::new(&cli_bin)
             .current_dir(project_root)
-            .env("LEXICON_FRAMEWORK_PATH", &framework_bin)
-            .args(["source", "create", "unsupported-source", "--protocol", "browser"])
+            .env("HOME", temp.path())
+            .env("USERPROFILE", temp.path())
+            .args(["--framework-path", framework_bin.to_str().unwrap(), "source", "create", "unsupported-source", "--protocol", "browser"])
             .output()
             .unwrap();
 
         let build_output = std::process::Command::new(&cli_bin)
             .current_dir(project_root)
-            .env("LEXICON_FRAMEWORK_PATH", &framework_bin)
-            .args(["source", "build", "unsupported-source", "--protocol", "browser"])
+            .env("HOME", temp.path())
+            .env("USERPROFILE", temp.path())
+            .args(["--framework-path", framework_bin.to_str().unwrap(), "source", "build", "unsupported-source", "--protocol", "browser"])
             .output()
             .unwrap();
 
