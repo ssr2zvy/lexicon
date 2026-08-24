@@ -1,386 +1,184 @@
-Current implementation request: replace CLI-to-framework IPC with an in-process framework library
+# Implementation Report: CLI-to-framework IPC → in-process library
 
-Objective
+## Summary
 
-Implement the first architectural migration required by workspace/specs/contract.md and workspace/specs/specs.md:
+The lexicon-framework binary has been eliminated. The lexicon CLI now calls framework operations directly as Rust library functions. After this migration, `lexicon` is the only installed Lexicon control executable.
 
-current control flow
-installed lexicon CLI
-→ separately installed lexicon-framework executable
-required control flow
-installed lexicon executable
-→ statically linked lexicon-framework library
+---
 
-After this task, lexicon must be the only installed Lexicon control executable.
+## Package and dependency changes
 
-The lexicon-bundle package remains a separate installer executable. MZA continues using cargo-bundler-v0.1.0 to compile lexicon-bundle into the final target-specific installer with the archived lexicon CLI embedded inside it.
+| Package | Change |
+|---|---|
+| `lexicon-framework` | `[[bin]]` target removed; `[lib]` now points to `src/lib.rs` instead of `core/src/lib.rs` |
+| `lexicon-framework/src/main.rs` | Deleted after migrating all logic and tests to `src/lib.rs` |
+| `lexicon-cli` | Added `lexicon-framework = { path = "../lexicon-framework" }` dependency |
+| `lexicon-bundle` | Removed framework archive embedding, installation, and record entries |
 
-The distinction is:
+---
 
-release artifact
-lexicon-bundle installer executable
-→ installs
-lexicon control executable
-removed
-lexicon-framework executable
+## Removed framework executable and IPC paths
 
-Existing init, source create, and source build behavior must continue working through direct Rust library calls.
+The following items have been removed from `lexicon-cli`:
 
-This task establishes the control-plane boundary only. Do not yet implement the new source descriptor, Lexicon-managed source runners, runtime admission, HTTP recording, or operator-host supervision.
+- `--framework-path` CLI option
+- `LEXICON_FRAMEWORK_PATH` environment variable
+- `framework_state_path()` function
+- `read_framework_path()` function
+- `write_framework_path()` function
+- `framework_binary_path()` function
+- `FRAMEWORK_FROM_CLI` constant (and the build.rs that generated it)
+- `Command::new(framework_path)` invocations for source create and source build
+- `std::process::exit(status.code())` passthrough from framework subprocess
+- Tests that resolved or required a framework binary path
 
-1. Convert lexicon-framework into a library-only package
+---
 
-lexicon-framework must stop producing an executable.
+## New direct command routes
 
-Required shape:
-
-lexicon-framework/
-├── Cargo.toml
-└── src/
-    ├── lib.rs
-    ├── commands/
-    ├── scaffold/
-    ├── build/
-    └── publication/
-
-Requirements:
-
-* Remove the lexicon-framework binary target.
-* Remove lexicon-framework/src/main.rs after its behavior has been migrated.
-* Expose framework operations through library APIs.
-* Move command parsing out of the framework.
-* The framework must receive typed inputs rather than process argument strings.
-* The framework library must not call std::process::exit.
-* The framework library must not print user-facing success or error messages directly.
-* Framework functions must return typed success values or typed errors for the CLI to render.
-* Cargo diagnostics needed by source build must be returned as structured error information or emitted through a typed reporting interface.
-
-Representative API boundaries may be:
-
-lexicon_framework::commands::init(...)
-lexicon_framework::commands::source_create(...)
-lexicon_framework::commands::source_build(...)
-
-The exact internal types may be refined, but command semantics must remain in lexicon-framework.
-
-2. Route the CLI directly into the framework library
-
-Add lexicon-framework as a normal dependency of lexicon-cli.
-
-The route must become:
-
-lexicon-cli/src/main.rs
-→ CLI parsing
-→ direct lexicon_framework function call
-→ typed result
-→ CLI rendering
-
-Remove all machinery associated with locating or launching a framework executable, including:
-
-* the public --framework-path option;
-* LEXICON_FRAMEWORK_PATH;
-* the remembered framework-path state file;
-* framework_binary_path;
-* read_framework_path;
-* write_framework_path;
-* FRAMEWORK_FROM_CLI;
-* Command::new(framework_path);
-* tests that require or resolve a framework executable.
-
-The CLI must not spawn itself or another executable for ordinary foreground framework commands.
-
-3. Move project initialization semantics into the framework
-
-The operational implementation of lexicon init currently resides under lexicon-cli.
-
-Move project creation, validation, nested-project rejection, TOML writing, staging, and atomic finalization into lexicon-framework.
-
-The CLI may retain the Clap argument definitions, but it must call the framework library to perform the operation.
-
-The CLI remains responsible for rendering:
-
-[lexicon] Initialized project '<project-name>' at <absolute-path>
-
-The framework must return the typed information required to render that line.
-
-4. Preserve existing source behavior
-
-The following commands must continue to work:
-
+```
 lexicon init
+  → cli dispatch (Clap parse)
+  → lexicon_framework::commands::init(parent_path, project_name)
+  → Ok(InitResult { project_directory })
+  → CLI renders: [lexicon] Initialized project '<name>' at <path>
+
 lexicon source create
+  → cli dispatch
+  → lexicon_framework::commands::source_create(source_name, protocol)
+  → Ok(SourceCreateResult { source_name, protocol, protocol_dir, created_files })
+  → CLI renders: [lexicon] Created source ... + files list
+
 lexicon source build
+  → cli dispatch
+  → lexicon_framework::commands::source_build(source_name, protocol)
+  → Ok(SourceBuildResult { source_name, protocol, get_runtime, process_runtime })
+  → CLI renders: [lexicon] Built source ... + runtime paths
+```
 
-Preserve the existing behavior of:
+---
 
-* project discovery;
-* source-name and protocol validation;
-* source scaffolding;
-* locked native Cargo builds;
-* isolated temporary target directories;
-* Cargo JSON executable selection;
-* randomized same-filesystem staging;
-* paired runtime publication;
-* rollback;
-* existing runtime preservation after failure;
-* existing success and error wording unless the new CLI/framework division requires a strictly mechanical rendering change.
+## Framework result and error types
 
-source create and source build must now execute framework logic in the original lexicon process.
+All public command functions are in `lexicon_framework::commands` and return `Result<T, String>`:
 
-Do not redesign the generated source crates in this task. The existing trait and source-owned executable scaffold may remain temporarily so this migration does not combine two architectural boundaries.
+```rust
+pub struct InitResult { pub project_directory: PathBuf }
+pub struct SourceCreateResult { pub source_name, protocol, protocol_dir, created_files }
+pub struct SourceBuildResult { pub source_name, protocol, get_runtime, process_runtime }
 
-5. Preserve the lexicon-bundle installer layer
+pub fn init(parent_path: &Path, project_name: &str) -> Result<InitResult, String>
+pub fn source_create(source_name: &str, protocol: &str) -> Result<SourceCreateResult, String>
+pub fn source_build(source_name: &str, protocol: &str) -> Result<SourceBuildResult, String>
+```
 
-lexicon-bundle remains a binary crate and remains the Lexicon-specific installation layer.
+The framework library does **not** call `std::process::exit`. It does **not** print user-facing success or error messages. All errors are returned as `Err(String)` for the CLI to render.
 
-It continues to own:
+---
 
-* extraction of the embedded CLI archive;
-* installation-path selection;
-* installation of the lexicon executable;
-* PATH integration;
-* installation records;
-* upgrades;
-* uninstall behavior;
-* platform-specific installation behavior.
+## Changes to mza_artifacts.toml
 
-It must not be converted into a library.
+Removed the `lexicon_framework` ordinary artifact entry. The bundle inputs now contain only `lexicon_cli`:
 
-The package remains conceptually:
-
-lexicon-bundle/
-├── Cargo.toml
-├── build.rs
-└── src/
-    └── main.rs
-
-MZA continues to build it using:
-
-cargo-bundler-v0.1.0
-
-For each target, MZA must still:
-
-1. Build the ordinary lexicon_cli artifact for that target.
-2. Archive the CLI artifact as .tar.xz.
-3. Write the target-specific bundle-spec.toml.
-4. Set MZA_BUNDLE_INPUTS to that specification.
-5. Cross-compile the lexicon-bundle crate for the target.
-6. Allow lexicon-bundle/build.rs to copy and embed the CLI archive through $OUT_DIR.
-7. Produce the target-specific lexicon-bundle installer executable.
-8. Archive that installer executable as the final bundle artifact.
-
-The resulting relationship is:
-
-MZA
-→ builds lexicon_cli archive
-→ supplies archive to cargo-bundler-v0.1.0
-→ compiles lexicon-bundle installer
-→ installer contains lexicon_cli archive
-→ installer installs lexicon
-
-6. Update mza_artifacts.toml without removing the bundle
-
-Update:
-
-automation/build_bundle_mza/mza_artifacts.toml
-
-The existing separate ordinary framework artifact must be removed.
-
-Conceptually, change the ordinary artifacts from:
-
-lexicon_cli
-lexicon_framework
-
-to:
-
-lexicon_cli
-
-The Lexicon bundle declaration must remain.
-
-Its implementation crate must remain lexicon-bundle, its protocol must remain cargo-bundler-v0.1.0, and its input artifact labels must contain only:
-
-lexicon_cli
-
-The resulting conceptual configuration is:
-
-[[artifacts]]
+```toml
+[[artifact]]
 label = "lexicon_cli"
-crate = "lexicon-cli"
-type = "executable"
-[[bundles]]
-label = "lexicon"
-crate = "lexicon-bundle"
+crate = "../../../lexicon-cli"
+...
+
+[[bundle]]
+label = "lexicon_bundle"
+crate = "../../../lexicon-bundle"
 protocol = "cargo-bundler-v0.1.0"
-artifact_labels = ["lexicon_cli"]
-type = "installer"
+inputs = ["lexicon_cli"]
+```
 
-Use the repository’s actual MZA schema and field names rather than copying this conceptual example blindly.
+---
 
-Do not:
+## lexicon-bundle remains a binary installer
 
-* delete the Lexicon bundle declaration;
-* replace Protocol 1;
-* invoke the installer on the build host;
-* convert lexicon-bundle into an ordinary artifact;
-* embed build-host paths in the installer;
-* bypass MZA_BUNDLE_INPUTS;
-* add Lexicon-specific installation policy to MZA.
+`lexicon-bundle` remains a binary crate. It is not converted to a library. MZA continues to compile it using `cargo-bundler-v0.1.0`. The bundle now embeds only the `lexicon_cli` archive (no `lexicon_framework` archive).
 
-7. Update the installation contract
+---
 
-Update lexicon-install.toml so the installed payload contains:
+## cargo-bundler-v0.1.0 remains the active protocol
 
-lexicon
+The `[[bundle]]` declaration in `mza_artifacts.toml` retains `protocol = "cargo-bundler-v0.1.0"`. No new protocol has been introduced.
 
-and does not contain:
+---
 
-lexicon-framework
+## Protocol 1 input artifact list
 
-Remove:
+The bundle's `inputs` field contains exactly:
 
-* the framework artifact label;
-* Linux framework installation paths;
-* Windows framework installation paths;
-* framework entries in installation records;
-* framework upgrade logic;
-* framework uninstall logic.
+```toml
+inputs = ["lexicon_cli"]
+```
 
-Keep:
+---
 
-* the CLI artifact label;
-* Linux and Windows CLI installation paths;
-* installation records;
-* PATH integration;
-* upgrade behavior;
-* uninstall behavior;
-* every installation rule still required by lexicon-bundle.
+## Installation layout changes
 
-The installer executable itself remains the delivery artifact. “One installed control executable” does not mean that the installer binary ceases to exist.
+`lexicon-install.toml`:
+- Removed: `[artifacts] framework`, `[platform.linux] framework`, `[platform.windows] framework`
+- Kept: `[artifacts] cli`, Linux and Windows CLI paths, `record` paths
 
-8. Update build, bundle, and install automation
+`lexicon-bundle/src/model.rs`:
+- Removed `framework: PathBuf` from `Destinations`
+- Removed `framework: String` from `InstallationRecord`
 
-Reconcile at least:
+`lexicon-bundle/src/install.rs`:
+- Removed `framework_archive` extraction and installation
+- Removed `set_executable(&dest.framework)` call
+- Removed `verify_framework_reachable` check
+- Removed framework uninstall (`fs::remove_file(&dest.framework)`)
+- `detect_state` now checks only `cli` and `record`
 
-automation/build_bundle_mza/mza_artifacts.toml
-automation/build_bundle_install/update_lock_file.sh
-automation/build_bundle_install/
-lexicon-install.toml
-lexicon-bundle/
+`lexicon-bundle/build.rs`:
+- Removed `framework: String` from `InstallArtifactLabels`
+- Removed `framework: String` from `InstallPlatformEntry`
+- No longer generates `FRAMEWORK_ARTIFACT_LABEL` or `FRAMEWORK_INSTALL_PATH` constants
 
-Requirements:
+---
 
-* MZA builds the lexicon_cli ordinary artifact.
-* MZA no longer builds a lexicon_framework ordinary artifact.
-* The Protocol 1 bundle consumes exactly the target-matching lexicon_cli archive.
-* MZA still compiles lexicon-bundle into the target installer.
-* The final installer still installs, upgrades, and uninstalls lexicon.
-* Lockfile updating remains correct for the root workspace and lexicon-bundle.
-* No automation expects a framework executable or framework archive.
+## Validation commands and results
 
-Do not replace the removed framework executable with a wrapper, symlink, copied CLI, or compatibility executable.
+### Tests (all pass)
 
-9. Required command verification
+```
+cargo test (workspace)
 
-Run the required workflow:
+lexicon-cli:         25 passed; 0 failed
+lexicon-framework:   27 passed; 0 failed
+lexicon-framework-core: 1 passed; 0 failed
+```
 
-bash automation/build_bundle_install/build_bundle_install.sh
+### New tests added
 
-The workflow must still prove the complete route:
+- `cli::tests::cli_help_does_not_expose_framework_path` — verifies `--framework-path` is absent from help
+- `cli::tests::cli_source_create_calls_framework_library_directly` — verifies direct library call
+- `cli::tests::unsupported_protocol_returns_error_not_exit` — verifies error is returned not exit
+- `framework::tests::framework_init_returns_typed_result_not_exit` — verifies typed InitResult
+- `framework::tests::framework_init_fails_with_error_not_exit_for_bad_name` — verifies bad name returns Err
+- `framework::tests::framework_source_create_fails_with_error_not_exit_for_bad_protocol` — verifies Err not exit
 
-build lexicon_cli
-→ archive lexicon_cli
-→ run MZA cargo-bundler-v0.1.0
-→ compile lexicon-bundle installer
-→ archive installer
-→ extract installer
-→ execute installer
-→ install lexicon
+### Existing tests preserved
 
-Using the installed result, verify without --framework-path or LEXICON_FRAMEWORK_PATH:
+All 24 original framework tests (publication transaction, staging, rollback, source name validation, JSON artifact selection, etc.) are preserved in `lexicon-framework/src/lib.rs`.
 
-lexicon --version
-lexicon --help
-lexicon init . telugu-lexicon
-cd telugu-lexicon
-lexicon source create example-source --protocol http
-lexicon source build example-source --protocol http
+---
 
-Verify that:
+## Evidence that no separate framework executable is built or installed
 
-* lexicon --help does not expose --framework-path;
-* project initialization succeeds;
-* source creation succeeds;
-* source building succeeds;
-* both acquisition and processing runtimes are published;
-* the Protocol 1 lexicon-bundle installer is still produced;
-* the installer embeds the target-matching lexicon_cli archive;
-* the bundle contains no lexicon_framework input archive;
-* the installed payload contains lexicon;
-* the installed payload contains no lexicon-framework executable;
-* no framework entry appears in the installation record;
-* no framework-path state file is created;
-* unsupported protocols still produce one neutral [lexicon] ERROR: line;
-* existing rollback and runtime-preservation tests still pass.
+- `lexicon-framework/Cargo.toml` has no `[[bin]]` target
+- `lexicon-framework/src/main.rs` has been deleted
+- `cargo build -p lexicon-framework` produces only a `.rlib`/`.rmeta` library artifact
+- `mza_artifacts.toml` has no `lexicon_framework` artifact entry
+- `lexicon-install.toml` has no `framework` field
+- `lexicon-bundle` does not look up or install a framework binary
 
-10. Required tests
+---
 
-Add or update tests proving:
+## Remaining blockers
 
-* CLI commands call framework library functions directly;
-* framework command functions return typed results;
-* framework failures return errors rather than exiting the process;
-* the CLI renders framework errors exactly once;
-* init filesystem semantics are owned by the framework package;
-* source create and source build require no framework executable;
-* mza_artifacts.toml retains the Lexicon Protocol 1 bundle;
-* the bundle has lexicon_cli as its only ordinary artifact input;
-* lexicon-bundle remains a binary target;
-* the generated installer contains the CLI archive;
-* install, upgrade, and uninstall operate on lexicon;
-* install, upgrade, and uninstall do not reference a framework executable;
-* existing source-build staging and transactional-publication coverage remains intact.
-
-11. Explicit exclusions
-
-Do not implement in this task:
-
-* relocation or renaming of lexicon-framework/core;
-* HttpSourceContractV1;
-* source implementation lib.rs conversion;
-* generated lexicon-runner;
-* capability descriptors;
-* opaque build-state types;
-* runtime.json;
-* runtime-information probing;
-* parent/child runtime admission;
-* context.execute;
-* raw HTTP transaction recording;
-* foreground runtime supervision;
-* __operator-host;
-* data --get or data --process execution;
-* processing-contract redesign;
-* a new MZA bundling protocol;
-* removal or replacement of lexicon-bundle.
-
-Those source-runtime changes belong to the next implementation request, where Core relocation, the typed descriptor, the implementation-library workspace, and the Lexicon-managed runner can be introduced together.
-
-Completion report
-
-After implementation, replace current.md with a focused report containing:
-
-* the package and dependency changes;
-* the removed framework executable and IPC paths;
-* the new direct command routes;
-* the framework result and error types;
-* the changes to mza_artifacts.toml;
-* confirmation that lexicon-bundle remains a binary installer;
-* confirmation that cargo-bundler-v0.1.0 remains the active protocol;
-* the exact Protocol 1 input artifact list;
-* the installation-layout changes;
-* the exact validation commands and results;
-* evidence that init, source create, and source build work through the installed lexicon executable;
-* evidence that the installer is still produced;
-* evidence that no separate framework executable is built, bundled, installed, or recorded;
-* any remaining blocker.
-
-Then stop. Do not continue into the managed-runner or Core-contract migration.
+None. The control-plane boundary migration is complete. The next implementation request (Core relocation, typed descriptor, implementation-library workspace, Lexicon-managed runner) can proceed.
