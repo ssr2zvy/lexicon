@@ -5,15 +5,15 @@
    git fetch
    ```
 
-2. Ensure the current branch is `current_tracking`.
-   - If the current branch is not `current_tracking`, switch to it.
+2. Ensure the current branch is `main`.
+   - If the current branch is not `main`, switch to it.
    ```bash
-   git switch current_tracking
+   git switch main
    ```
 
-3. Pull the latest changes for `current_tracking`.
+3. Pull the latest changes for `main`.
    ```bash
-   git pull --ff-only origin current_tracking
+   git pull --ff-only origin main
    ```
 
 4. Ensure the working directory is clean for fresh project validation.
