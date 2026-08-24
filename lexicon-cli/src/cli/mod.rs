@@ -192,13 +192,6 @@ mod tests {
         }
 
         let current_exe = std::env::current_exe().unwrap();
-        if let Some(path) = current_exe.ancestors().find_map(|ancestor| {
-            let candidate = ancestor.join("target").join("debug").join("lexicon-cli");
-            candidate.exists().then_some(candidate)
-        }) {
-            return path;
-        }
-
         let workspace_root = current_exe
             .ancestors()
             .find_map(|ancestor| {
@@ -224,13 +217,6 @@ mod tests {
         }
 
         let current_exe = std::env::current_exe().unwrap();
-        if let Some(path) = current_exe.ancestors().find_map(|ancestor| {
-            let candidate = ancestor.join("target").join("debug").join("lexicon-framework");
-            candidate.exists().then_some(candidate)
-        }) {
-            return path;
-        }
-
         let workspace_root = current_exe
             .ancestors()
             .find_map(|ancestor| {
@@ -332,20 +318,31 @@ mod tests {
         let cli_bin = resolve_cli_binary();
         let framework_bin = resolve_framework_binary();
 
-        let output = std::process::Command::new(cli_bin)
+        let create_output = std::process::Command::new(&cli_bin)
             .current_dir(project_root)
-            .env("LEXICON_FRAMEWORK_PATH", framework_bin)
+            .env("LEXICON_FRAMEWORK_PATH", &framework_bin)
             .args(["source", "create", "unsupported-source", "--protocol", "browser"])
             .output()
             .unwrap();
 
-        let combined_bytes = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
-        let combined = String::from_utf8_lossy(&combined_bytes);
+        let build_output = std::process::Command::new(&cli_bin)
+            .current_dir(project_root)
+            .env("LEXICON_FRAMEWORK_PATH", &framework_bin)
+            .args(["source", "build", "unsupported-source", "--protocol", "browser"])
+            .output()
+            .unwrap();
 
-        assert!(!output.status.success(), "unsupported protocol should fail");
-        assert_eq!(output.status.code(), Some(1), "unsupported protocol should exit 1 from the framework");
-        assert_eq!(combined.matches("[lexicon] ERROR:").count(), 1, "exactly one Lexicon error should be reported: {combined}");
-        assert!(!combined.contains("[lexicon] Created source"), "success output must not be emitted on failure");
+        for output in [create_output, build_output] {
+            let combined_bytes = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+            let combined = String::from_utf8_lossy(&combined_bytes);
+
+            assert!(!output.status.success(), "unsupported protocol should fail");
+            assert_eq!(output.status.code(), Some(1), "unsupported protocol should exit 1 from the framework");
+            assert_eq!(combined.matches("[lexicon] ERROR:").count(), 1, "exactly one Lexicon error should be reported: {combined}");
+            assert!(combined.contains("unsupported protocol 'browser'; only 'http' is currently supported"), "error wording is incorrect: {combined}");
+            assert!(!combined.contains("source creation"), "error should be operation-neutral: {combined}");
+            assert!(!combined.contains("source build"), "build-specific wording should not leak into the neutral error: {combined}");
+        }
     }
 
     #[test]

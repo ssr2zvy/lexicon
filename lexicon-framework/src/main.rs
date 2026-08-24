@@ -450,8 +450,24 @@ fn select_executable_from_cargo_json(cargo_output: &str, operation_name: &str) -
 }
 
 fn stage_runtime_file(runtime_dir: &Path, source_executable: &Path, operation_name: &str) -> Result<PathBuf, String> {
-    let unique = format!(".{}.staging-{}", operation_name, std::process::id());
-    let staged = runtime_dir.join(unique);
+    let executable_name = source_executable
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| {
+            source_executable
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or(operation_name)
+        });
+
+    let staging_file = tempfile::Builder::new()
+        .prefix(&format!(".{executable_name}.staging-"))
+        .tempfile_in(runtime_dir)
+        .map_err(|error| format!("failed to create staging file in {}: {error}", runtime_dir.display()))?;
+    let staged = staging_file.path().to_path_buf();
+
     fs::copy(source_executable, &staged).map_err(|error| {
         format!("failed to stage {}: {error}", runtime_dir.display())
     })?;
@@ -460,6 +476,8 @@ fn stage_runtime_file(runtime_dir: &Path, source_executable: &Path, operation_na
         let _ = fs::remove_file(&staged);
         return Err(format!("{} implementation build failed", operation_name));
     }
+
+    let _ = staging_file.persist(&staged).map_err(|error| format!("failed to persist staged {}: {error}", staged.display()));
     Ok(staged)
 }
 
@@ -596,7 +614,7 @@ fn validate_protocol(protocol: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "unsupported protocol '{}'; only 'http' is currently supported for source creation",
+            "unsupported protocol '{}'; only 'http' is currently supported",
             protocol
         ))
     }
@@ -1154,6 +1172,43 @@ mod tests {
 
         let result = select_executable_from_cargo_json(output, "get-raw-data");
         assert!(result.is_err(), "multiple matching executable artifacts must fail deterministically");
+    }
+
+    #[test]
+    fn stage_runtime_file_uses_randomized_unique_suffixes_in_runtime_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("lexicon-runtime-staging-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let executable = root.join("example-source-process-data");
+        fs::write(&executable, "binary\n").unwrap();
+        let permissions = std::fs::Permissions::from_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let stale_pid_path = root.join(format!(".example-source-process-data.staging-{}", std::process::id()));
+        fs::write(&stale_pid_path, "stale-value\n").unwrap();
+
+        let first = super::stage_runtime_file(&root, &executable, "process-data").unwrap();
+        let second = super::stage_runtime_file(&root, &executable, "process-data").unwrap();
+
+        assert_ne!(first, second, "randomized staging paths must differ");
+        assert!(first.starts_with(&root));
+        assert!(second.starts_with(&root));
+        assert!(first.file_name().unwrap().to_string_lossy().starts_with(".example-source-process-data.staging-"));
+        assert!(second.file_name().unwrap().to_string_lossy().starts_with(".example-source-process-data.staging-"));
+        assert_ne!(
+            first.file_name().unwrap().to_string_lossy().as_ref(),
+            format!(".example-source-process-data.staging-{}", std::process::id())
+        );
+        assert!(stale_pid_path.exists(), "the stale PID-style file must remain untouched");
+        assert_eq!(fs::read_to_string(&stale_pid_path).unwrap(), "stale-value\n");
+
+        let _ = fs::remove_file(&first);
+        let _ = fs::remove_file(&second);
+        let _ = fs::remove_file(&stale_pid_path);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

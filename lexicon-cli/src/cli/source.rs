@@ -48,7 +48,7 @@ impl CreateSourceCommand {
             Ok("http".to_owned())
         } else {
             Err(format!(
-                "unsupported protocol '{}'; only 'http' is currently supported for source creation",
+                "unsupported protocol '{}'; only 'http' is currently supported",
                 self.protocol
             ))
         }
@@ -62,7 +62,7 @@ impl BuildSourceCommand {
             Ok("http".to_owned())
         } else {
             Err(format!(
-                "unsupported protocol '{}'; only 'http' is currently supported for source build",
+                "unsupported protocol '{}'; only 'http' is currently supported",
                 self.protocol
             ))
         }
@@ -179,12 +179,22 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_protocol_value() {
-        let command = CreateSourceCommand {
+        let create = CreateSourceCommand {
+            source_name: "example-source".to_owned(),
+            protocol: "browser".to_owned(),
+        };
+        let build = BuildSourceCommand {
             source_name: "example-source".to_owned(),
             protocol: "browser".to_owned(),
         };
 
-        assert!(command.normalized_protocol().is_err());
+        let create_error = create.normalized_protocol().unwrap_err();
+        let build_error = build.normalized_protocol().unwrap_err();
+
+        assert!(create_error.contains("unsupported protocol 'browser'; only 'http' is currently supported"));
+        assert!(build_error.contains("unsupported protocol 'browser'; only 'http' is currently supported"));
+        assert!(!create_error.contains("source creation"));
+        assert!(!build_error.contains("source build"));
     }
 
     #[test]
