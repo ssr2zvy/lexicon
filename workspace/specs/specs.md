@@ -1,362 +1,673 @@
-# Lexicon Architecture and Build Specification
+Lexicon Architecture and Build Specification
 
-Status: current, drift-reconciled baseline, 2026-08-15
+Status: current, reconciled to contract.md, 2026-08-24
 
-## 1. Purpose
+1. Authority and scope
 
-Lexicon is a generic framework for acquiring raw data from independently implemented sources and processing that raw data into source-specific SQLite datasets.
+contract.md is the architectural source of truth for Lexicon acquisition, processing, source builds, runtime admission, publication, and supervision. This specification translates that architecture into concrete package, workspace, command, build, runtime, storage, and testing requirements.
 
-Lexicon Core does not define what the acquired data represents. Each source implementation determines:
+If this specification conflicts with contract.md, contract.md governs and this file must be corrected.
 
-- How its data is acquired.
-- Which source-specific arguments it accepts.
-- How its raw responses are interpreted.
-- How its processed SQLite dataset is structured.
+Lexicon is a generic framework for:
 
-The framework supplies shared contracts, execution behavior, session handling, source discovery, and the global `lexicon` command.
+1. Acquiring raw data from independently implemented sources.
+2. Preserving raw request and response data.
+3. Processing raw data into source-specific SQLite datasets.
 
-The repository contains source code only. No compiled binaries, `.exe` files, generated archives, installers, or other build artifacts are committed.
+Lexicon does not define what acquired data represents. Each source controls its source-specific acquisition decisions, arguments, parsing, validation, continuation logic, checkpoints, and processed SQLite schema.
 
-## 2. Repository Structure
+HTTP is the only initially supported acquisition protocol. Browser automation and additional protocols are future work.
 
-```text
-lexicon/
-├── Cargo.toml                  (workspace-only manifest: [workspace] + [workspace.package], no [package])
-├── Cargo.lock
-│
-├── lexicon-bundle/             (Protocol 1 bundle crate; workspace member, inherits version/edition)
-│   ├── Cargo.toml
-│   ├── build.rs
-│   └── src/
-│       └── main.rs
-│
-├── lexicon-framework/
-│   ├── Cargo.toml
-│   ├── Cargo.lock
-│   │
-│   ├── core/
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── get_raw_data/
-│   │       │   ├── mod.rs
-│   │       │   ├── api.rs
-│   │       │   ├── facade.rs
-│   │       │   └── run.rs
-│   │       ├── process_data/
-│   │       │   ├── mod.rs
-│   │       │   ├── api.rs
-│   │       │   ├── facade.rs
-│   │       │   └── run.rs
-│   │       └── session_engine/
-│   │           ├── mod.rs
-│   │           └── session_engine.rs
-│   │
-│   └── sources/
-│       └── example-source/
-│           ├── data/
-│           │   ├── raw/
-│           │   │   └── <request-timestamp>-<id>/
-│           │   │       ├── request/
-│           │   │       │   ├── metadata.json
-│           │   │       │   └── body
-│           │   │       └── response/
-│           │   │           ├── metadata.json
-│           │   │           └── body
-│           │   └── processed/
-│           │       └── example-source.sqlite
-│           │
-│           ├── get-raw-data/
-│           │   ├── sessions/
-│           │   ├── session_status.json
-│           │   └── get_raw_data_impl/
-│           │       ├── Cargo.toml
-│           │       ├── Cargo.lock
-│           │       └── src/
-│           │           └── main.rs
-│           │
-│           └── process-data/
-│               ├── sessions/
-│               ├── session_status.json
-│               └── process_data_impl/
-│                   ├── Cargo.toml
-│                   ├── Cargo.lock
-│                   ├── src/
-│                   │   └── main.rs
-│                   └── processing/
-│                       └── ...
-│
-├── lexicon-cli/
-│   ├── Cargo.toml
-│   ├── Cargo.lock
-│   └── src/
-│       └── main.rs
-│
-├── automation/
-│   └── mza/
-│       ├── Cargo.toml
-│       ├── Cargo.lock
-│       ├── artifacts.toml
-│       ├── docs/
-│       │   ├── artifact_toml/
-│       │   │   ├── fields.md
-│       │   │   └── example_artifacts.toml
-│       │   └── protocols/
-│       │       ├── cargo-bundler-v0.1.0.md
-│       │       └── command-bundler-v0.1.0.md
-│       └── src/
-│           └── main.rs
-│
-├── release/
-│   └── ...
-│
-└── README.md
-```
+The governing division is:
 
-`automation/mza/` is the build/bundle orchestrator. It remains agnostic to Lexicon-specific names, paths, and installation behavior.
+> Lexicon controls the supported entrypoint, build, runtime admission, HTTP-and-recording effect, and session supervision. Source implementations control arbitrary trusted Rust computation around that effect.
 
-`release/` is reserved for Lexicon-specific setup and release-process source code. Generated release artifacts do not belong in `release/` and are not committed.
+This is one execution architecture. Individual sources do not choose alternate runner, workflow-language, subprocess-protocol, or configuration-only execution models.
 
-## 3. Cargo Package Responsibilities
+2. Trust boundary
 
-### 3.1 Root workspace
+Source authors are trusted project developers, not hostile third-party plugin authors.
 
-The repository root is a **workspace-only** Cargo manifest (`[workspace]` + `[workspace.package]`, no `[package]` section, no `src/main.rs`). It is not itself a compiled crate.
+Lexicon makes the supported path structurally central and difficult to bypass accidentally. It does not capability-confine linked native Rust. Source code can use files, sockets, subprocesses, FFI, or other native effects whenever the operating system permits them.
 
-### 3.2 `lexicon-bundle`
+Therefore:
 
-`lexicon-bundle` is the Protocol 1 bundle crate — a dedicated workspace member (not the root package). Its `Cargo.toml` inherits `version`/`edition` from `[workspace.package]`.
+• Core guarantees apply to effects performed through Core.
+• The supported Lexicon build and runtime paths reject mismatched runners and artifacts.
+• Lexicon does not claim that arbitrary native source code cannot bypass Core.
+• Hostile-source support would require a separate, explicit operating-system sandbox design.
 
-For MZA's `cargo-bundler-v0.1.0` protocol, `lexicon-bundle` implements the actual Lexicon installation behavior, including such responsibilities as:
+3. Principal packages
 
-- Extracting the embedded CLI or other payloads (embedded via its own `build.rs`, see Section 13).
-- Selecting installation locations.
-- Adding or linking the `lexicon` command into PATH.
-- Recording the Lexicon installation location.
-- Supporting installation, upgrade, or uninstall behavior defined by Lexicon.
-
-MZA itself must not contain this Lexicon-specific behavior.
-
-### 3.3 `lexicon-framework`
-
-`lexicon-framework` owns Lexicon Core and the source implementation structure.
-
-Core is a Rust library. Its manifest must point its library target at `core/src/lib.rs` if that nonstandard source location is retained.
-
-Core defines the public contracts that source implementations must satisfy. Source implementations depend on Core's public API, while Core's internal engine types remain private.
-
-Core must not expose concrete private-engine types through public contracts.
-
-### 3.4 `lexicon-cli`
-
-`lexicon-cli` contains the source of the global `lexicon` command. It does not contain a committed compiled binary.
-
-Its Cargo dependencies establish any required compile-time relationship with `lexicon-framework`. Merely placing both packages in a workspace does not create that dependency.
-
-### 3.5 Source implementation packages
-
-Every get-raw-data and process-data implementation is its own Rust binary package with its own `Cargo.toml`, `Cargo.lock`, and `src/main.rs`.
-
-The Rust compiler verifies each implementation against the appropriate Lexicon Core contract.
-
-## 4. Lexicon Command Interface
-
-All normal interaction begins with:
+The repository has three principal packages:
 
 ```text
-lexicon
+lexicon-cli/
+├── Cargo.toml
+└── src/
+    ├── main.rs
+    ├── frontend.rs
+    └── operator_host.rs
+
+lexicon-framework/
+├── Cargo.toml
+└── src/
+    ├── lib.rs
+    ├── commands/
+    ├── scaffold/
+    ├── build/
+    ├── publication/
+    ├── acquisition/
+    ├── processing/
+    └── supervision/
+
+lexicon-core/
+├── Cargo.toml
+└── src/
+    ├── lib.rs
+    ├── contracts/
+    ├── protocols/
+    │   └── http/
+    ├── build/
+    ├── runtime/
+    ├── sessions/
+    ├── raw/
+    └── processing/
 ```
 
-Data operations use:
+The root Cargo.toml is a workspace-only manifest. It contains [workspace] and shared workspace configuration but no root [package] and no root src/main.rs.
+
+3.1 lexicon-cli
+
+lexicon-cli is the only principal package that produces the installed control executable. The installed executable is named lexicon.
+
+It owns:
+
+• command-line parsing and help;
+• user-facing rendering of typed framework results;
+• the reserved internal operator-host entrypoint;
+• process-level supervision hooks needed by the installed executable.
+
+It does not duplicate scaffold rules, build mechanics, publication policy, runtime validation, or session semantics.
+
+3.2 lexicon-framework
+
+lexicon-framework is a reusable Rust library linked into lexicon-cli. It owns command semantics and operational policy, including:
+
+• project discovery;
+• source discovery and selection;
+• scaffolding;
+• build orchestration;
+• diagnostics and cancellation policy;
+• acquisition and processing command orchestration;
+• staged paired publication;
+• foreground and background supervision policy.
+
+There is no independently installed or independently versioned lexicon-framework executable.
+
+3.3 lexicon-core
+
+lexicon-core is a narrow reusable Rust library. It owns invariant-sensitive contracts and mechanics shared by the framework and managed source runtimes, including:
+
+• typed source descriptors and capabilities;
+• opaque validated build states;
+• invocation and runtime identity contracts;
+• managed runner support;
+• HTTP execution and transaction recording;
+• raw-data and metadata contracts;
+• session transition primitives;
+• processing runtime contracts.
+
+Core remains domain-agnostic and does not expose private engine types through its public source contracts.
+
+3.4 Dependency graph
 
 ```text
-lexicon data
+installed lexicon executable
+└── lexicon-framework library
+    └── lexicon-core library
+
+generated acquisition runner
+├── lexicon-core library
+└── source implementation library
+    ├── lexicon-core library
+    └── source-specific dependencies
+
+generated processing runner
+├── lexicon-core library
+└── processing implementation library
 ```
 
-Source-management operations use:
+The framework library is not linked into source runtimes. Core is. Lexicon exposes no dynamic Rust plugin ABI.
+
+4. Project and source workspace layout
+
+A Lexicon project contains a project manifest and a configured source directory:
 
 ```text
-lexicon source
+telugu-lexicon/
+├── lexicon.toml
+└── sources/
 ```
 
-### 4.1 Get raw data
-
-```text
-lexicon data --get <source-name>
-```
-
-Lexicon resolves the corresponding native implementation executable under:
-
-```text
-lexicon-framework/sources/<source-name>/get-raw-data/get_raw_data_impl/
-```
-
-Normal execution uses an already-built native executable. Cargo and rustc are not invoked during ordinary execution. The executable is a local build artifact and is never committed.
-
-### 4.2 Process data
-
-```text
-lexicon data --process <source-name>
-```
-
-Lexicon resolves the corresponding native implementation executable under:
-
-```text
-lexicon-framework/sources/<source-name>/process-data/process_data_impl/
-```
-
-Processed output is written under:
-
-```text
-lexicon-framework/sources/<source-name>/data/processed/
-```
-
-The final processed dataset for a source is SQLite.
-
-### 4.3 Background execution
-
-Add `--bg`:
-
-```text
-lexicon data --get example-source --bg
-lexicon data --process example-source --bg
-```
-
-### 4.4 Abandon a previous failed session
-
-Add `--abandon-past-fail`:
-
-```text
-lexicon data --get example-source --abandon-past-fail
-```
-
-Options may be combined:
-
-```text
-lexicon data --get example-source --bg --abandon-past-fail
-```
-
-### 4.5 Source-specific arguments
-
-Lexicon-level arguments appear before `--`. Arguments after `--` are passed directly to the selected source implementation:
-
-```text
-lexicon data --get example-source --bg -- <source-specific arguments>
-```
-
-## 5. Raw Data Contract
-
-Raw acquisition data is stored under:
-
-```text
-lexicon-framework/sources/<source-name>/data/raw/
-```
-
-Each network transaction receives its own directory (`data/raw/<request-timestamp>-<id>/`) with separate `request/` and `response/` subdirectories.
-
-`request/metadata.json` stores structured request metadata (timestamp, method, URL, headers, protocol info, payload size/hash). `request/body` contains the original request-body bytes when present. Authentication secrets and equivalent credentials must not be persisted unredacted in request metadata.
-
-`response/metadata.json` stores structured response metadata (timestamp, HTTP status, headers, protocol info, payload size/hash). `response/body` contains the response payload exactly as received. The raw layer never interprets a response body based on its content type.
-
-The initial acquisition scope is HTTP end to end. Browser automation and additional acquisition protocols are outside the initial scope.
-
-## 6. Session Contract
-
-Get-raw-data execution state is stored under `lexicon-framework/sources/<source-name>/get-raw-data/sessions/`, tracked in `.../get-raw-data/session_status.json`.
-
-Process-data execution state is stored separately under `lexicon-framework/sources/<source-name>/process-data/sessions/`, tracked in `.../process-data/session_status.json`.
-
-Session records describe execution state and are separate from raw request/response data.
-
-## 7. Adding and Building Sources
-
-- `lexicon source <source-name> --draft` creates the mandatory source structure (`data/raw/`, `data/processed/`, session files, `get_raw_data_impl/`, `process_data_impl/`, manifests/lockfiles, entry points, `processing/`).
-- Get-raw-data behavior: `lexicon-framework/sources/<source-name>/get-raw-data/get_raw_data_impl/src/main.rs`, must satisfy the `GetRawData` contract.
-- Process-data behavior: `lexicon-framework/sources/<source-name>/process-data/process_data_impl/src/main.rs`, must satisfy the `ProcessData` contract. Source-specific processing files belong under `.../process_data_impl/processing/`.
-- `lexicon source <source-name> --add` locates, compiles, and verifies the source's implementation crates against Core, then links successful implementations into native executables for the current target, placed in their respective implementation directories.
-- `lexicon build` rebuilds all discovered source implementations for the current OS/architecture, via directory discovery rather than a manually maintained registry.
-
-## 8. Runtime and Build Requirements
-
-Normal users do not require Rust, Cargo, Zig, Python, the JVM, or another language runtime to execute already-built Lexicon operations. Rust/Cargo are required only for creating, changing, validating, or rebuilding Rust source implementations. Zig-assisted linking may be used for cross-target release builds; it is not required for normal runtime use.
-
-Release matrix (deferred until exercised end to end — the `linux-x86_64-musl` flow is validated today):
-
-- Linux x86_64, Linux ARM64, Windows x86_64, Windows ARM64.
-- macOS is not part of the Linux-host cross-release matrix; a local native macOS build may be supported separately on an appropriate macOS host.
-
-## 9. `automation/mza`
-
-MZA is a generic build-and-bundle orchestrator, run directly as its own compiled binary (not via `cargo run` against its own manifest — it is itself a `[[bin]]` under `automation/mza/`), against `automation/mza/artifacts.toml`.
-
-MZA performs two ordered phases per run:
-
-1. Build and archive ordinary artifacts (dry-run by default; only builds when invoked with `--build`).
-2. Build bundles from selected completed artifacts.
-
-MZA contains no Lexicon-specific installer behavior; that belongs entirely to the bundle-implementing crates referenced by `[[bundle]]` declarations.
-
-## 10. Ordinary Artifact Contract
-
-Each `[[artifact]]` declares a stable `label`, the crate to build, its `type` (`main`/`snapshot`/`custom`), and an optional `exclude` list of `[[target]]` labels it does not build for (opt-out; an artifact applies to every configured target unless excluded).
-
-MZA resolves the artifact's package name/version from its own `Cargo.toml` — never duplicated in `artifacts.toml`.
-
-For every applicable target, MZA (with `--locked` on every `cargo` invocation, requiring a committed `Cargo.lock`):
-
-1. Resolves the Cargo manifest.
-2. Runs `cargo zigbuild` (or `cargo build` when natively targeting macOS) for that target.
-3. Locates the produced native executable.
-4. Creates the artifact's `.tar.xz` archive below the configured `output_path`, using the artifact label, type, crate version, resolved name, and target triple.
-5. Records the resolved `(artifact label, target label) -> absolute .tar.xz path` mapping for later bundle use.
-
-The artifact label is also the bundle input name directly — no second alias layer.
-
-## 11. General Bundle Contract
-
-Each `[[bundle]]` declares a stable `label`, a bundle-implementation `crate`, a `protocol`, `inputs` (artifact labels), `type`, `output_path`, and (protocol-dependent) `build_targets`.
-
-The bundle's package name/version are resolved from its own `Cargo.toml` — the same manifest-resolution rule as ordinary artifacts, for both protocols. MZA never infers a bundle version from its inputs.
-
-Rules applying to every protocol:
-
-1. One bundle execution handles exactly one target.
-2. Every input artifact used in that execution must have been built for that exact target — validated at `artifacts.toml` **parse time**, before any build runs.
-3. Missing target-specific inputs are configuration errors (`PARSE_INVALID_BUNDLE`), never silently skipped.
-4. Input archive paths are absolute paths to completed `.tar.xz` artifacts.
-5. A successful bundle execution produces exactly one final target executable.
-6. MZA archives that executable as the final bundle `.tar.xz`.
-
-Target coverage validation (`resolve_bundle_targets`):
-
-- Without `build_targets`: all of a bundle's inputs must apply to the exact same set of `[[target]]`s (matched by target label, via each artifact's `exclude`); that shared set becomes the bundle's targets.
-- With `build_targets` (an explicit list of literal target triples): each triple is matched against a `[[target]]`'s computed triple, and every input must not exclude that target's label.
-
-MZA never combines mismatched-architecture/OS inputs into one target-specific bundle, never silently takes an intersection, and never reports a partial bundle as successful.
-
-## 12. Protocol 1: `cargo-bundler-v0.1.0`
-
-Use this protocol when the referenced Rust bundle crate itself becomes the final target executable (cross-compiled directly by MZA, never executed by MZA).
-
-### 12.1 Declaration
+Representative project configuration:
 
 ```toml
-[[bundle]]
-label = "lexicon"
-crate = "../.."
-output_path = "../../artifacts/"
-type = "custom"
-protocol = "cargo-bundler-v0.1.0"
-inputs = [
-    "lexicon_cli",
-    "lexicon_framework",
-]
+schema_version = 1
+
+[project]
+name = "telugu-lexicon"
+sources_directory = "sources"
 ```
 
-`build_targets` is not required; targets are derived from the shared set across all inputs (Section 11).
+Each source is protocol-scoped. An HTTP source has the following acquisition and processing workspaces:
 
-### 12.2 Bundle specification and embedded bytes
+```text
+sources/example-source/http/
+├── source.toml
+├── discovery.md
+├── data/
+│   ├── raw/
+│   └── processed/
+├── get-raw-data/
+│   ├── Cargo.toml
+│   ├── Cargo.lock
+│   ├── sessions/
+│   ├── session_status.json
+│   ├── get-raw-data-impl/
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       └── lib.rs
+│   ├── lexicon-runner/
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       └── main.rs
+│   └── runtime/
+└── process-data/
+    ├── Cargo.toml
+    ├── Cargo.lock
+    ├── sessions/
+    ├── session_status.json
+    ├── process-data-impl/
+    │   ├── Cargo.toml
+    │   └── src/
+    │       └── lib.rs
+    ├── lexicon-runner/
+    │   ├── Cargo.toml
+    │   └── src/
+    │       └── main.rs
+    └── runtime/
+```
 
-For each target, MZA writes `bundle-spec.toml` (TOML, not Rust source):
+The source author edits:
+
+• source-editable source.toml fields;
+• discovery.md;
+• implementation-crate dependency manifests;
+• implementation lib.rs files and their modules;
+• source-specific acquisition and processing logic.
+
+Lexicon generates and contractually controls:
+
+• each operation workspace contract;
+• each lexicon-runner/Cargo.toml;
+• each lexicon-runner/src/main.rs;
+• runner identity and template version;
+• the runner binary selected by the supported build.
+
+Cargo.lock is Cargo-managed, committed, and required by the supported build.
+
+“Lexicon-managed” means Lexicon generates, validates, and selects the runner. It does not mean filesystem permissions prevent a project developer from editing generated files. A mismatched managed file is rejected rather than silently overwritten.
+
+5. Source contracts and managed entrypoints
+
+Every HTTP acquisition source exports one capability-aware, versioned descriptor from its implementation library:
+
+```rust
+use std::ffi::OsString;
+
+use lexicon_core::http::{
+    AcquisitionResult,
+    HttpAcquisitionContext,
+    HttpCapability,
+    HttpSourceContractV1,
+};
+
+pub const SOURCE: HttpSourceContractV1 =
+    HttpSourceContractV1::new(acquire)
+        .with_resume(resume)
+        .requires(HttpCapability::ClientCertificateV1);
+
+pub fn acquire(
+    context: &mut HttpAcquisitionContext,
+    args: &[OsString],
+) -> AcquisitionResult<()> {
+    // Ordinary sequential source-specific Rust.
+    Ok(())
+}
+```
+
+Only acquire is mandatory. Optional handlers and required capabilities are registered through the typed descriptor.
+
+The compiler verifies:
+
+• descriptor type;
+• mandatory acquisition signature;
+• registered optional-handler signatures;
+• typed capabilities and extension declarations;
+• compatibility between the descriptor and managed runner code.
+
+The compiler does not prove semantic honesty or that every native effect uses Core.
+
+The source implementation is a library, not the supported executable entrypoint. A representative Lexicon-managed acquisition runner is:
+
+```rust
+use std::process::ExitCode;
+
+use lexicon_core::http::{runner, HttpSourceContractV1, RuntimeIdentity};
+
+const IDENTITY: RuntimeIdentity =
+    RuntimeIdentity::http_acquisition("example-source", 1);
+
+const SOURCE: HttpSourceContractV1 =
+    source_implementation::SOURCE;
+
+fn main() -> ExitCode {
+    runner::run(IDENTITY, &SOURCE)
+}
+```
+
+The published runtime is one native executable statically linked with Core, the implementation library, and their Rust dependencies.
+
+Processing follows the same split: a source-authored processing library plus a Lexicon-managed processing runner.
+
+6. Capability and extension model
+
+The base contract remains small. New protocol behavior is introduced through versioned Core capabilities.
+
+A capability may be:
+
+• optional;
+• required by a source descriptor;
+• mandatory for an effect exposed only through Core.
+
+Compile time verifies descriptor and handler types. Build time verifies that the selected Core and runner provide all declared capabilities. Runtime admission verifies that parent, child, descriptor, and invocation agree on the capability set before source code runs.
+
+Capabilities are added for demonstrated protocol requirements. They are not a general plugin ABI, workflow language, or policy engine.
+
+7. Command interface and routing
+
+All normal interaction begins with the installed lexicon executable.
+
+```text
+lexicon --version             -> CLI presentation
+lexicon init                  -> framework library
+lexicon source create         -> framework library
+lexicon source build          -> framework library
+lexicon build                 -> framework library
+lexicon data --get            -> framework library
+lexicon data --process        -> framework library
+```
+
+The CLI parses arguments and renders typed results. The framework owns project semantics and filesystem mutations.
+
+Representative data commands are:
+
+```text
+lexicon data --get example-source --protocol http
+lexicon data --process example-source --protocol http
+lexicon data --get example-source --protocol http --bg
+lexicon data --get example-source --protocol http --abandon-past-fail
+```
+
+Source-specific arguments follow --:
+
+```text
+lexicon data --get example-source --protocol http -- <source-args>
+```
+
+Every value after -- is preserved as OsString. Lexicon does not interpret source-specific semantics. The source may use Clap or another parser and is responsible for validating its own arguments.
+
+Raw source arguments are not persisted by default because they may contain credentials, signed URLs, personal data, or other secrets. A source may explicitly record a safe redacted summary through Core.
+
+8. Process and supervision model
+
+8.1 Foreground execution
+
+Foreground framework work runs in the original installed process:
+
+```text
+user
+-> lexicon frontend and supervisor process
+-> lexicon-framework library
+-> lexicon-core library
+-> managed source runtime child
+```
+
+The lexicon process remains alive while acquisition or processing runs and supervises the child.
+
+8.2 Background execution
+
+For --bg, the initial process creates a durable invocation record and re-executes its exact binary in a reserved internal role:
+
+```text
+initial lexicon frontend
+-> lexicon __operator-host <invocation-reference>
+-> lexicon-framework library
+-> lexicon-core library
+-> managed source runtime child
+```
+
+The initiating process exits only after the operator host confirms durable session ownership. The operator host owns the session lock, child lifecycle, cancellation, exit observation, and terminal reconciliation.
+
+The operator-host invocation is a versioned internal protocol because the detached process may outlive an installation upgrade. It is not a public framework API.
+
+No ordinary foreground command crosses CLI-to-framework IPC, and Lexicon installs no second framework daemon or executable.
+
+9. Supported build contract
+
+Core exposes opaque validated build states:
+
+```text
+SourceLocation
+-> DiscoveredSource
+-> ValidatedSource
+-> ValidatedOperationWorkspace
+-> ReproducibleBuildPlan
+-> StagedArtifact
+-> VerifiedRuntime
+-> PublishedRuntime
+```
+
+Invariant-sensitive APIs accept validated state values rather than arbitrary paths.
+
+For each operation, the supported build must:
+
+1. Discover the containing project.
+2. Resolve the configured source directory.
+3. Validate source identity, protocol, metadata, and contract version.
+4. Validate the operation workspace and committed lockfile.
+5. Validate the managed runner and template version.
+6. Validate the implementation library target.
+7. Validate the exact compatible Core dependency.
+8. Run Cargo metadata in locked mode.
+9. Construct an exact native release build plan.
+10. Build the managed runner for the current machine.
+11. Use an isolated temporary Cargo target directory.
+12. Read Cargo JSON artifact messages.
+13. Select exactly the expected executable artifact.
+14. Hash the executable.
+15. Run a bounded runtime-information probe.
+16. Validate identity, operation, protocol, Core contract, and capabilities.
+17. Stage the runtime bundle.
+
+Builds use --locked, isolated target directories, explicit package and binary targets, Cargo JSON artifact selection, staged runtime bundles, transactional publication, and rollback.
+
+Acquisition and processing runtimes are published as one paired transaction. If either build, verification, staging, or publication fails, both previous published runtimes survive unchanged.
+
+lexicon source build builds the selected source. lexicon build builds all discovered sources. Both use the same validated build path; neither uses a manually maintained source registry.
+
+Ordinary acquisition and processing use already-published native runtimes and never invoke Cargo. Rust and Cargo are development/build requirements, not execution requirements.
+
+10. Runtime bundle and admission
+
+The supported build publishes an operation runtime below that operation’s runtime/ directory. A runtime bundle includes the native executable, runtime.json, and the integrity and compatibility metadata needed for admission. Exact on-disk version directories may evolve with the runtime schema, but publication must remain staged and atomic.
+
+Before launch, the parent validates:
+
+• runtime.json schema;
+• executable hash;
+• runtime protocol version;
+• source, protocol, and operation identity;
+• Core contract version;
+• compiled capability list;
+• compatibility with the requested command.
+
+Inside the child, linked Core validates:
+
+• invocation-envelope version;
+• project, source, protocol, and operation identity;
+• session identity;
+• execution mode;
+• compiled source descriptor;
+• required capability availability.
+
+Only then may Core call the source handler.
+
+The phase relationship is:
+
+```text
+compile time
+    source descriptor and handlers have the required Rust types
+
+build time
+    runner, descriptor, Cargo graph, Core version,
+    artifact identity, and capabilities agree
+
+runtime
+    parent and child agree on identity, invocation version,
+    contract version, capabilities, operation, and session
+```
+
+An artifact that does not match the managed pattern is rejected by the supported build or runtime admission path.
+
+11. HTTP and raw-data contract
+
+The supported HTTP effect is:
+
+```rust
+let transaction = context.execute(request)?;
+```
+
+For every physical HTTP attempt submitted through Core, Core must:
+
+1. Allocate a unique transaction identity and staging directory.
+2. Finalize the effective request.
+3. Persist redacted request metadata.
+4. Persist exact request-body bytes supplied to transport, when present.
+5. Perform one physical HTTP exchange.
+6. Persist response metadata or a transport-failure record.
+7. Stream undecoded HTTP entity-body bytes to raw storage.
+8. Hash while streaming.
+9. Atomically finalize the transaction or leave a recognizable partial record.
+10. Update session progress.
+11. Return a RecordedTransaction only after durable recording completes.
+
+Each transaction has this shape:
+
+```text
+data/raw/<timestamp>-<id>/
+├── request/
+│   ├── metadata.json
+│   └── body
+└── response/
+    ├── metadata.json
+    └── body
+```
+
+“Exact response body” means HTTP entity-body bytes after transfer framing and before content decoding. It does not mean TLS records, TCP packets, or HTTP/2 frames.
+
+Core must not replace stored bytes with transparently decoded gzip, Brotli, or other content. A decoded reader may be exposed separately.
+
+Each redirect exchange and each retry attempt is a separate physical transaction. Neither may be collapsed below the recorder.
+
+Source code receives a recorded transaction rather than an unrecorded live response, then performs parsing, decoding, validation, and interpretation using ordinary Rust.
+
+12. Secret handling
+
+Core redacts managed metadata before persistence. Mandatory sensitive metadata includes at least:
+
+• Authorization;
+• Proxy-Authorization;
+• Cookie;
+• Set-Cookie;
+• explicitly marked sensitive headers;
+• explicitly marked sensitive query parameters.
+
+Exact arbitrary body preservation and universal body-secret removal are incompatible when secrets occur in request or response bodies. Core therefore does not claim generic semantic redaction of exact raw bodies.
+
+Future encryption, exclusion, or protected-body policies must be explicit and must not silently weaken raw-data fidelity. Source-authored files and logs remain outside Core’s redaction guarantee.
+
+13. Sessions
+
+Acquisition and processing have separate sessions/ directories and separate root session_status.json summaries.
+
+The root status file is the current summary. Durable detailed history belongs below sessions/<session-id>/. Status updates use atomic replacement or an equivalent transactional mechanism.
+
+The supervising lexicon process:
+
+• selects, creates, or resumes a session;
+• acquires session locks;
+• applies --abandon-past-fail;
+• launches the managed runtime;
+• observes exit and signals;
+• reconciles abnormal termination.
+
+Linked Core inside the runtime:
+
+• validates the invocation;
+• enters the running state;
+• records transaction progress;
+• commits checkpoints;
+• records ordinary source failure;
+• records normal completion.
+
+The source decides source-specific continuation and checkpoint meaning.
+
+A panic, abort, forced exit, or crash is reconciled by the parent while completed transactions remain intact. After machine or supervisor loss, the next invocation detects stale ownership and reconciles durable state.
+
+14. Processing
+
+Processing remains distinct from acquisition. It has its own implementation library, managed runner, runtime bundle, sessions, and status.
+
+Processing reads protocol-scoped raw transactions and creates the source-specific SQLite database under the source’s processed-data directory. It does not alter the acquisition raw-data contract.
+
+The same compile-time contract checks, supported build validation, runtime admission, supervision, staging, and publication guarantees apply. Acquisition and processing runtime updates remain paired during publication.
+
+15. Enforcement model
+
+Compiler-enforced
+
+• Descriptor and handler types.
+• Optional-handler signatures.
+• Managed runner references to source contracts.
+• Core linkage into conforming managed runtimes.
+
+Build-tool-enforced
+
+• Selection of the Lexicon-managed runner.
+• Rejection of a source-owned replacement main in the supported path.
+• Runner template and workspace versions.
+• Cargo graph, lockfile, and Core compatibility.
+• Exact executable artifact selection and verification.
+• Preservation of existing runtimes after failure.
+• Paired transactional publication.
+
+Runtime-enforced
+
+• Parent/child invocation and identity agreement.
+• Required capability availability.
+• Native source-argument forwarding.
+• Supported session transitions and reconciliation.
+• Recording of every Core-mediated HTTP attempt.
+• Durable recording before Core returns a response to source code.
+• Core-managed capture and redaction rules.
+
+Not globally enforced
+
+• That arbitrary native source code uses Core for every network effect.
+• That source-authored files and logs redact secrets.
+• That trusted developers never substitute binaries outside the supported path.
+
+These are accepted trusted-code limitations.
+
+16. Versioning
+
+The following compatibility surfaces remain distinct:
+
+• project schema version;
+• source manifest schema version;
+• source contract version;
+• runner template version;
+• Core crate version;
+• runtime invocation protocol version;
+• raw-data schema version;
+• session schema version;
+• individual capability contract versions.
+
+One number must not represent every surface.
+
+Source implementation and managed runner compile together. Breaking Rust API changes use explicit rebuilds and compiler diagnostics. There is no stable Rust plugin ABI.
+
+The framework-to-runtime invocation is a small, versioned compatibility surface. Unsupported runtimes are rejected with a rebuild or migration diagnostic. Compatible published native runtimes execute without Rust or Cargo.
+
+17. Installation and release bundling
+
+The repository contains source code and committed project data only. Compiled executables, generated archives, installers, Cargo target directories, and other generated release artifacts are not committed.
+
+Release tooling may include an ancillary lexicon-bundle package and the generic MZA build/bundle system. These are release-time mechanisms and do not change the three principal runtime package boundaries.
+
+17.1 Installed payload
+
+The installed control payload contains one lexicon executable. lexicon-framework and lexicon-core are statically linked libraries inside that executable; they are not separate installed executables or ordinary bundle inputs.
+
+Project-specific managed acquisition and processing runtimes are built and published by Lexicon within their project workspaces. They are not generic framework executables.
+
+17.2 MZA separation
+
+MZA remains generic and contains no Lexicon-specific installation policy. A Lexicon-specific bundle crate may own extraction, installation paths, PATH integration, upgrade, and uninstall behavior.
+
+MZA resolves package names and versions from Cargo manifests, builds with committed lockfiles and --locked, records stable machine-readable failures, and writes generated outputs only below configured artifact directories.
+
+17.3 Ordinary artifact contract
+
+Each ordinary artifact has a stable label, crate, type, output path, applicable targets, and optional target exclusions. MZA:
+
+1. Resolves package name and version from the artifact’s Cargo manifest.
+2. Builds for each applicable target.
+3. Selects the produced native executable.
+4. Archives it as .tar.xz.
+5. Records the target-specific absolute archive path for bundle use.
+
+The Lexicon installation bundle consumes the lexicon_cli executable artifact. It must not require a separate lexicon_framework executable artifact.
+
+17.4 General bundle contract
+
+Each bundle declares a label, implementation crate, protocol, artifact-label inputs, type, output path, and protocol-dependent targets.
+
+For every protocol:
+
+1. One bundle execution handles exactly one target.
+2. Every input used by that execution was built for that exact target.
+3. Missing target-specific inputs are configuration errors, never silent skips.
+4. Input paths identify completed .tar.xz artifacts.
+5. A successful execution produces exactly one final target executable.
+6. MZA archives that executable as the final bundle artifact.
+
+Without explicit build targets, inputs must have identical target sets. With explicit build targets, every requested target must exist and be supported by every input.
+
+17.5 cargo-bundler-v0.1.0
+
+Use this protocol when the bundle crate itself becomes the final target executable. MZA cross-compiles it and does not execute it on the build host.
+
+For each target, MZA writes a target-specific bundle-spec.toml, sets MZA_BUNDLE_INPUTS to its absolute path, and builds the bundle crate with --locked.
+
+The bundle crate’s build.rs runs on the build host and:
+
+1. Reads MZA_BUNDLE_INPUTS, with an empty-input fallback for standalone compilation.
+2. Parses the TOML.
+3. Copies each input archive into $OUT_DIR.
+4. Generates $OUT_DIR/mza_bundle_inputs.rs using include_bytes! for the copied archives.
+
+The bundle source includes the generated file:
+
+```rust
+include!(concat!(env!("OUT_DIR"), "/mza_bundle_inputs.rs"));
+```
+
+The compiled installer therefore contains archive bytes, not build-host paths.
+
+Representative Lexicon bundle inputs are:
 
 ```toml
 protocol = "cargo-bundler-v0.1.0"
@@ -366,210 +677,116 @@ target = "x86_64-unknown-linux-musl"
 [[inputs]]
 label = "lexicon_cli"
 archive = "/absolute/path/lexicon_cli-0.1.0-x86_64-unknown-linux-musl.tar.xz"
-
-[[inputs]]
-label = "lexicon_framework"
-archive = "/absolute/path/lexicon_framework-0.1.0-x86_64-unknown-linux-musl.tar.xz"
 ```
 
-MZA sets `MZA_BUNDLE_INPUTS=<absolute-path-to-bundle-spec.toml>`, then runs `cargo zigbuild --release --locked --target <triple> --manifest-path <bundle Cargo.toml>` (or `cargo build` natively on macOS).
+17.6 command-bundler-v0.1.0
 
-Because `lexicon-bundle` is only ever **compiled** by MZA (for a possibly foreign target) and never **executed** by MZA, its own code cannot read `MZA_BUNDLE_INPUTS` at runtime — by the time the compiled binary runs, it's on a different machine where build-host paths are meaningless. So `lexicon-bundle/build.rs` (which *does* run natively on the build host, as part of this same `cargo zigbuild` invocation) is the contract's bridge:
+Use this protocol when a Rust adapter executes on the build host and invokes a project-specific external bundling system. The adapter does not become the target executable and is not cross-compiled.
 
-1. Reads `MZA_BUNDLE_INPUTS` (falls back to an empty input list if unset, so the crate still compiles standalone outside MZA).
-2. Parses the TOML; for each input, copies its `archive` file into `$OUT_DIR`.
-3. Generates `$OUT_DIR/mza_bundle_inputs.rs`, containing a self-contained type/static using `include_bytes!(concat!(env!("OUT_DIR"), "/<file-name>"))` per input — real embedded bytes, not paths.
-
-`lexicon-bundle/src/main.rs` then does:
-
-```rust
-include!(concat!(env!("OUT_DIR"), "/mza_bundle_inputs.rs"));
-```
-
-giving it `MZA_BUNDLE_INPUTS: &[MzaBundleInput]` where `archive: &'static [u8]` is the actual compiled-in archive bytes.
-
-### 12.3 Build flow
-
-1. Validate target coverage (Section 11), at parse time.
-2. Resolve target-specific `.tar.xz` archive paths (already built as ordinary artifacts).
-3. Create the uniquely scoped temp workspace (Section 14) and write `bundle-spec.toml` into it.
-4. Set `MZA_BUNDLE_INPUTS`, run `cargo zigbuild --locked` for the target (`build.rs` runs as part of this).
-5. Locate the resulting target executable.
-6. Archive it as the final bundle `.tar.xz` (Section 15 layout).
-
-## 13. Protocol 2: `command-bundler-v0.1.0`
-
-Use this protocol when a Rust adapter crate runs on the build host and invokes a project-specific external bundling system (native tool, script, installer generator, etc.). The adapter crate does not become the final target executable, and is never cross-compiled.
-
-### 13.1 Declaration
-
-```toml
-[[bundle]]
-label = "example-external-bundle"
-crate = "../../example-bundler"
-output_path = "../../artifacts/"
-type = "custom"
-protocol = "command-bundler-v0.1.0"
-build_targets = [
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-musl",
-]
-inputs = [
-    "lexicon_cli",
-    "lexicon_framework",
-]
-```
-
-`build_targets` is **required** for this protocol — the exact set of literal target triples this bundle must be produced for. Every input artifact must provide every listed triple (validated at parse time); MZA runs the adapter crate once per triple.
-
-The adapter crate must provide one unambiguous binary target (either a single `[[bin]]`, or `default-run` set in its `Cargo.toml`).
-
-### 13.2 No arbitrary MZA command field
-
-MZA does not add an arbitrary `command` field. The protocol itself defines the invocation:
+MZA writes a target-specific bundle spec, sets MZA_BUNDLE_SPEC, and invokes the adapter with:
 
 ```text
 cargo run --release --locked --manifest-path <bundle-crate>/Cargo.toml
 ```
 
-The crate's own project-specific Rust code owns the path, arguments, and invocation of whatever external bundling executable/runtime it uses. MZA does not interpret those external-tool details.
+The adapter must synchronously produce exactly one executable at the exact output_path supplied in the spec and exit successfully only after that regular file exists. MZA does not add an arbitrary command field or require a result manifest.
 
-### 13.3 Bundle specification
+The adapter runs on the host. The requested output target travels in the bundle spec and is not passed as Cargo’s execution target for the adapter.
 
-For each target, MZA writes a target-specific `bundle-spec.toml`:
+17.7 Temporary and permanent outputs
 
-```toml
-protocol = "command-bundler-v0.1.0"
-bundle = "example-external-bundle"
-output_path = "/tmp/mza/<run_id>/example-external-bundle/x86_64-unknown-linux-musl/output/example-external-bundle"
-
-[bundle_target]
-target = "x86_64-unknown-linux-musl"
-
-[[bundle_target.inputs]]
-label = "lexicon_cli"
-archive = "/absolute/path/lexicon_cli-0.1.0-x86_64-unknown-linux-musl.tar.xz"
-
-[[bundle_target.inputs]]
-label = "lexicon_framework"
-archive = "/absolute/path/lexicon_framework-0.1.0-x86_64-unknown-linux-musl.tar.xz"
-```
-
-`target` is stated once, under `[bundle_target]`, rather than repeated per input. There is no `bundle_name`/`bundle_version` field — the crate's own `Cargo.toml` is the authoritative version source, resolved by MZA directly, the same as Protocol 1.
-
-MZA sets `MZA_BUNDLE_SPEC=<absolute-path-to-bundle-spec.toml>`. The adapter crate reads this at **runtime** (`std::env::var`/`std::fs::read_to_string`) — unlike Protocol 1, this crate genuinely executes (via `cargo run`) on the build host during MZA's process, so a live runtime env-var read works.
-
-### 13.4 Exact output-path contract (no result manifest)
-
-MZA already knows the bundle label, the resolved package version, the current target, and that exactly one output is permitted — so it supplies the exact `output_path` up front rather than having the crate report one back.
-
-The adapter crate must:
-
-1. Read `MZA_BUNDLE_SPEC`.
-2. Read the target-specific input archive paths.
-3. Invoke its external bundling executable/runtime, synchronously, within this same process.
-4. Cause that external system to produce an executable for the specification's target.
-5. Move/copy the completed executable to exactly `output_path` if the external system can't write there directly.
-6. Exit `0` only once the completed output exists at that path.
-
-MZA then verifies: exit status `0`, `output_path` exists, and it is a regular file. MZA does not inspect ELF/PE/installer headers — target correctness is trust-based, enforced structurally (via `build_targets` validation) rather than by binary inspection.
-
-### 13.5 Host and target distinction
-
-The adapter crate and its external bundling tool run on the build host. `cargo run` never receives `--target` for the requested output target — doing so would produce a target executable that couldn't execute on the host to drive the rest of the process. The requested output target only ever travels inside `bundle-spec.toml`.
-
-### 13.6 Execution flow
-
-For every `build_targets` entry: validate input coverage (parse time) → resolve target-specific `.tar.xz` paths → create the temp workspace → write the spec → set `MZA_BUNDLE_SPEC` → `cargo run --locked` the adapter crate on the host → require exit `0` → verify `output_path` is a regular file → archive it → write to the normal bundle output location (Section 15).
-
-## 14. Temporary Build Directories
-
-Both protocols share the same uniquely scoped temp-workspace mechanism:
+Protocol workspaces are uniquely scoped:
 
 ```text
-<system-temp>/
-└── mza/
-    └── <run-id>/
-        └── <bundle-label>/
-            └── <target>/
-                ├── bundle-spec.toml
-                └── output/            (Protocol 2 only, holds the produced executable before archiving)
+<system-temp>/mza/<run-id>/<bundle-label>/<target>/
+├── bundle-spec.toml
+└── output/
 ```
 
-`<system-temp>` is `std::env::temp_dir()` (OS standard). This scoping prevents collisions between concurrent MZA processes, multiple bundles, multiple targets, and repeated builds of the same bundle. Temporary protocol files never belong in the repository, the permanent artifact tree, or `release/`.
-
-## 15. Permanent Output Layout
-
-Ordinary artifacts:
+Ordinary artifact layout:
 
 ```text
-<output_path>/<label>/<type>/<version>/<name>-<version>-<target-triple>.tar.xz
+<output_path>/<label>/<type>/<version>/<name>-<version>-<target>.tar.xz
 ```
 
-Bundles (either protocol) insert the protocol id **after** `type`, and add a `<target>` directory level:
+Bundle layout:
 
 ```text
 <output_path>/<label>/<type>/<protocol>/<version>/<target>/<label>-<version>-<target>.tar.xz
 ```
 
-Examples:
+Temporary protocol files and permanent generated artifacts are never committed.
 
-```text
-artifacts/lexicon_cli/custom/0.1.0/lexicon_cli-0.1.0-x86_64-unknown-linux-musl.tar.xz
+17.8 Release targets
 
-artifacts/lexicon/custom/cargo-bundler-v0.1.0/0.1.0/x86_64-unknown-linux-musl/lexicon-0.1.0-x86_64-unknown-linux-musl.tar.xz
+The intended cross-release matrix is Linux x86_64, Linux ARM64, Windows x86_64, and Windows ARM64. A target is supported only after its complete build, bundle, install, and execution flow is exercised. macOS requires an appropriate macOS build host and is outside the Linux-host cross-release matrix.
 
-artifacts/example-external-bundle/custom/command-bundler-v0.1.0/0.1.0/aarch64-pc-windows-gnu/example-external-bundle-0.1.0-aarch64-pc-windows-gnu.tar.xz
-```
+Normal users need no Rust, Cargo, Zig, Python, JVM, or other language runtime to execute an already-installed control executable and compatible already-published source runtimes.
 
-No generated file in the artifact output tree is committed to the Lexicon repository.
+18. Testing requirements
 
-## 16. Error Codes and Exit Codes
+The implementation requires tests for at least:
 
-MZA reports failures with stable machine-readable codes (`PARSE_INVALID_BUNDLE`, `ARTIFACT_*`, `CARGO_LOCKFILE_MISSING`, `BUNDLE_UNKNOWN_PROTOCOL`, `BUNDLE_MISSING_INPUT`, `BUNDLE_EXECUTION_FAILED`, etc.), recorded per run under an append-only run-record archive (`archive/<run-id>/{metadata,input,outcome}` under the artifacts directory).
+• valid and invalid descriptor compilation;
+• optional-handler signature validation;
+• capability declaration and availability checks;
+• one GET producing one complete transaction;
+• POST request-body preservation;
+• compressed response preservation before decoding;
+• separate redirect and retry transactions;
+• metadata redaction and explicitly sensitive fields;
+• connection failure and truncated response state;
+• source errors, panics, abnormal exits, and failure after many transactions;
+• checkpoint and resume behavior;
+• stale-session reconciliation;
+• non-UTF-8 Unix and Windows Unicode argument forwarding;
+• parent/child identity disagreement;
+• runtime hash mismatch;
+• acquisition or processing build failure preserving both old runtimes;
+• publication rollback;
+• foreground supervision;
+• background operator-host handoff;
+• MZA target-coverage validation and exact bundle input selection;
+• confirmation that the Lexicon installer payload contains no separate framework executable.
 
-Process exit codes distinguish failure stage: `1` if any ordinary artifact build failed, `2` if artifacts succeeded but a bundle failed — so it's always clear whether the failure happened before or during bundling.
+Core should expose a test harness or transport seam that exercises the same recorder and redactor used in production. Source helpers remain ordinary Rust and use ordinary Rust tests, debuggers, stack traces, logs, and profilers.
 
-`--locked` is used on every `cargo` invocation MZA makes (artifact builds, both bundle protocols); a missing/stale `Cargo.lock` is reported explicitly as `CARGO_LOCKFILE_MISSING` rather than surfacing as a generic cargo failure.
+19. Explicit non-goals
 
-## 17. Installation
+The architecture does not introduce:
 
-Installation tooling belongs under `release/` and remains pending until implemented. Once implemented, setup will:
+• WebAssembly;
+• browser, JavaScript, Node.js, JVM, or Python runtimes;
+• browser automation;
+• a custom acquisition language;
+• a stable serialized acquisition IR;
+• a dynamic Rust plugin ABI;
+• a universal source-argument schema;
+• a general public framework IPC service;
+• an internal HTTP broker;
+• hostile-code sandboxing;
+• automatic durable resumption of arbitrary source logic;
+• a second independently installed framework executable;
+• Cargo invocation during ordinary acquisition or processing.
 
-1. Determine the operating system and CPU architecture.
-2. Select or locate the appropriate completed Lexicon bundle.
-3. Run the Lexicon installer executable.
-4. Install or link the `lexicon` CLI into an appropriate user PATH location.
-5. Record the Lexicon installation location so commands do not depend on the current working directory.
-6. Report whether installation succeeded.
+A fixed-request TOML frontend, builder, macro, new protocol, broker, sandbox, or workflow representation may be considered only after a concrete requirement justifies its permanent cost. Any convenience frontend must adapt into the same primary contract rather than create a second execution model.
 
-Architecture discovery:
+20. Non-negotiable invariants
 
-- Windows: `echo $env:PROCESSOR_ARCHITECTURE` — `AMD64` → `windows-x86_64`, `ARM64` → `windows-arm64`.
-- Linux: `uname -m` — `x86_64` → `linux-x86_64`, `aarch64`/`arm64` → `linux-arm64`.
-- macOS: `uname -m` — `x86_64` → `macos-x86_64`, `arm64` → `macos-arm64` (detection does not imply macOS artifacts are produced by the Linux-host release pipeline).
-
-Verify installation with `lexicon --version`.
-
-## 18. Optional Attribution System
-
-An optional attribution mechanism may later be exposed as `lexicon source --attribute`, creating an attribution directory for a source and possibly supporting attribution associated with individual raw requests. Its exact persistence/command behavior remain intentionally open and are not part of the required initial implementation.
-
-## 19. Non-Negotiable Invariants
-
-1. The repository contains source code and committed data only, never compiled executables or generated release archives.
-2. Lexicon Core remains domain-agnostic.
-3. Source contracts are enforced by Rust compilation.
-4. Source implementations do not access Core's private engine implementation types.
-5. Ordinary runtime execution does not invoke Cargo or require a development toolchain.
-6. MZA remains reusable across unrelated projects and contains no Lexicon-specific bundling logic.
-7. Bundle inputs are addressed directly by their artifact labels.
-8. Artifact and bundle versions come from their respective Cargo manifests.
-9. Every target-specific bundle contains only executable inputs built for that same target, validated at parse time.
-10. Protocol 1 (`cargo-bundler-v0.1.0`) embeds its inputs' bytes via a `build.rs`-generated `include_bytes!` file, driven by a `bundle-spec.toml` MZA writes.
-11. Protocol 2 (`command-bundler-v0.1.0`) uses a host-executed Rust adapter crate (`cargo run`, never cross-compiled) and an exact `output_path`; it uses no result manifest.
-12. Every bundle execution (either protocol) produces exactly one final executable per target.
-13. Permanent bundle paths insert the protocol after the ordinary artifact `type` segment, and add a `<target>` directory level.
-14. Temporary protocol files are uniquely scoped (`mza/<run-id>/<bundle-label>/<target>/`) and never written into the permanent artifact tree.
-15. Every `cargo` invocation MZA makes uses `--locked`; a missing lockfile is a distinct, explicit error.
-16. Process exit codes distinguish artifact-stage failures (`1`) from bundle-stage failures (`2`).
+1. Only lexicon-cli produces the installed lexicon control executable.
+2. lexicon-framework is an in-process reusable library, not an independently installed framework process.
+3. lexicon-core is a narrow reusable library shared with managed source runtimes.
+4. Source implementations are libraries linked behind Lexicon-managed runner entrypoints.
+5. Source contracts are enforced by Rust compilation.
+6. Supported builds validate workspace shape, lockfile, runner, Cargo graph, artifact identity, and capabilities.
+7. Parent and child both validate runtime identity and compatibility before source logic runs.
+8. Foreground framework calls stay in the original lexicon process.
+9. Background supervision uses re-execution of the exact lexicon binary in a reserved operator-host role.
+10. Every Core-mediated physical HTTP exchange is durably recorded before source code receives it.
+11. Core preserves undecoded HTTP entity-body bytes and redacts managed metadata.
+12. Acquisition and processing runtimes are staged and published as a paired transaction with rollback.
+13. Ordinary data execution never invokes Cargo or requires a development toolchain.
+14. The repository never commits compiled executables or generated release archives.
+15. MZA remains reusable and contains no Lexicon-specific installation policy.
+16. A Lexicon installation bundle contains the installed CLI payload, not a separate framework executable.
+17. Trusted native source code can bypass Core through unrestricted native effects; Lexicon does not claim otherwise.
