@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use serde::Deserialize;
 
@@ -16,52 +17,50 @@ struct ProjectSection {
     sources_directory: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LexiconSourceConfig {
+    protocol: Option<String>,
+}
+
+#[derive(Debug)]
+struct RuntimePublish {
+    source_name: String,
+    stage: String,
+    runtime_path: String,
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
     if args.is_empty() {
-        println!("lexicon-framework: no command given");
+        println!("[lexicon] No command given");
         return;
     }
 
-    if args.len() == 1 && args[0] == "test" {
+    if args == ["test".to_string()] {
         println!("test::: installation successful and routed through the cli to the framework");
         return;
     }
 
-    if args.len() == 3 && args[0] == "source" && args[1] == "new" {
-        if let Err(error) = generate_source_scaffold(&args[2], "http") {
-            eprintln!("lexicon-framework: {error}");
-            std::process::exit(1);
-        }
-        return;
-    }
+    let result = if args.len() == 5 && args[0] == "source" && args[1] == "create" && args[3] == "--protocol" {
+        run_source_create(&args[2], &args[4])
+    } else if args.len() == 5 && args[0] == "source" && args[1] == "build" && args[3] == "--protocol" {
+        run_source_build(&args[2], &args[4])
+    } else if args.len() == 3 && args[0] == "source" && args[1] == "create" {
+        Err("source creation requires --protocol <PROTOCOL>".to_string())
+    } else if args.len() == 3 && args[0] == "source" && args[1] == "build" {
+        Err("source build requires --protocol <PROTOCOL>".to_string())
+    } else {
+        Err(format!("unknown command \"{}\"", args.join(" ")))
+    };
 
-    if args.len() == 5 && args[0] == "source" && args[1] == "new" && args[3] == "--protocol" {
-        if let Err(error) = generate_source_scaffold(&args[2], &args[4]) {
-            eprintln!("lexicon-framework: {error}");
-            std::process::exit(1);
-        }
-        return;
+    if let Err(error) = result {
+        eprintln!("[lexicon] ERROR: {error}");
+        std::process::exit(1);
     }
-
-    if args.len() == 4 && args[0] == "source" && args[1] == "new" {
-        let protocol_flag = &args[3];
-        if let Some(protocol) = protocol_flag.strip_prefix("--protocol=") {
-            if let Err(error) = generate_source_scaffold(&args[2], protocol) {
-                eprintln!("lexicon-framework: {error}");
-                std::process::exit(1);
-            }
-            return;
-        }
-    }
-
-    let joined = args.join(" ");
-    eprintln!("lexicon-framework: unknown command \"{joined}\"");
-    std::process::exit(1);
 }
 
-fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), String> {
+fn run_source_create(source_name: &str, protocol: &str) -> Result<(), String> {
     validate_source_name(source_name)?;
     validate_protocol(protocol)?;
 
@@ -87,10 +86,12 @@ fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), Str
         Path::new("data/raw"),
         Path::new("data/processed"),
         Path::new("get-raw-data/sessions"),
-        Path::new("get-raw-data/get_raw_data_impl/src"),
+        Path::new("get-raw-data/get-raw-data-impl/src"),
+        Path::new("get-raw-data/runtime"),
         Path::new("process-data/sessions"),
-        Path::new("process-data/process_data_impl/src"),
-        Path::new("process-data/process_data_impl/processing"),
+        Path::new("process-data/process-data-impl/src"),
+        Path::new("process-data/process-data-impl/processing"),
+        Path::new("process-data/runtime"),
     ];
 
     for directory in &directories {
@@ -112,29 +113,31 @@ fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), Str
             format_session_status_json(source_name, "process-data"),
         ),
         (
-            "get-raw-data/get_raw_data_impl/Cargo.toml",
+            "get-raw-data/get-raw-data-impl/Cargo.toml",
             format_impl_cargo_toml(&format!("{source_name}-get-raw-data")),
         ),
         (
-            "get-raw-data/get_raw_data_impl/Cargo.lock",
+            "get-raw-data/get-raw-data-impl/Cargo.lock",
             format_cargo_lockfile(),
         ),
         (
-            "get-raw-data/get_raw_data_impl/src/main.rs",
+            "get-raw-data/get-raw-data-impl/src/main.rs",
             format_get_raw_data_main(source_name),
         ),
         (
-            "process-data/process_data_impl/Cargo.toml",
+            "process-data/process-data-impl/Cargo.toml",
             format_impl_cargo_toml(&format!("{source_name}-process-data")),
         ),
         (
-            "process-data/process_data_impl/Cargo.lock",
+            "process-data/process-data-impl/Cargo.lock",
             format_cargo_lockfile(),
         ),
         (
-            "process-data/process_data_impl/src/main.rs",
+            "process-data/process-data-impl/src/main.rs",
             format_process_data_main(source_name),
         ),
+        ("get-raw-data/runtime/.gitignore", "*\n!.gitignore\n".to_string()),
+        ("process-data/runtime/.gitignore", "*\n!.gitignore\n".to_string()),
     ];
 
     for (relative_path, contents) in &files {
@@ -149,12 +152,141 @@ fn generate_source_scaffold(source_name: &str, protocol: &str) -> Result<(), Str
         })?;
     }
 
-    println!("Created source scaffold for '{}' at {}", source_name, source_dir.display());
-    println!("Files to edit next:");
-    for (relative_path, _) in &files {
-        println!("  - {}", source_dir.join(relative_path).display());
+    println!("[lexicon] Created source '{}' at {}", source_name, source_dir.display());
+    Ok(())
+}
+
+fn run_source_build(source_name: &str, protocol: &str) -> Result<(), String> {
+    validate_source_name(source_name)?;
+    validate_protocol(protocol)?;
+
+    let project_root = find_project_root(&env::current_dir().map_err(|error| {
+        format!("failed to determine current directory: {error}")
+    })?)?;
+    let source_root = configured_sources_directory(&project_root)?;
+    let source_dir = source_root.join(source_name);
+
+    if !source_dir.is_dir() {
+        return Err(format!(
+            "source '{}' was not found under {}",
+            source_name,
+            source_root.display()
+        ));
     }
 
+    let source_config_path = source_dir.join("source.toml");
+    let source_config: LexiconSourceConfig = toml::from_str(
+        &fs::read_to_string(&source_config_path)
+            .map_err(|error| format!("failed to read {}: {error}", source_config_path.display()))?,
+    )
+    .map_err(|error| format!("failed to parse {}: {error}", source_config_path.display()))?;
+    let declared_protocol = source_config
+        .protocol
+        .as_deref()
+        .ok_or_else(|| format!("missing protocol in {}", source_config_path.display()))?
+        .trim();
+    if !declared_protocol.eq_ignore_ascii_case(protocol) {
+        return Err(format!(
+            "source '{}' declares protocol '{}' but build requested '{}'",
+            source_name,
+            declared_protocol,
+            protocol
+        ));
+    }
+
+    let build_temp_root = std::env::temp_dir().join(format!(
+        "lexicon-source-build-{}-{}",
+        source_name,
+        std::process::id()
+    ));
+    if build_temp_root.exists() {
+        fs::remove_dir_all(&build_temp_root).map_err(|error| {
+            format!("failed to clean temporary build directory {}: {error}", build_temp_root.display())
+        })?;
+    }
+    fs::create_dir_all(&build_temp_root).map_err(|error| {
+        format!("failed to create temporary build directory {}: {error}", build_temp_root.display())
+    })?;
+
+    let mut published = Vec::new();
+    for (stage, impl_name, runtime_dir) in [
+        (
+            "get-raw-data",
+            "get-raw-data-impl",
+            source_dir.join("get-raw-data").join("runtime"),
+        ),
+        (
+            "process-data",
+            "process-data-impl",
+            source_dir.join("process-data").join("runtime"),
+        ),
+    ] {
+        let manifest = source_dir.join(stage).join(impl_name).join("Cargo.toml");
+        if !manifest.is_file() {
+            return Err(format!(
+                "missing implementation manifest at {}",
+                manifest.display()
+            ));
+        }
+
+        let stage_target = build_temp_root.join(stage);
+        let status = Command::new("cargo")
+            .arg("build")
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .arg("--target-dir")
+            .arg(&stage_target)
+            .status()
+            .map_err(|error| format!("failed to build {}: {error}", manifest.display()))?;
+        if !status.success() {
+            return Err(format!(
+                "cargo build for {} exited with status {}",
+                manifest.display(),
+                status
+            ));
+        }
+
+        let binary_candidates = [
+            stage_target.join("debug").join(impl_name),
+            stage_target.join("debug").join(impl_name.replace('-', "_")),
+        ];
+        let binary_path = binary_candidates
+            .iter()
+            .find(|path| path.is_file())
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "failed to locate built binary for {} in {}",
+                    impl_name,
+                    stage_target.display()
+                )
+            })?;
+
+        fs::create_dir_all(&runtime_dir).map_err(|error| {
+            format!("failed to create runtime directory {}: {error}", runtime_dir.display())
+        })?;
+        let published_path = runtime_dir.join(binary_path.file_name().unwrap_or_else(|| impl_name.as_ref()));
+        if published_path.exists() {
+            fs::remove_file(&published_path).map_err(|error| {
+                format!("failed to replace existing runtime artifact {}: {error}", published_path.display())
+            })?;
+        }
+        fs::copy(&binary_path, &published_path).map_err(|error| {
+            format!("failed to publish {} to {}: {error}", binary_path.display(), published_path.display())
+        })?;
+
+        published.push(RuntimePublish {
+            source_name: source_name.to_string(),
+            stage: stage.to_string(),
+            runtime_path: published_path.to_string_lossy().to_string(),
+        });
+    }
+
+    println!("[lexicon] Built source '{}' with protocol '{}'", source_name, protocol);
+    for item in &published {
+        println!("[lexicon] {} runtime: {}", item.stage, item.runtime_path);
+    }
+    let _ = fs::remove_dir_all(&build_temp_root);
     Ok(())
 }
 
@@ -182,7 +314,7 @@ fn validate_protocol(protocol: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "unsupported protocol '{}'; only 'http' is currently supported for source creation",
+            "unsupported protocol '{}'; only 'http' is currently supported",
             protocol
         ))
     }
@@ -205,16 +337,15 @@ fn find_project_root(start_dir: &Path) -> Result<PathBuf, String> {
     }
 
     if ancestors.is_empty() {
-        return Err("No Lexicon project found. The current directory is not inside a Lexicon project.".to_string());
+        return Err("[lexicon] ERROR: No Lexicon project was found.".to_string());
     }
 
     if ancestors.len() > 1 {
         let outer = ancestors.last().cloned().expect("ancestor list should have outermost root");
         let nested = ancestors.first().cloned().expect("ancestor list should at least contain one project root");
         return Err(format!(
-            "Nested Lexicon project detected.\nOuter project: {}\nNested project: {}\nMove the nested project outside the outer project, or remove its lexicon.toml if it should belong to the outer project, then rerun.\nNo changes were made.",
-            outer.display(),
-            nested.display()
+            "[lexicon] ERROR: Nested Lexicon project detected.\n[lexicon] Outer project: {}\n[lexicon] Nested project: {}\n[lexicon] Move the nested project outside the outer project, or remove its\n[lexicon] lexicon.toml if it should belong to the outer project, then rerun.\n[lexicon] No changes were made.",
+            outer.display(), nested.display()
         ));
     }
 
@@ -222,9 +353,8 @@ fn find_project_root(start_dir: &Path) -> Result<PathBuf, String> {
     let descendant = find_descendant_project_root(&root)?;
     if let Some(nested_root) = descendant {
         return Err(format!(
-            "Nested Lexicon project detected.\nOuter project: {}\nNested project: {}\nMove the nested project outside the outer project, or remove its lexicon.toml if it should belong to the outer project, then rerun.\nNo changes were made.",
-            root.display(),
-            nested_root.display()
+            "[lexicon] ERROR: Nested Lexicon project detected.\n[lexicon] Outer project: {}\n[lexicon] Nested project: {}\n[lexicon] Move the nested project outside the outer project, or remove its\n[lexicon] lexicon.toml if it should belong to the outer project, then rerun.\n[lexicon] No changes were made.",
+            root.display(), nested_root.display()
         ));
     }
 
@@ -238,6 +368,16 @@ fn find_descendant_project_root(root: &Path) -> Result<Option<PathBuf>, String> 
 }
 
 fn visit_descendants(root: &Path, found: &mut Option<PathBuf>, current: &Path) -> Result<(), String> {
+    let prunable = [
+        ".git",
+        "target",
+        "artifacts",
+        "bundles",
+        "mza",
+        "data/raw",
+        "data/processed",
+    ];
+
     for entry in fs::read_dir(current)
         .map_err(|error| format!("failed to read {}: {error}", current.display()))?
     {
@@ -249,6 +389,14 @@ fn visit_descendants(root: &Path, found: &mut Option<PathBuf>, current: &Path) -
         }
 
         if path.is_dir() {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            let relative_string = relative.to_string_lossy();
+            if prunable.iter().any(|needle| {
+                relative_string == *needle || relative_string.ends_with(&format!("/{needle}"))
+            }) {
+                continue;
+            }
+
             let marker = path.join("lexicon.toml");
             if marker.is_file() && path != root {
                 if found.is_none() {
@@ -256,6 +404,7 @@ fn visit_descendants(root: &Path, found: &mut Option<PathBuf>, current: &Path) -
                 }
                 return Ok(());
             }
+
             visit_descendants(root, found, &path)?;
             if found.is_some() {
                 return Ok(());
@@ -294,44 +443,34 @@ fn configured_sources_directory(project_root: &Path) -> Result<PathBuf, String> 
         return Err(format!("invalid project.name '{}' in {}", project_name, config_path.display()));
     }
 
-    let configured = project
-        .sources_directory
-        .as_deref()
-        .unwrap_or("sources");
-
+    let configured = project.sources_directory.as_deref().unwrap_or("sources");
     let path = Path::new(configured);
-    if path.is_absolute() {
+    if path.is_absolute() || path.components().any(|component| matches!(component, Component::ParentDir | Component::RootDir)) {
         return Err(format!(
-            "invalid sources_directory '{}' in {}: must be a relative path",
-            configured,
-            config_path.display()
-        ));
-    }
-    if path.components().any(|component| matches!(component, Component::ParentDir | Component::RootDir)) {
-        return Err(format!(
-            "invalid sources_directory '{}' in {}: must remain within the project root",
+            "invalid sources_directory '{}' in {}: must be a relative path within the project root",
             configured,
             config_path.display()
         ));
     }
 
     let resolved = project_root.join(path);
-    let canonical_project_root = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
-    match resolved.strip_prefix(&canonical_project_root) {
-        Ok(_) => Ok(resolved),
-        Err(_) => Err(format!(
-            "invalid sources_directory '{}' in {}: resolves outside the project root",
-            configured,
-            config_path.display()
-        )),
+    if let Ok(canonical_root) = project_root.canonicalize() {
+        if resolved.strip_prefix(&canonical_root).is_err() {
+            return Err(format!(
+                "invalid sources_directory '{}' in {}: resolves outside the project root",
+                configured,
+                config_path.display()
+            ));
+        }
     }
+
+    Ok(resolved)
 }
 
 fn format_source_toml(source_name: &str, protocol: &str) -> String {
     let mut out = String::new();
     out.push_str("schema_version = 1\n\n");
-    out.push_str(&format!("id = \"{source_name}\"\n\n"));
-    out.push_str("[acquisition]\n");
+    out.push_str(&format!("id = \"{source_name}\"\n"));
     out.push_str(&format!("protocol = \"{protocol}\"\n"));
     out.push_str("access_pattern = \"unspecified\"\n\n");
     out.push_str("[discovery]\n");
@@ -343,7 +482,7 @@ fn format_discovery_markdown(source_name: &str) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {source_name}\n\n"));
     out.push_str(&format!(
-        "This source scaffold was created by `lexicon source new {source_name}`.\n\n"
+        "This source scaffold was created by `lexicon source create {source_name}`.\n\n"
     ));
     out.push_str(
         "Edit this document to describe the source, its acquisition rules, and the data it produces.\n",
@@ -415,6 +554,18 @@ fn format_cargo_lockfile() -> String {
     out
 }
 
+fn format_session_status_json(source_name: &str, stage: &str) -> String {
+    let mut out = String::new();
+    out.push_str("{\n");
+    out.push_str("  \"schema_version\": 1,\n");
+    out.push_str(&format!("  \"source_id\": \"{source_name}\",\n"));
+    out.push_str(&format!("  \"stage\": \"{stage}\",\n"));
+    out.push_str("  \"status\": \"initialized\",\n");
+    out.push_str("  \"last_updated\": null\n");
+    out.push_str("}\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{format_get_raw_data_main, format_impl_cargo_toml};
@@ -438,16 +589,4 @@ mod tests {
         assert!(source.contains("fn acquire(&self, context: &mut HttpAcquisitionContext)"));
         assert!(source.contains("if let Err(error) = run_http_source(source)"));
     }
-}
-
-fn format_session_status_json(source_name: &str, stage: &str) -> String {
-    let mut out = String::new();
-    out.push_str("{\n");
-    out.push_str("  \"schema_version\": 1,\n");
-    out.push_str(&format!("  \"source_id\": \"{source_name}\",\n"));
-    out.push_str(&format!("  \"stage\": \"{stage}\",\n"));
-    out.push_str("  \"status\": \"initialized\",\n");
-    out.push_str("  \"last_updated\": null\n");
-    out.push_str("}\n");
-    out
 }

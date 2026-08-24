@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "source", about = "Create a new source definition and project scaffold.")]
+#[command(name = "source", about = "Create or build source definitions in the current Lexicon project.")]
 pub struct SourceCommand {
     #[command(subcommand)]
     pub action: SourceAction,
@@ -9,22 +9,37 @@ pub struct SourceCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SourceAction {
-    New(NewSourceCommand),
+    Create(CreateSourceCommand),
+    Build(BuildSourceCommand),
 }
 
 #[derive(Parser, Debug, Clone)]
-pub struct NewSourceCommand {
+pub struct CreateSourceCommand {
     pub source_name: String,
 
     #[arg(
         long,
         default_value = "http",
-        help = "Acquisition protocol for the new source. Only http is supported right now."
+        help = "Acquisition protocol for the source. Only http is supported right now."
     )]
     pub protocol: String,
 }
 
-impl NewSourceCommand {
+#[derive(Parser, Debug, Clone)]
+pub struct BuildSourceCommand {
+    #[arg(value_name = "SOURCE_NAME")]
+    pub source_name: String,
+
+    #[arg(
+        long,
+        value_name = "PROTOCOL",
+        required = true,
+        help = "Protocol implementation to build. Only http is supported right now."
+    )]
+    pub protocol: String,
+}
+
+impl CreateSourceCommand {
     pub fn normalized_protocol(&self) -> Result<String, String> {
         let value = self.protocol.trim();
         if value.eq_ignore_ascii_case("http") {
@@ -38,6 +53,20 @@ impl NewSourceCommand {
     }
 }
 
+impl BuildSourceCommand {
+    pub fn normalized_protocol(&self) -> Result<String, String> {
+        let value = self.protocol.trim();
+        if value.eq_ignore_ascii_case("http") {
+            Ok("http".to_owned())
+        } else {
+            Err(format!(
+                "unsupported protocol '{}'; only 'http' is currently supported for source builds",
+                self.protocol
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SourceAction, SourceCommand};
@@ -45,42 +74,71 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn parses_new_source_command() {
-        let cli = Cli::try_parse_from(["lexicon", "source", "new", "example-source"])
-            .expect("lexicon source new should parse");
+    fn parses_create_source_command() {
+        let cli = Cli::try_parse_from(["lexicon", "source", "create", "example-source"])
+            .expect("lexicon source create should parse");
 
         match cli.command {
             Some(RootCommand::Source(SourceCommand {
-                action: SourceAction::New(command),
+                action: SourceAction::Create(command),
             })) => {
                 assert_eq!(command.source_name, "example-source");
                 assert_eq!(command.protocol, "http");
             }
-            other => panic!("expected Source::New subcommand, got {other:?}"),
+            other => panic!("expected Source::Create subcommand, got {other:?}"),
         }
     }
 
     #[test]
-    fn parses_new_source_command_with_protocol_flag() {
+    fn parses_create_source_command_with_protocol_flag() {
         let cli = Cli::try_parse_from([
             "lexicon",
             "source",
-            "new",
+            "create",
             "example-source",
             "--protocol",
             "http",
         ])
-        .expect("lexicon source new --protocol http should parse");
+        .expect("lexicon source create --protocol http should parse");
 
         match cli.command {
             Some(RootCommand::Source(SourceCommand {
-                action: SourceAction::New(command),
+                action: SourceAction::Create(command),
             })) => {
                 assert_eq!(command.source_name, "example-source");
                 assert_eq!(command.protocol, "http");
                 assert_eq!(command.normalized_protocol().unwrap(), "http");
             }
-            other => panic!("expected Source::New subcommand, got {other:?}"),
+            other => panic!("expected Source::Create subcommand, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_build_source_command_with_protocol_flag() {
+        let cli = Cli::try_parse_from([
+            "lexicon",
+            "source",
+            "build",
+            "example-source",
+            "--protocol",
+            "http",
+        ])
+        .expect("lexicon source build --protocol http should parse");
+
+        match cli.command {
+            Some(RootCommand::Source(SourceCommand {
+                action: SourceAction::Build(command),
+            })) => {
+                assert_eq!(command.source_name, "example-source");
+                assert_eq!(command.protocol, "http");
+                assert_eq!(command.normalized_protocol().unwrap(), "http");
+            }
+            other => panic!("expected Source::Build subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_source_add_alias() {
+        assert!(Cli::try_parse_from(["lexicon", "source", "add", "example-source"]).is_err());
     }
 }

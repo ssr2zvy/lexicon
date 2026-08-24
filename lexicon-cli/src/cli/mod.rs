@@ -20,7 +20,7 @@ pub use source::{SourceAction, SourceCommand};
     name = "lexicon",
     version,
     about = "Lexicon: make data",
-    long_about = "Lexicon CLI for raw-data acquisition, processing, source management, and build orchestration.\n\nThis parser validates the command interface defined by the project spec without invoking framework behavior."
+    long_about = "Lexicon CLI for raw-data acquisition, processing, source management, and build orchestration.\n\nThe CLI validates command parsing and dispatches source lifecycle operations through the framework binary."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -59,34 +59,48 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
             );
             Ok(())
         }
-        Some(RootCommand::Source(command)) => {
-            match command.action {
-                SourceAction::New(new_command) => {
-                    let framework_path = framework_binary_path()?;
-                    let status = Command::new(framework_path)
-                        .args([
-                            "source",
-                            "new",
-                            &new_command.source_name,
-                            "--protocol",
-                            &new_command.protocol,
-                        ])
-                        .status()
-                        .map_err(|error| format!("failed to execute framework binary: {error}"))?;
-                    if !status.success() {
-                        return Err(format!(
-                            "framework source scaffold step failed with exit status {}",
-                            status
-                        ));
-                    }
-                    println!(
-                        "Invoked framework scaffold for source '{}' using protocol '{}'",
-                        new_command.source_name, new_command.protocol
-                    );
-                    Ok(())
+        Some(RootCommand::Source(command)) => match command.action {
+            SourceAction::Create(create_command) => {
+                let framework_path = framework_binary_path()?;
+                let status = Command::new(framework_path)
+                    .args([
+                        "source",
+                        "create",
+                        &create_command.source_name,
+                        "--protocol",
+                        &create_command.protocol,
+                    ])
+                    .status()
+                    .map_err(|error| format!("failed to execute framework binary: {error}"))?;
+                if !status.success() {
+                    return Err(format!(
+                        "framework source creation step failed with exit status {}",
+                        status
+                    ));
                 }
+                Ok(())
             }
-        }
+            SourceAction::Build(build_command) => {
+                let framework_path = framework_binary_path()?;
+                let status = Command::new(framework_path)
+                    .args([
+                        "source",
+                        "build",
+                        &build_command.source_name,
+                        "--protocol",
+                        &build_command.protocol,
+                    ])
+                    .status()
+                    .map_err(|error| format!("failed to execute framework binary: {error}"))?;
+                if !status.success() {
+                    return Err(format!(
+                        "framework source build step failed with exit status {}",
+                        status
+                    ));
+                }
+                Ok(())
+            }
+        },
         Some(RootCommand::Init(command)) => {
             validate_project_name(&command.project_name)?;
             let project_root = initialize_project(&command.parent_path, &command.project_name)?;
@@ -149,23 +163,29 @@ fn framework_binary_path() -> Result<String, String> {
 fn locate_workspace_root() -> Result<PathBuf, String> {
     let current = std::env::current_dir()
         .map_err(|error| format!("failed to determine current directory: {error}"))?;
-    let mut dir = current;
+    let mut search_roots = vec![current.clone()];
+    if let Ok(current_exe) = std::env::current_exe() {
+        search_roots.push(current_exe);
+    }
 
-    loop {
-        let manifest = dir.join("Cargo.toml");
-        if manifest.is_file() {
-            let contents = std::fs::read_to_string(&manifest)
-                .map_err(|error| format!("failed to read {}: {error}", manifest.display()))?;
-            if contents.contains("[workspace]") {
-                return Ok(dir);
+    for root in search_roots {
+        let mut dir = root;
+        loop {
+            let manifest = dir.join("Cargo.toml");
+            if manifest.is_file() {
+                let contents = std::fs::read_to_string(&manifest)
+                    .map_err(|error| format!("failed to read {}: {error}", manifest.display()))?;
+                if contents.contains("[workspace]") {
+                    return Ok(dir);
+                }
             }
-        }
 
-        match dir.parent() {
-            Some(parent) => dir = parent.to_path_buf(),
-            None => break,
+            match dir.parent() {
+                Some(parent) => dir = parent.to_path_buf(),
+                None => break,
+            }
         }
     }
 
-    Err("could not locate the workspace root from the current directory".to_string())
+    Err("could not locate the workspace root from the current directory or current executable path".to_string())
 }
