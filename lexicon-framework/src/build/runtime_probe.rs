@@ -1,10 +1,24 @@
 use std::fmt;
+use std::io::{self, Read};
+use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use lexicon_core::protocols::http::runner::RUNTIME_INFORMATION_PROBE_ARGUMENT;
 use lexicon_core::runtime::{
     RuntimeCompatibilityError, RuntimeIdentity, RuntimeInformationDecodingError, RuntimeInformationV1,
 };
 
 pub const MAX_RUNTIME_INFORMATION_PROBE_BYTES: usize = 64 * 1024;
+pub const RUNTIME_INFORMATION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MAX_RUNTIME_INFORMATION_PROBE_STDERR_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedCapturedStream {
+    retained: Vec<u8>,
+    truncated: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedRuntimeInformation {
@@ -61,6 +75,295 @@ impl std::error::Error for RuntimeProbeAdmissionError {
             | Self::InvalidOutputBoundary => None,
         }
     }
+}
+
+#[derive(Debug)]
+pub enum RuntimeProbeExecutionError {
+    Spawn {
+        source: std::io::Error,
+    },
+    Wait {
+        source: std::io::Error,
+    },
+    Timeout {
+        timeout: Duration,
+        cleanup_error: Option<String>,
+    },
+    StdoutRead {
+        source: std::io::Error,
+    },
+    StderrRead {
+        source: std::io::Error,
+    },
+    StdoutTooLarge {
+        maximum: usize,
+    },
+    StderrTooLarge {
+        maximum: usize,
+    },
+    UnsuccessfulExit {
+        status: ExitStatus,
+        stderr: Vec<u8>,
+        stderr_truncated: bool,
+    },
+    Admission(RuntimeProbeAdmissionError),
+}
+
+impl fmt::Display for RuntimeProbeExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Spawn { source } => write!(formatter, "failed to spawn runtime information probe: {source}"),
+            Self::Wait { source } => write!(formatter, "failed waiting for runtime information probe to exit: {source}"),
+            Self::Timeout { timeout, cleanup_error } => {
+                let mut message = format!("runtime information probe timed out after {timeout:?}");
+                if let Some(cleanup_error) = cleanup_error {
+                    message.push_str(&format!(" (cleanup: {cleanup_error})"));
+                }
+                formatter.write_str(&message)
+            }
+            Self::StdoutRead { source } => write!(formatter, "failed reading stdout from runtime information probe: {source}"),
+            Self::StderrRead { source } => write!(formatter, "failed reading stderr from runtime information probe: {source}"),
+            Self::StdoutTooLarge { maximum } => write!(formatter, "runtime information probe stdout exceeded {maximum} bytes"),
+            Self::StderrTooLarge { maximum } => write!(formatter, "runtime information probe stderr exceeded {maximum} bytes"),
+            Self::UnsuccessfulExit { status, .. } => write!(formatter, "runtime information probe exited unsuccessfully: {status}"),
+            Self::Admission(error) => write!(formatter, "runtime information probe output was rejected: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeProbeExecutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Spawn { source } => Some(source),
+            Self::Wait { source } => Some(source),
+            Self::StdoutRead { source } => Some(source),
+            Self::StderrRead { source } => Some(source),
+            Self::Timeout { .. }
+            | Self::StdoutTooLarge { .. }
+            | Self::StderrTooLarge { .. }
+            | Self::UnsuccessfulExit { .. }
+            | Self::Admission(_) => None,
+        }
+    }
+}
+
+fn drain_bounded_stream<R: Read>(reader: R, maximum: usize) -> io::Result<BoundedCapturedStream> {
+    let mut reader = reader;
+    let mut retained = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 4096];
+
+    loop {
+        let bytes_read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => bytes_read,
+            Err(error) => return Err(error),
+        };
+
+        let mut consumed = 0;
+        while consumed < bytes_read {
+            if retained.len() >= maximum {
+                truncated = true;
+                break;
+            }
+            let remaining_capacity = maximum - retained.len();
+            let available = bytes_read - consumed;
+            let chunk_len = remaining_capacity.min(available);
+            retained.extend_from_slice(&buffer[consumed..consumed + chunk_len]);
+            consumed += chunk_len;
+            if retained.len() == maximum && consumed < bytes_read {
+                truncated = true;
+            }
+        }
+    }
+
+    Ok(BoundedCapturedStream { retained, truncated })
+}
+
+pub fn probe_http_runtime_information_with_timeout(
+    executable: &Path,
+    expected_identity: RuntimeIdentity,
+    timeout: Duration,
+) -> Result<AdmittedRuntimeInformation, RuntimeProbeExecutionError> {
+    let mut child = Command::new(executable)
+        .arg(RUNTIME_INFORMATION_PROBE_ARGUMENT)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| RuntimeProbeExecutionError::Spawn { source })?;
+
+    let stdout = child.stdout.take().expect("stdout piped for runtime probe");
+    let stderr = child.stderr.take().expect("stderr piped for runtime probe");
+
+    let stdout_handle = thread::spawn(move || drain_bounded_stream(stdout, MAX_RUNTIME_INFORMATION_PROBE_BYTES));
+    let stderr_handle = thread::spawn(move || drain_bounded_stream(stderr, MAX_RUNTIME_INFORMATION_PROBE_STDERR_BYTES));
+
+    let deadline = Instant::now() + timeout;
+    let mut exit_status: Option<ExitStatus> = None;
+    let mut wait_error: Option<std::io::Error> = None;
+    let mut timeout_error: Option<String> = None;
+    let mut timed_out = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    timed_out = true;
+                    if let Err(error) = child.kill() {
+                        timeout_error = Some(format!("kill failed: {error}"));
+                    }
+                    match child.wait() {
+                        Ok(status) => {
+                            exit_status = Some(status);
+                        }
+                        Err(error) => {
+                            if let Some(existing) = timeout_error.as_mut() {
+                                existing.push_str(&format!("; wait failed: {error}"));
+                            } else {
+                                timeout_error = Some(format!("wait failed: {error}"));
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(10)));
+            }
+            Err(error) => {
+                wait_error = Some(error);
+                break;
+            }
+        }
+    }
+
+    if !timed_out && wait_error.is_none() {
+        match child.wait() {
+            Ok(status) => exit_status = Some(status),
+            Err(error) => wait_error = Some(error),
+        }
+    }
+
+    let stdout_result = stdout_handle.join();
+    let stderr_result = stderr_handle.join();
+
+    let mut stdout_read_error = None;
+    let mut stderr_read_error = None;
+    let stdout_capture = match stdout_result {
+        Ok(Ok(stream)) => Some(stream),
+        Ok(Err(error)) => {
+            stdout_read_error = Some(error);
+            None
+        }
+        Err(_) => {
+            stdout_read_error = Some(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "stdout drainer thread panicked",
+            ));
+            None
+        }
+    };
+
+    let stderr_capture = match stderr_result {
+        Ok(Ok(stream)) => Some(stream),
+        Ok(Err(error)) => {
+            stderr_read_error = Some(error);
+            None
+        }
+        Err(_) => {
+            stderr_read_error = Some(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "stderr drainer thread panicked",
+            ));
+            None
+        }
+    };
+
+    if timed_out {
+        return Err(RuntimeProbeExecutionError::Timeout {
+            timeout,
+            cleanup_error: timeout_error,
+        });
+    }
+
+    if let Some(source) = wait_error {
+        return Err(RuntimeProbeExecutionError::Wait { source });
+    }
+
+    if let Some(source) = stdout_read_error {
+        return Err(RuntimeProbeExecutionError::StdoutRead { source });
+    }
+
+    if let Some(source) = stderr_read_error {
+        return Err(RuntimeProbeExecutionError::StderrRead { source });
+    }
+
+    let stdout_bytes = stdout_capture
+        .as_ref()
+        .map(|stream| stream.retained.clone())
+        .unwrap_or_default();
+    let stderr_bytes = stderr_capture
+        .as_ref()
+        .map(|stream| stream.retained.clone())
+        .unwrap_or_default();
+
+    if stdout_capture
+        .as_ref()
+        .is_some_and(|stream| stream.truncated)
+    {
+        return Err(RuntimeProbeExecutionError::StdoutTooLarge {
+            maximum: MAX_RUNTIME_INFORMATION_PROBE_BYTES,
+        });
+    }
+
+    if stderr_capture
+        .as_ref()
+        .is_some_and(|stream| stream.truncated)
+    {
+        return Err(RuntimeProbeExecutionError::StderrTooLarge {
+            maximum: MAX_RUNTIME_INFORMATION_PROBE_STDERR_BYTES,
+        });
+    }
+
+    let exit_status = match exit_status {
+        Some(status) => status,
+        None => {
+            return Err(RuntimeProbeExecutionError::Wait {
+                source: std::io::Error::new(std::io::ErrorKind::Other, "runtime information probe exited without a status"),
+            });
+        }
+    };
+
+    if !exit_status.success() {
+        return Err(RuntimeProbeExecutionError::UnsuccessfulExit {
+            status: exit_status,
+            stderr: stderr_bytes,
+            stderr_truncated: stderr_capture
+                .as_ref()
+                .is_some_and(|stream| stream.truncated),
+        });
+    }
+
+    match admit_http_runtime_information_probe(expected_identity, &stdout_bytes) {
+        Ok(admitted) => Ok(admitted),
+        Err(error) => Err(RuntimeProbeExecutionError::Admission(error)),
+    }
+}
+
+pub fn probe_http_runtime_information(
+    executable: &Path,
+    expected_identity: RuntimeIdentity,
+) -> Result<AdmittedRuntimeInformation, RuntimeProbeExecutionError> {
+    probe_http_runtime_information_with_timeout(
+        executable,
+        expected_identity,
+        RUNTIME_INFORMATION_PROBE_TIMEOUT,
+    )
 }
 
 pub fn admit_http_runtime_information_probe(
@@ -121,6 +424,7 @@ pub fn admit_http_runtime_information_probe(
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt;
 
     use lexicon_core::protocols::http::{HttpCapability, HttpCapabilitySet, HttpSourceContractV1};
     use lexicon_core::runtime::{RuntimeCompatibilityError, RuntimeIdentity, RuntimeInformationV1};
@@ -132,8 +436,9 @@ mod tests {
     };
 
     use super::{
-        MAX_RUNTIME_INFORMATION_PROBE_BYTES, AdmittedRuntimeInformation,
-        RuntimeProbeAdmissionError, admit_http_runtime_information_probe,
+        MAX_RUNTIME_INFORMATION_PROBE_BYTES, MAX_RUNTIME_INFORMATION_PROBE_STDERR_BYTES,
+        AdmittedRuntimeInformation, RuntimeProbeAdmissionError, RuntimeProbeExecutionError,
+        admit_http_runtime_information_probe,
     };
 
     fn acquire_handler(
@@ -505,5 +810,128 @@ mod tests {
                 HttpCapabilitySet::empty(),
             ),
         };
+    }
+
+    fn probe_fixture(mode: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("probe-fixture.sh");
+
+        let identity = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler);
+        let valid_output = valid_probe_output(identity, &source, HttpCapabilitySet::empty());
+        let valid_text = String::from_utf8(valid_output).unwrap();
+        let malformed_text = "{not-valid-json}\n";
+        let incompatible_text = String::from_utf8(valid_probe_output(
+            RuntimeIdentity::http_acquisition("other-source", 1),
+            &source,
+            HttpCapabilitySet::empty(),
+        ))
+        .unwrap();
+        let oversized_stdout = "x".repeat(MAX_RUNTIME_INFORMATION_PROBE_BYTES + 1024);
+        let oversized_stderr = "y".repeat(MAX_RUNTIME_INFORMATION_PROBE_STDERR_BYTES + 1024);
+
+        let shell_valid = valid_text.replace('\\', "\\\\");
+        let shell_malformed = malformed_text.replace('\\', "\\\\");
+        let shell_incompatible = incompatible_text.replace('\\', "\\\\");
+        let shell_oversized_stdout = oversized_stdout.replace('\\', "\\\\");
+        let shell_oversized_stderr = oversized_stderr.replace('\\', "\\\\");
+
+        let script_text = format!(
+            r#"#!/usr/bin/env bash
+set -eu
+VALID_TEXT='{}'
+MALFORMED_TEXT='{}'
+INCOMPATIBLE_TEXT='{}'
+OVERSIZED_STDOUT='{}'
+OVERSIZED_STDERR='{}'
+case "${{LEXICON_PROBE_FIXTURE_MODE:-{mode}}}" in
+  valid)
+    printf '%s' "$VALID_TEXT"
+    ;;
+  malformed-stdout)
+    printf '%s' "$MALFORMED_TEXT"
+    ;;
+  incompatible-runtime)
+    printf '%s' "$INCOMPATIBLE_TEXT"
+    ;;
+  nonzero-exit)
+    printf '%s' "$VALID_TEXT"
+    echo 'probe failed' >&2
+    exit 7
+    ;;
+  delayed-exit)
+    sleep 10
+    printf '%s' "$VALID_TEXT"
+    ;;
+  oversized-stdout)
+    printf '%s' "$OVERSIZED_STDOUT"
+    ;;
+  oversized-stderr)
+    printf '%s' "$OVERSIZED_STDERR" >&2
+    ;;
+  noisy)
+    yes 'noise-out' | head -c 200000
+    yes 'noise-err' | head -c 200000 >&2
+    ;;
+  *)
+    echo "unexpected mode: ${{LEXICON_PROBE_FIXTURE_MODE:-{mode}}}" >&2
+    exit 2
+    ;;
+esac
+"#,
+            shell_valid,
+            shell_malformed,
+            shell_incompatible,
+            shell_oversized_stdout,
+            shell_oversized_stderr,
+            mode = mode,
+        );
+
+        std::fs::write(&script, script_text).unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        (temp, script)
+    }
+
+    #[test]
+    fn probe_http_runtime_information_accepts_valid_probe_output() {
+        let (_temp, script) = probe_fixture("valid");
+        let result = super::probe_http_runtime_information(
+            &script,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        assert!(result.is_ok(), "{:?}", result);
+    }
+
+    #[test]
+    fn probe_http_runtime_information_times_out_for_delayed_exit() {
+        let (_temp, script) = probe_fixture("delayed-exit");
+        let result = super::probe_http_runtime_information_with_timeout(
+            &script,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            std::time::Duration::from_millis(50),
+        );
+        assert!(matches!(result, Err(RuntimeProbeExecutionError::Timeout { .. })));
+    }
+
+    #[test]
+    fn probe_http_runtime_information_rejects_oversized_stdout() {
+        let (_temp, script) = probe_fixture("oversized-stdout");
+        let result = super::probe_http_runtime_information(
+            &script,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        assert!(matches!(result, Err(RuntimeProbeExecutionError::StdoutTooLarge { .. })));
+    }
+
+    #[test]
+    fn probe_http_runtime_information_rejects_nonzero_exit_status() {
+        let (_temp, script) = probe_fixture("nonzero-exit");
+        let result = super::probe_http_runtime_information(
+            &script,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        assert!(matches!(result, Err(RuntimeProbeExecutionError::UnsuccessfulExit { .. })));
     }
 }
