@@ -5,6 +5,9 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 use lexicon_core::protocols::http::runner::RUNTIME_INFORMATION_PROBE_ARGUMENT;
 use lexicon_core::runtime::{
     RuntimeCompatibilityError, RuntimeIdentity, RuntimeInformationDecodingError, RuntimeInformationV1,
@@ -185,13 +188,21 @@ pub(crate) fn probe_http_runtime_information_with_timeout(
     expected_identity: RuntimeIdentity,
     timeout: Duration,
 ) -> Result<AdmittedRuntimeInformation, RuntimeProbeExecutionError> {
-    let mut child = Command::new(executable)
-        .arg(RUNTIME_INFORMATION_PROBE_ARGUMENT)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| RuntimeProbeExecutionError::Spawn { source })?;
+    let mut child = {
+        let mut command = Command::new(executable);
+        command
+            .arg(RUNTIME_INFORMATION_PROBE_ARGUMENT)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+        }
+
+        command.spawn().map_err(|source| RuntimeProbeExecutionError::Spawn { source })?
+    };
 
     let stdout = child.stdout.take().expect("stdout piped for runtime probe");
     let stderr = child.stderr.take().expect("stderr piped for runtime probe");
@@ -214,23 +225,40 @@ pub(crate) fn probe_http_runtime_information_with_timeout(
             Ok(None) => {
                 if Instant::now() >= deadline {
                     timed_out = true;
-                    if let Err(error) = child.kill() {
-                        timeout_error = Some(format!("kill failed: {error}"));
-                    }
-                    match child.wait() {
-                        Ok(status) => {
-                            exit_status = Some(status);
-                        }
-                        Err(error) => {
-                            if let Some(existing) = timeout_error.as_mut() {
-                                existing.push_str(&format!("; wait failed: {error}"));
-                            } else {
-                                timeout_error = Some(format!("wait failed: {error}"));
-                            }
-                        }
-                    }
-                    break;
-                }
+
+                   #[cfg(unix)]
+                   {
+                       let group_id = child.id() as i32;
+                       let kill_result = Command::new("kill")
+                           .arg("-KILL")
+                           .arg(format!("-{group_id}"))
+                           .status();
+                       if let Err(error) = kill_result {
+                           timeout_error = Some(format!("process-group kill failed: {error}"));
+                       }
+                   }
+
+                   #[cfg(not(unix))]
+                   {
+                       if let Err(error) = child.kill() {
+                           timeout_error = Some(format!("kill failed: {error}"));
+                       }
+                   }
+
+                   match child.wait() {
+                       Ok(status) => {
+                           exit_status = Some(status);
+                       }
+                       Err(error) => {
+                           if let Some(existing) = timeout_error.as_mut() {
+                               existing.push_str(&format!("; wait failed: {error}"));
+                           } else {
+                               timeout_error = Some(format!("wait failed: {error}"));
+                           }
+                       }
+                   }
+                   break;
+               }
 
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 thread::sleep(remaining.min(Duration::from_millis(10)));
