@@ -8,6 +8,10 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+use lexicon_core::processing::{
+    ProcessingRuntimeCompatibilityError, ProcessingRuntimeInformationDecodingError,
+    ProcessingRuntimeInformationV1,
+};
 use lexicon_core::protocols::http::runner::RUNTIME_INFORMATION_PROBE_ARGUMENT;
 use lexicon_core::runtime::{
     RuntimeCompatibilityError, RuntimeIdentity, RuntimeInformationDecodingError, RuntimeInformationV1,
@@ -34,6 +38,29 @@ impl AdmittedRuntimeInformation {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedProcessingRuntimeInformation {
+    information: ProcessingRuntimeInformationV1,
+}
+
+impl AdmittedProcessingRuntimeInformation {
+    pub fn information(&self) -> &ProcessingRuntimeInformationV1 {
+        &self.information
+    }
+}
+
+#[derive(Debug)]
+enum RuntimeProbeOutputBoundaryError {
+    OutputTooLarge {
+        maximum: usize,
+        actual: usize,
+    },
+    EmptyOutput,
+    ContainsNul,
+    InvalidUtf8(std::str::Utf8Error),
+    InvalidOutputBoundary,
+}
+
 #[derive(Debug)]
 pub enum RuntimeProbeAdmissionError {
     OutputTooLarge {
@@ -46,6 +73,20 @@ pub enum RuntimeProbeAdmissionError {
     InvalidOutputBoundary,
     Decode(RuntimeInformationDecodingError),
     Incompatible(RuntimeCompatibilityError),
+}
+
+#[derive(Debug)]
+pub enum ProcessingRuntimeProbeAdmissionError {
+    OutputTooLarge {
+        maximum: usize,
+        actual: usize,
+    },
+    EmptyOutput,
+    ContainsNul,
+    InvalidUtf8(std::str::Utf8Error),
+    InvalidOutputBoundary,
+    Decode(ProcessingRuntimeInformationDecodingError),
+    Incompatible(ProcessingRuntimeCompatibilityError),
 }
 
 impl fmt::Display for RuntimeProbeAdmissionError {
@@ -78,6 +119,84 @@ impl std::error::Error for RuntimeProbeAdmissionError {
             | Self::InvalidOutputBoundary => None,
         }
     }
+}
+
+impl fmt::Display for ProcessingRuntimeProbeAdmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutputTooLarge { maximum, actual } => write!(
+                formatter,
+                "processing runtime information probe output exceeds {} bytes (actual: {actual})",
+                maximum
+            ),
+            Self::EmptyOutput => formatter.write_str("processing runtime information probe output is empty"),
+            Self::ContainsNul => formatter.write_str("processing runtime information probe output contains a NUL byte"),
+            Self::InvalidUtf8(error) => write!(formatter, "processing runtime information probe output is not valid UTF-8: {error}"),
+            Self::InvalidOutputBoundary => formatter.write_str("processing runtime information probe output does not match the required exact boundary"),
+            Self::Decode(error) => write!(formatter, "processing runtime information probe decode failed: {error}"),
+            Self::Incompatible(error) => write!(formatter, "processing runtime information probe compatibility validation failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ProcessingRuntimeProbeAdmissionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidUtf8(error) => Some(error),
+            Self::Decode(error) => Some(error),
+            Self::Incompatible(error) => Some(error),
+            Self::OutputTooLarge { .. }
+            | Self::EmptyOutput
+            | Self::ContainsNul
+            | Self::InvalidOutputBoundary => None,
+        }
+    }
+}
+
+fn validate_runtime_probe_output(stdout: &[u8]) -> Result<&str, RuntimeProbeOutputBoundaryError> {
+    if stdout.len() > MAX_RUNTIME_INFORMATION_PROBE_BYTES {
+        return Err(RuntimeProbeOutputBoundaryError::OutputTooLarge {
+            maximum: MAX_RUNTIME_INFORMATION_PROBE_BYTES,
+            actual: stdout.len(),
+        });
+    }
+
+    if stdout.is_empty() {
+        return Err(RuntimeProbeOutputBoundaryError::EmptyOutput);
+    }
+
+    if stdout.iter().any(|byte| *byte == 0) {
+        return Err(RuntimeProbeOutputBoundaryError::ContainsNul);
+    }
+
+    let text = std::str::from_utf8(stdout).map_err(RuntimeProbeOutputBoundaryError::InvalidUtf8)?;
+
+    if !text.ends_with('\n') {
+        return Err(RuntimeProbeOutputBoundaryError::InvalidOutputBoundary);
+    }
+
+    if text.bytes().filter(|byte| *byte == b'\n').count() != 1 {
+        return Err(RuntimeProbeOutputBoundaryError::InvalidOutputBoundary);
+    }
+
+    if text.starts_with('\n') || text.starts_with('\r') || text.contains('\r') {
+        return Err(RuntimeProbeOutputBoundaryError::InvalidOutputBoundary);
+    }
+
+    let json_text = &text[..text.len() - 1];
+    if json_text
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_whitespace())
+        || json_text
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_whitespace())
+    {
+        return Err(RuntimeProbeOutputBoundaryError::InvalidOutputBoundary);
+    }
+
+    Ok(json_text)
 }
 
 #[derive(Debug)]
@@ -398,47 +517,19 @@ pub fn admit_http_runtime_information_probe(
     expected_identity: RuntimeIdentity,
     stdout: &[u8],
 ) -> Result<AdmittedRuntimeInformation, RuntimeProbeAdmissionError> {
-    if stdout.len() > MAX_RUNTIME_INFORMATION_PROBE_BYTES {
-        return Err(RuntimeProbeAdmissionError::OutputTooLarge {
-            maximum: MAX_RUNTIME_INFORMATION_PROBE_BYTES,
-            actual: stdout.len(),
-        });
-    }
-
-    if stdout.is_empty() {
-        return Err(RuntimeProbeAdmissionError::EmptyOutput);
-    }
-
-    if stdout.iter().any(|byte| *byte == 0) {
-        return Err(RuntimeProbeAdmissionError::ContainsNul);
-    }
-
-    let text = std::str::from_utf8(stdout).map_err(RuntimeProbeAdmissionError::InvalidUtf8)?;
-
-    if !text.ends_with('\n') {
-        return Err(RuntimeProbeAdmissionError::InvalidOutputBoundary);
-    }
-
-    if text.bytes().filter(|byte| *byte == b'\n').count() != 1 {
-        return Err(RuntimeProbeAdmissionError::InvalidOutputBoundary);
-    }
-
-    if text.starts_with('\n') || text.starts_with('\r') || text.contains('\r') {
-        return Err(RuntimeProbeAdmissionError::InvalidOutputBoundary);
-    }
-
-    let json_text = &text[..text.len() - 1];
-    if json_text
-        .chars()
-        .next()
-        .is_some_and(|character| character.is_whitespace())
-        || json_text
-            .chars()
-            .next_back()
-            .is_some_and(|character| character.is_whitespace())
-    {
-        return Err(RuntimeProbeAdmissionError::InvalidOutputBoundary);
-    }
+    let json_text = validate_runtime_probe_output(stdout).map_err(|error| match error {
+        RuntimeProbeOutputBoundaryError::OutputTooLarge { maximum, actual } => {
+            RuntimeProbeAdmissionError::OutputTooLarge { maximum, actual }
+        }
+        RuntimeProbeOutputBoundaryError::EmptyOutput => RuntimeProbeAdmissionError::EmptyOutput,
+        RuntimeProbeOutputBoundaryError::ContainsNul => RuntimeProbeAdmissionError::ContainsNul,
+        RuntimeProbeOutputBoundaryError::InvalidUtf8(error) => {
+            RuntimeProbeAdmissionError::InvalidUtf8(error)
+        }
+        RuntimeProbeOutputBoundaryError::InvalidOutputBoundary => {
+            RuntimeProbeAdmissionError::InvalidOutputBoundary
+        }
+    })?;
 
     let information = RuntimeInformationV1::from_json(json_text)
         .map_err(RuntimeProbeAdmissionError::Decode)?;
@@ -449,11 +540,42 @@ pub fn admit_http_runtime_information_probe(
     Ok(AdmittedRuntimeInformation { information })
 }
 
+pub fn admit_processing_runtime_information_probe(
+    expected_identity: RuntimeIdentity,
+    stdout: &[u8],
+) -> Result<AdmittedProcessingRuntimeInformation, ProcessingRuntimeProbeAdmissionError> {
+    let json_text = validate_runtime_probe_output(stdout).map_err(|error| match error {
+        RuntimeProbeOutputBoundaryError::OutputTooLarge { maximum, actual } => {
+            ProcessingRuntimeProbeAdmissionError::OutputTooLarge { maximum, actual }
+        }
+        RuntimeProbeOutputBoundaryError::EmptyOutput => ProcessingRuntimeProbeAdmissionError::EmptyOutput,
+        RuntimeProbeOutputBoundaryError::ContainsNul => ProcessingRuntimeProbeAdmissionError::ContainsNul,
+        RuntimeProbeOutputBoundaryError::InvalidUtf8(error) => {
+            ProcessingRuntimeProbeAdmissionError::InvalidUtf8(error)
+        }
+        RuntimeProbeOutputBoundaryError::InvalidOutputBoundary => {
+            ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary
+        }
+    })?;
+
+    let information = ProcessingRuntimeInformationV1::from_json(json_text)
+        .map_err(ProcessingRuntimeProbeAdmissionError::Decode)?;
+    information
+        .validate_compatibility(expected_identity)
+        .map_err(ProcessingRuntimeProbeAdmissionError::Incompatible)?;
+
+    Ok(AdmittedProcessingRuntimeInformation { information })
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
     use std::os::unix::fs::PermissionsExt;
 
+    use lexicon_core::processing::{
+        ProcessingContext, ProcessingResult, ProcessingRuntimeCompatibilityError,
+        ProcessingRuntimeInformationV1, ProcessingSourceContractV1,
+    };
     use lexicon_core::protocols::http::{HttpCapability, HttpCapabilitySet, HttpSourceContractV1};
     use lexicon_core::runtime::{RuntimeCompatibilityError, RuntimeIdentity, RuntimeInformationV1};
     use lexicon_core::{
@@ -465,8 +587,9 @@ mod tests {
 
     use super::{
         MAX_RUNTIME_INFORMATION_PROBE_BYTES, MAX_RUNTIME_INFORMATION_PROBE_STDERR_BYTES,
-        AdmittedRuntimeInformation, RuntimeProbeAdmissionError, RuntimeProbeExecutionError,
-        admit_http_runtime_information_probe,
+        AdmittedProcessingRuntimeInformation, AdmittedRuntimeInformation,
+        ProcessingRuntimeProbeAdmissionError, RuntimeProbeAdmissionError, RuntimeProbeExecutionError,
+        admit_http_runtime_information_probe, admit_processing_runtime_information_probe,
     };
 
     fn acquire_handler(
@@ -495,6 +618,20 @@ mod tests {
         _args: &[std::ffi::OsString],
     ) -> lexicon_core::protocols::http::AcquisitionResult<()> {
         panic!("resume should not be invoked while admitting runtime information")
+    }
+
+    fn process_handler(
+        _context: &mut ProcessingContext,
+        _args: &[std::ffi::OsString],
+    ) -> ProcessingResult<()> {
+        Ok(())
+    }
+
+    fn failing_process_handler(
+        _context: &mut ProcessingContext,
+        _args: &[std::ffi::OsString],
+    ) -> ProcessingResult<()> {
+        panic!("processing handler should not be invoked while admitting runtime information")
     }
 
     fn valid_probe_output(
@@ -837,6 +974,271 @@ mod tests {
                 &HttpSourceContractV1::new(acquire_handler),
                 HttpCapabilitySet::empty(),
             ),
+        };
+    }
+
+    fn valid_processing_probe_output(identity: RuntimeIdentity, source: &ProcessingSourceContractV1) -> Vec<u8> {
+        let mut output = Vec::new();
+        lexicon_core::processing::try_write_runtime_information_probe(
+            identity,
+            source,
+            &[std::ffi::OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT)],
+            &mut output,
+        )
+        .unwrap();
+        output
+    }
+
+    #[test]
+    fn processing_probe_output_from_core_is_admitted() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let output = valid_processing_probe_output(identity, &source);
+
+        let admitted = admit_processing_runtime_information_probe(identity, &output).unwrap();
+        let expected = ProcessingRuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim_end_matches('\n')).unwrap();
+
+        assert_eq!(admitted.information(), &expected);
+    }
+
+    #[test]
+    fn processing_admitted_wrapper_exposes_decoded_information() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let output = valid_processing_probe_output(identity, &source);
+
+        let admitted = admit_processing_runtime_information_probe(identity, &output).unwrap();
+        assert_eq!(admitted.information().identity(), identity);
+        assert_eq!(admitted.information().descriptor_contract_version(), ProcessingSourceContractV1::CONTRACT_VERSION);
+    }
+
+    #[test]
+    fn processing_matching_identity_succeeds() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let output = valid_processing_probe_output(identity, &source);
+
+        let result = admit_processing_runtime_information_probe(identity, &output);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn processing_empty_output_is_rejected() {
+        let result = admit_processing_runtime_information_probe(RuntimeIdentity::http_processing("example-source", 1), &[]);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::EmptyOutput)));
+    }
+
+    #[test]
+    fn processing_oversized_output_is_rejected_before_decoding() {
+        let mut oversized = vec![b'{'];
+        while oversized.len() <= MAX_RUNTIME_INFORMATION_PROBE_BYTES {
+            oversized.push(b'x');
+        }
+        oversized.push(b'\n');
+
+        let result = admit_processing_runtime_information_probe(
+            RuntimeIdentity::http_processing("example-source", 1),
+            &oversized,
+        );
+        assert!(matches!(
+            result,
+            Err(ProcessingRuntimeProbeAdmissionError::OutputTooLarge { maximum, actual })
+                if maximum == MAX_RUNTIME_INFORMATION_PROBE_BYTES && actual > maximum
+        ));
+    }
+
+    #[test]
+    fn processing_nul_containing_output_is_rejected() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let mut output = valid_processing_probe_output(identity, &source);
+        output.insert(output.len() / 2, 0);
+
+        let result = admit_processing_runtime_information_probe(identity, &output);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::ContainsNul)));
+    }
+
+    #[test]
+    fn processing_invalid_utf8_is_rejected() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let mut output = valid_processing_probe_output(identity, &source);
+        output[0] = 0xff;
+
+        let result = admit_processing_runtime_information_probe(identity, &output);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::InvalidUtf8(_))));
+    }
+
+    #[test]
+    fn processing_missing_final_newline_is_rejected() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let mut output = valid_processing_probe_output(identity, &source);
+        output.pop();
+
+        let result = admit_processing_runtime_information_probe(identity, &output);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary)));
+    }
+
+    #[test]
+    fn processing_two_final_newlines_are_rejected() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let mut output = valid_processing_probe_output(identity, &source);
+        output.push(b'\n');
+
+        let result = admit_processing_runtime_information_probe(identity, &output);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary)));
+    }
+
+    #[test]
+    fn processing_carriage_return_line_ending_is_rejected() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let mut output = valid_processing_probe_output(identity, &source);
+        output.insert(output.len() - 1, b'\r');
+
+        let result = admit_processing_runtime_information_probe(identity, &output);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary)));
+    }
+
+    #[test]
+    fn processing_leading_spaces_are_rejected() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let mut output = valid_processing_probe_output(identity, &source);
+        output.insert(0, b' ');
+
+        let result = admit_processing_runtime_information_probe(identity, &output);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary)));
+    }
+
+    #[test]
+    fn processing_leading_newline_is_rejected() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let mut output = valid_processing_probe_output(identity, &source);
+        output.insert(0, b'\n');
+
+        let result = admit_processing_runtime_information_probe(identity, &output);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary)));
+    }
+
+    #[test]
+    fn processing_trailing_spaces_before_newline_are_rejected() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let mut output = valid_processing_probe_output(identity, &source);
+        output.insert(output.len() - 1, b' ');
+
+        let result = admit_processing_runtime_information_probe(identity, &output);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary)));
+    }
+
+    #[test]
+    fn processing_diagnostic_text_is_rejected() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let mut output = valid_processing_probe_output(identity, &source);
+        output.splice(..0, b"noise ".iter().copied());
+
+        let result = admit_processing_runtime_information_probe(identity, &output);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::Decode(_) | ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary)));
+    }
+
+    #[test]
+    fn processing_invalid_json_returns_decode() {
+        let result = admit_processing_runtime_information_probe(
+            RuntimeIdentity::http_processing("example-source", 1),
+            b"{not valid}\n",
+        );
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::Decode(_))));
+    }
+
+    #[test]
+    fn processing_unknown_schema_version_returns_decode() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let output = valid_processing_probe_output(identity, &source);
+        let json = String::from_utf8(output.clone()).unwrap();
+        let mut document: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
+        document["schema_version"] = serde_json::Value::from(2);
+        let mut candidate = serde_json::to_vec(&document).unwrap();
+        candidate.push(b'\n');
+
+        let result = admit_processing_runtime_information_probe(identity, &candidate);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::Decode(_))));
+    }
+
+    #[test]
+    fn processing_acquisition_document_returns_decode() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let output = valid_probe_output(RuntimeIdentity::http_acquisition("example-source", 1), &HttpSourceContractV1::new(acquire_handler), HttpCapabilitySet::empty());
+
+        let result = admit_processing_runtime_information_probe(identity, &output);
+        assert!(matches!(result, Err(ProcessingRuntimeProbeAdmissionError::Decode(_))));
+    }
+
+    #[test]
+    fn processing_source_identity_mismatch_returns_incompatible() {
+        let actual_identity = RuntimeIdentity::http_processing("example-source", 1);
+        let output = valid_processing_probe_output(actual_identity, &ProcessingSourceContractV1::new(process_handler));
+
+        let result = admit_processing_runtime_information_probe(
+            RuntimeIdentity::http_processing("other-source", 1),
+            &output,
+        );
+        assert!(matches!(
+            result,
+            Err(ProcessingRuntimeProbeAdmissionError::Incompatible(
+                ProcessingRuntimeCompatibilityError::IdentityMismatch { expected, actual }
+            )) if expected == RuntimeIdentity::http_processing("other-source", 1)
+                && actual == actual_identity
+        ));
+    }
+
+    #[test]
+    fn processing_descriptor_version_mismatch_returns_incompatible() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(process_handler);
+        let output = valid_processing_probe_output(identity, &source);
+
+        let json = String::from_utf8(output.clone()).unwrap();
+        let mut document: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
+        document["descriptor"]["contract_version"] = serde_json::Value::from(2);
+        let mut candidate = serde_json::to_vec(&document).unwrap();
+        candidate.push(b'\n');
+
+        let result = admit_processing_runtime_information_probe(identity, &candidate);
+        assert!(matches!(
+            result,
+            Err(ProcessingRuntimeProbeAdmissionError::Incompatible(
+                ProcessingRuntimeCompatibilityError::DescriptorContractVersionMismatch {
+                    identity_version,
+                    descriptor_version,
+                }
+            )) if identity_version == 1 && descriptor_version == 2
+        ));
+    }
+
+    #[test]
+    fn processing_admission_does_not_invoke_processing_handler() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = ProcessingSourceContractV1::new(failing_process_handler);
+        let output = valid_processing_probe_output(identity, &source);
+
+        let admitted = admit_processing_runtime_information_probe(identity, &output).unwrap();
+        assert_eq!(admitted.information().identity(), identity);
+    }
+
+    #[test]
+    fn processing_admission_wrapper_is_not_publicly_constructible() {
+        let _ = AdmittedProcessingRuntimeInformation {
+            information: ProcessingRuntimeInformationV1::from_processing_source(
+                RuntimeIdentity::http_processing("example-source", 1),
+                &ProcessingSourceContractV1::new(process_handler),
+            )
+            .unwrap(),
         };
     }
 
