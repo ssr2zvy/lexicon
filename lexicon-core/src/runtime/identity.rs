@@ -36,6 +36,7 @@ pub enum RuntimeProtocol {
 #[non_exhaustive]
 pub enum RuntimeOperation {
     Acquisition,
+    Processing,
 }
 
 impl RuntimeProtocol {
@@ -57,12 +58,14 @@ impl RuntimeOperation {
     pub const fn identifier(self) -> &'static str {
         match self {
             Self::Acquisition => "acquisition",
+            Self::Processing => "processing",
         }
     }
 
     pub fn from_identifier(value: &str) -> Result<Self, RuntimeIdentifierError> {
         match value {
             "acquisition" => Ok(Self::Acquisition),
+            "processing" => Ok(Self::Processing),
             _ => Err(RuntimeIdentifierError::unknown("operation", value)),
         }
     }
@@ -100,6 +103,15 @@ impl RuntimeIdentity {
         )
     }
 
+    pub const fn http_processing(source_name: &'static str, source_contract_version: u32) -> Self {
+        Self::from_parts(
+            source_name,
+            RuntimeProtocol::Http,
+            RuntimeOperation::Processing,
+            source_contract_version,
+        )
+    }
+
     pub const fn source_name(&self) -> &'static str {
         self.source_name
     }
@@ -133,6 +145,17 @@ mod tests {
     }
 
     #[test]
+    fn runtime_identity_http_processing_works_in_const() {
+        const IDENTITY: RuntimeIdentity = RuntimeIdentity::http_processing("example-source", 1);
+
+        let actual = IDENTITY;
+        assert_eq!(actual.source_name(), "example-source");
+        assert_eq!(actual.protocol(), RuntimeProtocol::Http);
+        assert_eq!(actual.operation(), RuntimeOperation::Processing);
+        assert_eq!(actual.source_contract_version(), 1);
+    }
+
+    #[test]
     fn runtime_identity_accessors_return_expected_values() {
         let identity = RuntimeIdentity::http_acquisition("example-source", 1);
 
@@ -143,6 +166,16 @@ mod tests {
     }
 
     #[test]
+    fn runtime_processing_identity_accessors_return_expected_values() {
+        let identity = RuntimeIdentity::http_processing("example-source", 2);
+
+        assert_eq!(identity.source_name(), "example-source");
+        assert_eq!(identity.protocol(), RuntimeProtocol::Http);
+        assert_eq!(identity.operation(), RuntimeOperation::Processing);
+        assert_eq!(identity.source_contract_version(), 2);
+    }
+
+    #[test]
     fn runtime_protocol_identifier_is_stable() {
         assert_eq!(RuntimeProtocol::Http.identifier(), "http");
     }
@@ -150,6 +183,7 @@ mod tests {
     #[test]
     fn runtime_operation_identifier_is_stable() {
         assert_eq!(RuntimeOperation::Acquisition.identifier(), "acquisition");
+        assert_eq!(RuntimeOperation::Processing.identifier(), "processing");
     }
 
     #[test]
@@ -166,6 +200,26 @@ mod tests {
             RuntimeOperation::from_identifier("acquisition"),
             Ok(RuntimeOperation::Acquisition)
         );
+        assert_eq!(
+            RuntimeOperation::from_identifier("processing"),
+            Ok(RuntimeOperation::Processing)
+        );
+    }
+
+    #[test]
+    fn runtime_operation_parsing_rejects_aliases_and_case_variants() {
+        assert!(matches!(
+            RuntimeOperation::from_identifier("Processing"),
+            Err(RuntimeIdentifierError::UnknownIdentifier { .. })
+        ));
+        assert!(matches!(
+            RuntimeOperation::from_identifier(" processing "),
+            Err(RuntimeIdentifierError::UnknownIdentifier { .. })
+        ));
+        assert!(matches!(
+            RuntimeOperation::from_identifier("acq"),
+            Err(RuntimeIdentifierError::UnknownIdentifier { .. })
+        ));
     }
 
     #[test]
@@ -196,9 +250,11 @@ mod tests {
         let right = RuntimeIdentity::http_acquisition("example-source", 1);
         let different_name = RuntimeIdentity::http_acquisition("other-source", 1);
         let different_version = RuntimeIdentity::http_acquisition("example-source", 2);
+        let processing = RuntimeIdentity::http_processing("example-source", 1);
 
         assert_eq!(left, right);
         assert_ne!(left, different_name);
         assert_ne!(left, different_version);
+        assert_ne!(left, processing);
     }
 }
