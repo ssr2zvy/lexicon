@@ -104,10 +104,22 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Mutex;
 
     use super::{Cli, RootCommand};
     use crate::cli::source::{CreateSourceCommand, SourceAction, SourceCommand};
     use clap::{CommandFactory, Parser};
+
+    static TEST_CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_test_cwd<T>(project_root: &std::path::Path, func: impl FnOnce() -> T) -> T {
+        let _guard = TEST_CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(project_root).unwrap();
+        let result = func();
+        std::env::set_current_dir(&original).unwrap();
+        result
+    }
 
     #[test]
     fn dispatch_source_create_produces_only_framework_output() {
@@ -146,13 +158,9 @@ mod tests {
         )
         .unwrap();
 
-        let result = {
-            let orig = std::env::current_dir().unwrap();
-            std::env::set_current_dir(project_root).unwrap();
-            let r = lexicon_framework::commands::source_create("example-source", "http");
-            std::env::set_current_dir(&orig).unwrap();
-            r
-        };
+        let result = with_test_cwd(project_root, || {
+            lexicon_framework::commands::source_create("example-source", "http")
+        });
 
         assert!(
             result.is_ok(),
@@ -175,13 +183,9 @@ mod tests {
         )
         .unwrap();
 
-        let result = {
-            let orig = std::env::current_dir().unwrap();
-            std::env::set_current_dir(project_root).unwrap();
-            let r = lexicon_framework::commands::source_create("example-source", "browser");
-            std::env::set_current_dir(&orig).unwrap();
-            r
-        };
+        let result = with_test_cwd(project_root, || {
+            lexicon_framework::commands::source_create("example-source", "browser")
+        });
 
         assert!(result.is_err(), "unsupported protocol should return Err");
         let msg = result.unwrap_err();
@@ -230,13 +234,10 @@ mod tests {
         )
         .unwrap();
 
-        {
-            let orig = std::env::current_dir().unwrap();
-            std::env::set_current_dir(project_root).unwrap();
-            let r = lexicon_framework::commands::source_create("example-source", "http");
-            std::env::set_current_dir(&orig).unwrap();
-            assert!(r.is_ok(), "valid source creation should succeed");
-        }
+        let result = with_test_cwd(project_root, || {
+            lexicon_framework::commands::source_create("example-source", "http")
+        });
+        assert!(result.is_ok(), "valid source creation should succeed");
 
         assert_eq!(
             fs::read_to_string(project_root.join("sources/preexisting-scratch/keep.txt")).unwrap(),

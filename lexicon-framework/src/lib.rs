@@ -1226,6 +1226,7 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::PathBuf;
+    use std::sync::Mutex;
 
     use super::commands::{init, source_create};
     use super::{
@@ -1235,6 +1236,17 @@ mod tests {
         restore_runtime_after_failure, select_executable_from_cargo_json, stage_runtime_file,
         validate_protocol, validate_source_name,
     };
+
+    static TEST_CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_test_cwd<T>(project_root: &std::path::Path, func: impl FnOnce() -> T) -> T {
+        let _guard = TEST_CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(project_root).unwrap();
+        let result = func();
+        std::env::set_current_dir(&original).unwrap();
+        result
+    }
 
     #[test]
     fn generated_source_toml_matches_required_contract() {
@@ -1697,10 +1709,7 @@ mod tests {
         )
         .unwrap();
 
-        let orig_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&temp).unwrap();
-        let result = source_create("example-source", "browser");
-        std::env::set_current_dir(&orig_dir).unwrap();
+        let result = with_test_cwd(&temp, || source_create("example-source", "browser"));
 
         assert!(result.is_err(), "unsupported protocol should return Err");
         assert!(
