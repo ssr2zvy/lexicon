@@ -5,15 +5,15 @@
    git fetch
    ```
 
-2. Ensure the current branch is `current_tracking`.
+2. Ensure you make your copilot feature branch from `main`.
    - If the current branch is not `current_tracking`, switch to it.
    ```bash
-   git switch current_tracking
+   git switch main
    ```
 
-3. Pull the latest changes for `current_tracking`.
+3. Pull the latest changes for `main before making the feature branch.
    ```bash
-   git pull --ff-only origin current_tracking
+   git pull --ff-only origin main
    ```
 
 4. Ensure the working directory is clean for fresh project validation.
@@ -39,13 +39,13 @@
    ```
    - If the workspace test run passes, validation is complete.
    - If the command fails, report the exact failing crate or step.
-   - If the bundle/install helper script is unavailable or cannot complete in this environment, fall back to the standard Cargo validation flow instead of using the custom install path.
+   - If the bundle/install helper script is unavailable or cannot complete in this environment, fall back to the standard Cargo validation flow with build and test, instead of using the custom install path.
    - Do not pivot to a different strategy without explicit confirmation if the Cargo validation itself is failing.
 
 8. Replace `current.md` with your implementation report.
    - Write the implementation report based on the work completed in Steps 4 through 6.
 
-9. Commit and push the updated report.
+9. Commit and push the updated report and/or make a merge request from the feature branch
    ```bash
    git add -A
    git commit -m "update current report"
