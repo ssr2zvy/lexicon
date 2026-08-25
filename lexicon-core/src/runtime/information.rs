@@ -67,6 +67,7 @@ struct RuntimeInformationDocumentV1 {
     schema_version: u32,
     identity: RuntimeIdentityDocumentV1,
     descriptor: RuntimeDescriptorDocumentV1,
+    runtime: RuntimeDocumentV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,11 +87,18 @@ struct RuntimeDescriptorDocumentV1 {
     resume_handler_registered: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeDocumentV1 {
+    available_capabilities: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeInformationV1 {
     identity: RuntimeIdentity,
     descriptor_contract_version: u32,
     required_capabilities: HttpCapabilitySet,
+    available_capabilities: HttpCapabilitySet,
     resume_handler_registered: bool,
 }
 
@@ -98,11 +106,13 @@ impl RuntimeInformationV1 {
     pub const fn from_http_source(
         identity: RuntimeIdentity,
         source: &HttpSourceContractV1,
+        available_capabilities: HttpCapabilitySet,
     ) -> Self {
         Self {
             identity,
             descriptor_contract_version: HttpSourceContractV1::CONTRACT_VERSION,
             required_capabilities: source.required_capabilities(),
+            available_capabilities,
             resume_handler_registered: source.resume_handler().is_some(),
         }
     }
@@ -117,6 +127,20 @@ impl RuntimeInformationV1 {
 
     pub const fn required_capabilities(&self) -> HttpCapabilitySet {
         self.required_capabilities
+    }
+
+    pub const fn available_capabilities(&self) -> HttpCapabilitySet {
+        self.available_capabilities
+    }
+
+    pub const fn validate_capabilities(&self) -> Result<(), MissingHttpCapabilities> {
+        if self.required_capabilities.is_subset_of(self.available_capabilities) {
+            Ok(())
+        } else {
+            Err(MissingHttpCapabilities {
+                missing: self.required_capabilities.missing_from(self.available_capabilities),
+            })
+        }
     }
 
     pub const fn resume_handler_registered(&self) -> bool {
@@ -141,6 +165,14 @@ impl RuntimeInformationV1 {
                     .map(|capability| capability.identifier().to_string())
                     .collect(),
                 resume_handler_registered: self.resume_handler_registered,
+            },
+            runtime: RuntimeDocumentV1 {
+                available_capabilities: self
+                    .available_capabilities
+                    .ordered_capabilities()
+                    .into_iter()
+                    .map(|capability| capability.identifier().to_string())
+                    .collect(),
             },
         };
 
@@ -231,6 +263,30 @@ impl RuntimeInformationV1 {
             required_capabilities = required_capabilities.insert(capability);
         }
 
+        let mut seen_runtime_capabilities = BTreeSet::new();
+        let mut available_capabilities = HttpCapabilitySet::empty();
+
+        for raw_capability in &document.runtime.available_capabilities {
+            let capability =
+                HttpCapability::from_identifier(raw_capability).map_err(|error| match error {
+                    RuntimeIdentifierError::UnknownIdentifier { value, .. } => {
+                        RuntimeInformationDecodingError::UnknownIdentifier {
+                            field: "runtime.available_capabilities",
+                            value,
+                        }
+                    }
+                })?;
+
+            let identifier = capability.identifier().to_string();
+            if !seen_runtime_capabilities.insert(identifier.clone()) {
+                return Err(RuntimeInformationDecodingError::DuplicateCapability(
+                    identifier,
+                ));
+            }
+
+            available_capabilities = available_capabilities.insert(capability);
+        }
+
         let source_name = Box::leak(document.identity.source.into_boxed_str());
         let identity = RuntimeIdentity::from_parts(
             source_name,
@@ -243,8 +299,20 @@ impl RuntimeInformationV1 {
             identity,
             descriptor_contract_version: document.descriptor.contract_version,
             required_capabilities,
+            available_capabilities,
             resume_handler_registered: document.descriptor.resume_handler_registered,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingHttpCapabilities {
+    missing: HttpCapabilitySet,
+}
+
+impl MissingHttpCapabilities {
+    pub const fn missing(&self) -> HttpCapabilitySet {
+        self.missing
     }
 }
 
@@ -287,8 +355,9 @@ mod tests {
     fn runtime_information_can_be_constructed_in_const() {
         const IDENTITY: RuntimeIdentity = RuntimeIdentity::http_acquisition("example-source", 1);
         const SOURCE: HttpSourceContractV1 = HttpSourceContractV1::new(acquire_handler);
+        const AVAILABLE: HttpCapabilitySet = HttpCapabilitySet::empty();
         const INFO: RuntimeInformationV1 =
-            RuntimeInformationV1::from_http_source(IDENTITY, &SOURCE);
+            RuntimeInformationV1::from_http_source(IDENTITY, &SOURCE, AVAILABLE);
 
         assert_eq!(INFO.identity(), IDENTITY);
         assert_eq!(
@@ -296,6 +365,7 @@ mod tests {
             HttpSourceContractV1::CONTRACT_VERSION
         );
         assert_eq!(INFO.required_capabilities(), HttpCapabilitySet::empty());
+        assert_eq!(INFO.available_capabilities(), HttpCapabilitySet::empty());
         assert!(!INFO.resume_handler_registered());
     }
 
@@ -304,7 +374,11 @@ mod tests {
         let identity = RuntimeIdentity::http_acquisition("example-source", 1);
         let source = HttpSourceContractV1::new(acquire_handler)
             .requires(HttpCapability::ClientCertificateV1);
-        let info = RuntimeInformationV1::from_http_source(identity, &source);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
 
         let json = info.to_json().unwrap();
         assert!(json.contains("\"schema_version\":1"));
@@ -314,6 +388,7 @@ mod tests {
         assert!(json.contains("\"source_contract_version\":1"));
         assert!(json.contains("\"contract_version\":1"));
         assert!(json.contains("\"required_capabilities\":[\"client-certificate-v1\"]"));
+        assert!(json.contains("\"available_capabilities\":[\"client-certificate-v1\"]"));
         assert!(json.contains("\"resume_handler_registered\":false"));
     }
 
@@ -322,7 +397,11 @@ mod tests {
         let identity = RuntimeIdentity::http_acquisition("example-source", 1);
         let source = HttpSourceContractV1::new(acquire_handler)
             .requires(HttpCapability::ClientCertificateV1);
-        let info = RuntimeInformationV1::from_http_source(identity, &source);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
 
         let json = info.to_json().unwrap();
         let expected = "\"required_capabilities\":[\"client-certificate-v1\"]";
@@ -333,10 +412,11 @@ mod tests {
     fn serialization_does_not_invoke_acquire_or_resume_handlers() {
         let identity = RuntimeIdentity::http_acquisition("example-source", 1);
         let source = HttpSourceContractV1::new(failing_acquire).with_resume(failing_resume);
-        let info = RuntimeInformationV1::from_http_source(identity, &source);
+        let info = RuntimeInformationV1::from_http_source(identity, &source, HttpCapabilitySet::empty());
 
         let json = info.to_json().unwrap();
         assert!(json.contains("\"resume_handler_registered\":true"));
+        assert!(json.contains("\"available_capabilities\":[]"));
         assert!(!json.contains("0x"));
     }
 
@@ -346,7 +426,11 @@ mod tests {
         let source = HttpSourceContractV1::new(acquire_handler)
             .with_resume(resume_handler)
             .requires(HttpCapability::ClientCertificateV1);
-        let info = RuntimeInformationV1::from_http_source(identity, &source);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
 
         let json = info.to_json().unwrap();
         let parsed = RuntimeInformationV1::from_json(&json).unwrap();
@@ -374,7 +458,7 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_rejected() {
-        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1,"extra":true},"descriptor":{"contract_version":1,"required_capabilities":["client-certificate-v1"],"resume_handler_registered":false}}"#;
+        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1,"extra":true},"descriptor":{"contract_version":1,"required_capabilities":["client-certificate-v1"],"resume_handler_registered":false},"runtime":{"available_capabilities":[]}}"#;
         assert!(matches!(
             RuntimeInformationV1::from_json(input),
             Err(RuntimeInformationDecodingError::StructuralDocument(_))
@@ -383,7 +467,7 @@ mod tests {
 
     #[test]
     fn unknown_schema_versions_are_rejected() {
-        let input = r#"{"schema_version":2,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false}}"#;
+        let input = r#"{"schema_version":2,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false},"runtime":{"available_capabilities":[]}}"#;
         assert!(matches!(
             RuntimeInformationV1::from_json(input),
             Err(RuntimeInformationDecodingError::UnknownSchemaVersion(2))
@@ -392,7 +476,7 @@ mod tests {
 
     #[test]
     fn unknown_protocols_are_rejected() {
-        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"https","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false}}"#;
+        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"https","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false},"runtime":{"available_capabilities":[]}}"#;
         assert!(matches!(
             RuntimeInformationV1::from_json(input),
             Err(RuntimeInformationDecodingError::UnknownIdentifier {
@@ -404,7 +488,7 @@ mod tests {
 
     #[test]
     fn unknown_operations_are_rejected() {
-        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"resume","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false}}"#;
+        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"resume","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false},"runtime":{"available_capabilities":[]}}"#;
         assert!(matches!(
             RuntimeInformationV1::from_json(input),
             Err(RuntimeInformationDecodingError::UnknownIdentifier {
@@ -416,7 +500,7 @@ mod tests {
 
     #[test]
     fn unknown_capabilities_are_rejected() {
-        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":["client-certificate-v2"],"resume_handler_registered":false}}"#;
+        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":["client-certificate-v2"],"resume_handler_registered":false},"runtime":{"available_capabilities":[]}}"#;
         assert!(matches!(
             RuntimeInformationV1::from_json(input),
             Err(RuntimeInformationDecodingError::UnknownIdentifier {
@@ -428,7 +512,16 @@ mod tests {
 
     #[test]
     fn duplicate_capabilities_are_rejected() {
-        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":["client-certificate-v1","client-certificate-v1"],"resume_handler_registered":false}}"#;
+        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":["client-certificate-v1","client-certificate-v1"],"resume_handler_registered":false},"runtime":{"available_capabilities":[]}}"#;
+        assert!(matches!(
+            RuntimeInformationV1::from_json(input),
+            Err(RuntimeInformationDecodingError::DuplicateCapability(_))
+        ));
+    }
+
+    #[test]
+    fn runtime_capability_duplicates_are_rejected() {
+        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false},"runtime":{"available_capabilities":["client-certificate-v1","client-certificate-v1"]}}"#;
         assert!(matches!(
             RuntimeInformationV1::from_json(input),
             Err(RuntimeInformationDecodingError::DuplicateCapability(_))
@@ -437,8 +530,8 @@ mod tests {
 
     #[test]
     fn zero_contract_versions_are_rejected() {
-        let zero_source = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":0},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false}}"#;
-        let zero_descriptor = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":0,"required_capabilities":[],"resume_handler_registered":false}}"#;
+        let zero_source = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":0},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false},"runtime":{"available_capabilities":[]}}"#;
+        let zero_descriptor = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":0,"required_capabilities":[],"resume_handler_registered":false},"runtime":{"available_capabilities":[]}}"#;
 
         assert!(matches!(
             RuntimeInformationV1::from_json(zero_source),
@@ -457,10 +550,20 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_document_decodes_but_fails_validation() {
+        let input = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":["client-certificate-v1"],"resume_handler_registered":false},"runtime":{"available_capabilities":[]}}"#;
+        let info = RuntimeInformationV1::from_json(input).unwrap();
+        assert!(info.validate_capabilities().is_err());
+        let error = info.validate_capabilities().unwrap_err();
+        assert!(error.missing().contains(HttpCapability::ClientCertificateV1));
+    }
+
+    #[test]
     fn different_identity_and_descriptor_versions_survive_round_trip() {
         let info = RuntimeInformationV1::from_http_source(
             RuntimeIdentity::http_acquisition("example-source", 2),
             &HttpSourceContractV1::new(acquire_handler),
+            HttpCapabilitySet::empty(),
         );
 
         let round_trip = RuntimeInformationV1::from_json(&info.to_json().unwrap()).unwrap();
@@ -475,12 +578,23 @@ mod tests {
     fn source_and_descriptor_versions_do_not_need_to_match() {
         let identity = RuntimeIdentity::http_acquisition("example-source", 2);
         let source = HttpSourceContractV1::new(acquire_handler);
-        let info = RuntimeInformationV1::from_http_source(identity, &source);
+        let info = RuntimeInformationV1::from_http_source(identity, &source, HttpCapabilitySet::empty());
 
         assert_eq!(info.identity().source_contract_version(), 2);
         assert_eq!(
             info.descriptor_contract_version(),
             HttpSourceContractV1::CONTRACT_VERSION
         );
+    }
+
+    #[test]
+    fn capability_validation_does_not_invoke_acquire() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(failing_acquire)
+            .with_resume(failing_resume)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(identity, &source, HttpCapabilitySet::empty());
+
+        assert!(info.validate_capabilities().is_err());
     }
 }
