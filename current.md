@@ -1,136 +1,209 @@
-# Implementation report
+Current implementation request: add typed required-capability declarations
 
-Implemented the HTTP source descriptor contract in `lexicon-core` and preserved the compatibility API for the existing source runner.
+Objective
 
-## Summary
+Extend HttpSourceContractV1 with one small feature:
 
-The merged change adds the first typed HTTP acquisition contract under Core without changing the current source scaffolding or runtime execution model yet.
+.requires(HttpCapability::ClientCertificateV1)
 
-It introduces:
+This task only lets a source descriptor declare required capabilities.
 
-- `lexicon_core::http` as the new public protocol namespace
-- `AcquisitionResult<T>` and a minimal `AcquisitionError` implementation
-- `HttpAcquireFn` and `HttpSourceContractV1` as a typed, compile-time-safe descriptor
-- a `const`-friendly constructor that stores a real function pointer instead of a dynamic registry
-- compatibility re-exports for the historical root API:
-  - `lexicon_core::HttpAcquisition`
-  - `lexicon_core::HttpAcquisitionContext`
-  - `lexicon_core::run_http_source`
+Do not implement capability availability checking, runner support, build validation, or runtime admission yet.
 
-## Files added or updated
+Required API
 
-- `lexicon-core/src/lib.rs`
-- `lexicon-core/src/protocols/mod.rs`
-- `lexicon-core/src/protocols/http/mod.rs`
-- `lexicon-core/src/protocols/http/contract.rs`
-- `lexicon-core/src/protocols/http/error.rs`
-- `lexicon-core/tests/contract_ui.rs`
-- `lexicon-core/tests/ui/*.rs`
-- `lexicon-core/Cargo.toml`
-- `Cargo.lock`
+This must compile as a constant:
 
-## What the contract does
+use std::ffi::OsString;
+use lexicon_core::http::{
+    AcquisitionResult,
+    HttpAcquisitionContext,
+    HttpCapability,
+    HttpSourceContractV1,
+};
+pub const SOURCE: HttpSourceContractV1 =
+    HttpSourceContractV1::new(acquire)
+        .requires(HttpCapability::ClientCertificateV1);
+fn acquire(
+    context: &mut HttpAcquisitionContext,
+    args: &[OsString],
+) -> AcquisitionResult<()> {
+    let _ = context;
+    let _ = args;
+    Ok(())
+}
 
-The new descriptor enforces a typed acquisition function shape:
+A descriptor without requirements must continue compiling:
 
-- `fn(&mut HttpAcquisitionContext, &[OsString]) -> AcquisitionResult<()>`
+pub const SOURCE: HttpSourceContractV1 =
+    HttpSourceContractV1::new(acquire);
 
-This ensures compile-time rejection for malformed handlers such as:
+Capability type
 
-- missing handler arguments
-- async handlers
-- pass-by-value context
-- immutable context
-- missing `&[OsString]`
-- wrong argument type
-- reversed parameters
-- bool returns
-- `Result<(), String>` returns
+Add:
 
-The descriptor is intentionally a simple typed pointer-based contract; it does not add a dynamic plugin ABI, registry, or serialization layer.
+lexicon-core/src/protocols/http/capability.rs
 
-## Validation
+Define:
 
-This change was validated through the workspace Rust test suite using the standard Cargo path:
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HttpCapability {
+    ClientCertificateV1,
+}
 
-- `cargo test --workspace --quiet`
+Expose it as:
 
-The merged implementation keeps the historical API intact while exposing the new HTTP contract path for future migration work.
+lexicon_core::http::HttpCapability
 
-* mza_artifacts.toml;
+Do not accept arbitrary strings as capabilities.
+
+Provide a stable machine-readable identifier:
+
+impl HttpCapability {
+    pub const fn identifier(self) -> &'static str {
+        match self {
+            Self::ClientCertificateV1 =>
+                "client-certificate-v1",
+        }
+    }
+}
+
+Do not implement client-certificate behavior. This variant is only a typed capability identity.
+
+Capability set
+
+Add a small immutable value type:
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpCapabilitySet {
+    // private representation
+}
+
+It must provide:
+
+impl HttpCapabilitySet {
+    pub const fn empty() -> Self;
+    pub const fn contains(
+        self,
+        capability: HttpCapability,
+    ) -> bool;
+}
+
+It may use a private bitset representation so descriptor construction remains valid in a const.
+
+Do not expose raw bit positions as part of the public API.
+
+Adding the same capability twice must be idempotent rather than an error.
+
+Descriptor extension
+
+Extend HttpSourceContractV1 with a private required-capability set.
+
+Add:
+
+impl HttpSourceContractV1 {
+    pub const fn requires(
+        self,
+        capability: HttpCapability,
+    ) -> Self;
+    pub const fn required_capabilities(
+        &self,
+    ) -> HttpCapabilitySet;
+}
+
+Requirements:
+
+* requires must work in a pub const SOURCE;
+* it must preserve the existing acquisition handler;
+* repeated calls must accumulate requirements;
+* repeated declaration of the same capability must not duplicate it;
+* the capability storage must remain typed;
+* descriptor fields must remain non-public.
+
+Tests
+
+Add tests proving:
+
+1. A descriptor with no .requires(...) has an empty requirement set.
+2. ClientCertificateV1 can be declared in a constant descriptor.
+3. The returned set contains ClientCertificateV1.
+4. Calling .requires(ClientCertificateV1) twice is idempotent.
+5. Adding a capability does not replace or corrupt the acquisition handler.
+6. Existing descriptor and compile-fail tests still pass.
+7. A string cannot be passed to .requires(...).
+
+The invalid string case must be a real compile-fail test:
+
+HttpSourceContractV1::new(acquire)
+    .requires("client-certificate-v1");
+
+Do not test build-time or runtime availability because those mechanisms do not exist yet.
+
+Preserve existing behavior
+
+Do not change:
+
+* AcquisitionError;
+* AcquisitionResult;
+* the mandatory acquisition function signature;
+* historical HttpAcquisition;
+* historical run_http_source;
+* source scaffolding;
+* source implementation crates;
+* source builds;
+* runtime publication;
+* MZA;
 * Protocol 1;
 * lexicon-bundle;
-* installer behavior;
-* bundle inputs;
 * installed paths.
-
-lexicon-core remains a linked Rust library, not an MZA artifact or installed executable.
-
-Required validation
-
-Run:
-
-cargo test --workspace --quiet
-
-Run the required official validator:
-
-bash automation/build_bundle_install/build_bundle_install.sh
-
-Verify that:
-
-* all positive descriptor tests pass;
-* all invalid handler examples fail compilation;
-* existing historical Core tests pass;
-* existing framework and CLI tests pass;
-* lexicon source create still creates the historical scaffold;
-* lexicon source build still publishes both existing runtimes;
-* the Protocol 1 installer still succeeds;
-* the installed payload remains only lexicon.
 
 Explicit exclusions
 
 Do not implement:
 
+* actual client-certificate loading;
+* TLS configuration;
+* capability providers;
+* capability negotiation;
+* parent capability validation;
+* child capability validation;
+* capability serialization;
+* runtime.json;
+* runtime probing;
 * optional handlers;
 * with_resume;
-* HttpCapability;
-* requires;
-* capability lists;
-* implementation-library scaffolding;
-* acquisition workspaces;
-* lexicon-runner;
-* managed main.rs;
-* runtime identity;
-* runtime-information probes;
-* validated build states;
-* runtime.json;
+* source implementation libraries;
+* managed runners;
+* build-state types;
 * invocation envelopes;
-* context.execute;
-* HTTP transport;
-* raw transaction recording;
-* session changes;
-* supervision;
-* __operator-host;
-* acquisition execution;
-* processing-contract changes.
+* HTTP execution or recording;
+* sessions or supervision.
 
-These belong to later micro-steps.
+Validation
+
+Run:
+
+cargo test --workspace --quiet
+
+Run the official validator:
+
+bash automation/build_bundle_install/build_bundle_install.sh
+
+Verify that the existing CLI, source scaffolding, source builds, Protocol 1 bundle, and installer remain unchanged.
 
 Completion report
 
-After completion, replace current.md with a focused report containing:
+Replace current.md with a focused report containing:
 
-* files created and changed;
-* the exact public API;
-* the descriptor’s internal representation;
-* the exact mandatory handler type;
-* positive test results;
-* every compile-fail case and its result;
-* confirmation that public SOURCE works in a constant;
-* confirmation that private handler visibility was not falsely treated as a type requirement;
-* historical API compatibility results;
-* workspace test results;
-* bundle/install validation;
-* any remaining blocker.
+* the HttpCapability definition;
+* its stable identifier;
+* the capability-set representation;
+* the .requires(...) implementation;
+* proof that it works in pub const SOURCE;
+* idempotency test results;
+* compile-fail string test result;
+* confirmation that the acquisition handler remains unchanged;
+* workspace and official validation results;
+* any blocker.
 
-Then stop. Do not migrate source scaffolding or generate a managed runner.
+Then stop. Do not implement capability enforcement or optional handlers.
