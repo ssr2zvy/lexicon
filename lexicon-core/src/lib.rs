@@ -4,8 +4,9 @@ pub mod protocols;
 pub mod runtime;
 pub use protocols::http;
 pub use runtime::{
-    RuntimeIdentifierError, RuntimeIdentity, RuntimeInformationDecodingError,
-    RuntimeInformationEncodingError, RuntimeOperation, RuntimeProtocol,
+    MissingHttpCapabilities, RuntimeCompatibilityError, RuntimeIdentifierError, RuntimeIdentity,
+    RuntimeInformationDecodingError, RuntimeInformationEncodingError, RuntimeOperation,
+    RuntimeProtocol,
 };
 
 pub struct HttpAcquisitionContext {

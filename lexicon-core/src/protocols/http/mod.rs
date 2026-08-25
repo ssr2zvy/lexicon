@@ -5,7 +5,8 @@ pub mod runner;
 
 pub use crate::HttpAcquisitionContext;
 pub use crate::runtime::{
-    RuntimeIdentity, RuntimeInformationV1, RuntimeOperation, RuntimeProtocol,
+    MissingHttpCapabilities, RuntimeCompatibilityError, RuntimeIdentity, RuntimeInformationV1,
+    RuntimeOperation, RuntimeProtocol,
 };
 pub use capability::{HttpCapability, HttpCapabilitySet};
 pub use contract::{HttpAcquireFn, HttpResumeFn, HttpSourceContractV1};
