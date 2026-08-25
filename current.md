@@ -1,222 +1,23 @@
-Current implementation request: add the compiled HTTP acquisition runtime identity
+# Implementation report
 
-Objective
+Implemented the compiled HTTP acquisition runtime identity without changing the existing HTTP descriptor behavior.
 
-Add the immutable identity value that a future Lexicon-managed acquisition runner will compile into its executable:
+What changed
+- Added the new runtime module at `lexicon-core/src/runtime/mod.rs` and `lexicon-core/src/runtime/identity.rs`.
+- Defined the canonical `RuntimeProtocol`, `RuntimeOperation`, and `RuntimeIdentity` types with private fields, const constructors, and const accessors.
+- Kept the design zero-allocation and const-friendly so it remains suitable for generated runner `main.rs` code.
+- Re-exported the canonical type through both `lexicon_core::runtime::RuntimeIdentity` and `lexicon_core::http::RuntimeIdentity` so both paths point to the same type.
+- Added focused tests covering const construction, accessors, identifier values, equality semantics, and the re-export equivalence.
 
-const IDENTITY: RuntimeIdentity =
-    RuntimeIdentity::http_acquisition(
-        "example-source",
-        1,
-    );
+Validation
+- Ran: `cargo test --workspace --quiet`
+- Result: all workspace tests passed.
 
-This task defines and tests the identity value only.
-
-Do not generate a runner, execute a descriptor, serialize identity, or implement runtime admission yet.
-
-Required module structure
-
-Add:
-
-lexicon-core/src/runtime/
-├── mod.rs
-└── identity.rs
-
-Expose the canonical type through:
-
-lexicon_core::runtime::RuntimeIdentity
-
-Also re-export it through the HTTP namespace so the future runner import from the contract remains valid:
-
-lexicon_core::http::RuntimeIdentity
-
-Both paths must refer to the same type, not duplicate identity structures.
-
-Protocol and operation types
-
-Define typed protocol and operation identities:
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-)]
-#[non_exhaustive]
-pub enum RuntimeProtocol {
-    Http,
-}
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-)]
-#[non_exhaustive]
-pub enum RuntimeOperation {
-    Acquisition,
-}
-
-Provide stable identifiers:
-
-impl RuntimeProtocol {
-    pub const fn identifier(self) -> &'static str {
-        match self {
-            Self::Http => "http",
-        }
-    }
-}
-impl RuntimeOperation {
-    pub const fn identifier(self) -> &'static str {
-        match self {
-            Self::Acquisition =>
-                "acquisition",
-        }
-    }
-}
-
-Do not use arbitrary protocol or operation strings inside RuntimeIdentity.
-
-Do not add processing yet.
-
-RuntimeIdentity
-
-Define:
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-)]
-pub struct RuntimeIdentity {
-    source_name: &'static str,
-    protocol: RuntimeProtocol,
-    operation: RuntimeOperation,
-    source_contract_version: u32,
-}
-
-All fields must remain private.
-
-Provide the constructor:
-
-impl RuntimeIdentity {
-    pub const fn http_acquisition(
-        source_name: &'static str,
-        source_contract_version: u32,
-    ) -> Self {
-        // ...
-    }
-}
-
-It must assign:
-
-source_name             → supplied source name
-protocol                → RuntimeProtocol::Http
-operation               → RuntimeOperation::Acquisition
-source_contract_version → supplied contract version
-
-The second argument in:
-
-RuntimeIdentity::http_acquisition(
-    "example-source",
-    1,
-)
-
-means HTTP source-contract version 1. It is not the Core crate version, runner-template version, runtime-invocation version, project-schema version, or capability version.
-
-Accessors
-
-Provide const accessors:
-
-impl RuntimeIdentity {
-    pub const fn source_name(
-        &self,
-    ) -> &'static str;
-    pub const fn protocol(
-        &self,
-    ) -> RuntimeProtocol;
-    pub const fn operation(
-        &self,
-    ) -> RuntimeOperation;
-    pub const fn source_contract_version(
-        &self,
-    ) -> u32;
-}
-
-Do not expose public field mutation.
-
-Constant construction
-
-This must compile:
-
-use lexicon_core::http::RuntimeIdentity;
-pub const IDENTITY: RuntimeIdentity =
-    RuntimeIdentity::http_acquisition(
-        "example-source",
-        1,
-    );
-
-The value must remain suitable for direct inclusion in a generated runner’s main.rs.
-
-Do not require heap allocation, runtime initialization, lazy statics, a registry, or serialization.
-
-Tests
-
-Add focused tests proving:
-
-1. RuntimeIdentity::http_acquisition(...) works in a pub const.
-2. source_name() returns "example-source".
-3. protocol() returns RuntimeProtocol::Http.
-4. operation() returns RuntimeOperation::Acquisition.
-5. source_contract_version() returns 1.
-6. RuntimeProtocol::Http.identifier() returns "http".
-7. RuntimeOperation::Acquisition.identifier() returns "acquisition".
-8. lexicon_core::runtime::RuntimeIdentity and lexicon_core::http::RuntimeIdentity are the same type.
-9. Two identities with the same fields compare equal.
-10. Different source names or contract versions compare unequal.
-
-Preserve existing descriptor behavior
-
-Do not change:
-
-* HttpSourceContractV1;
-* HttpAcquireFn;
-* HttpResumeFn;
-* .with_resume(...);
-* HttpCapability;
-* HttpCapabilitySet;
-* .requires(...);
-* AcquisitionError;
-* AcquisitionResult;
-* historical HttpAcquisition;
-* historical run_http_source.
-
-The new identity is not yet stored inside HttpSourceContractV1. The descriptor defines source behavior; the runner identity defines the artifact Lexicon intended to build.
-
-No validation yet
-
-Do not validate:
-
-* source-name syntax;
-* supported contract versions;
-* runner-template versions;
-* Core versions;
-* capabilities;
-* project identity;
-* session identity;
-* invocation envelopes;
-* parent/child agreement.
-
-Those checks require later build and runtime-admission layers.
-
-This task only creates the typed compiled identity value that those layers will consume.
+Files touched
+- `lexicon-core/src/lib.rs`
+- `lexicon-core/src/protocols/http/mod.rs`
+- `lexicon-core/src/runtime/mod.rs`
+- `lexicon-core/src/runtime/identity.rs`
 
 Preserve existing external behavior
 
