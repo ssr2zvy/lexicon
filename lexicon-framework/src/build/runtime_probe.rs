@@ -180,7 +180,7 @@ fn drain_bounded_stream<R: Read>(reader: R, maximum: usize) -> io::Result<Bounde
     Ok(BoundedCapturedStream { retained, truncated })
 }
 
-pub fn probe_http_runtime_information_with_timeout(
+pub(crate) fn probe_http_runtime_information_with_timeout(
     executable: &Path,
     expected_identity: RuntimeIdentity,
     timeout: Duration,
