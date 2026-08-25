@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+pub mod processing;
 pub mod protocols;
 pub mod runtime;
 pub use protocols::http;

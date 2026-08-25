@@ -1,0 +1,218 @@
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:57:45
+   |
+57 |     let _ = ProcessingSourceContractV1::new(no_parameters);
+   |             ------------------------------- ^^^^^^^^^^^^^ incorrect number of function parameters
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `fn() -> Result<(), ProcessingError> {no_parameters}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:58:45
+   |
+58 |     let _ = ProcessingSourceContractV1::new(missing_args);
+   |             ------------------------------- ^^^^^^^^^^^^ incorrect number of function parameters
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `for<'a> fn(&'a mut ProcessingContext) -> Result<(), ProcessingError> {missing_args}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:59:45
+   |
+59 |     let _ = ProcessingSourceContractV1::new(context_by_value);
+   |             ------------------------------- ^^^^^^^^^^^^^^^^ expected fn pointer, found fn item
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `for<'a> fn(ProcessingContext, &'a [OsString]) -> Result<(), ProcessingError> {context_by_value}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:60:45
+   |
+60 |     let _ = ProcessingSourceContractV1::new(immutable_context);
+   |             ------------------------------- ^^^^^^^^^^^^^^^^^ types differ in mutability
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `for<'a, 'b> fn(&'a ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError> {immutable_context}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:61:45
+   |
+61 |     let _ = ProcessingSourceContractV1::new(wrong_context_type);
+   |             ------------------------------- ^^^^^^^^^^^^^^^^^^ expected fn pointer, found fn item
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `for<'a, 'b> fn(&'a mut String, &'b [OsString]) -> Result<(), ProcessingError> {wrong_context_type}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:62:45
+   |
+62 |     let _ = ProcessingSourceContractV1::new(wrong_argument_type);
+   |             ------------------------------- ^^^^^^^^^^^^^^^^^^^ expected fn pointer, found fn item
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [String]) -> Result<(), ProcessingError> {wrong_argument_type}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:63:45
+   |
+63 |     let _ = ProcessingSourceContractV1::new(mutable_argument_slice);
+   |             ------------------------------- ^^^^^^^^^^^^^^^^^^^^^^ types differ in mutability
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `for<'a, 'b> fn(&'a mut ProcessingContext, &'b mut [OsString]) -> Result<(), ProcessingError> {mutable_argument_slice}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:64:45
+   |
+64 |     let _ = ProcessingSourceContractV1::new(reversed_parameters);
+   |             ------------------------------- ^^^^^^^^^^^^^^^^^^^ types differ in mutability
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `for<'a, 'b> fn(&'a [OsString], &'b mut ProcessingContext) -> Result<(), ProcessingError> {reversed_parameters}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:65:45
+   |
+65 |     let _ = ProcessingSourceContractV1::new(bool_return);
+   |             ------------------------------- ^^^^^^^^^^^ expected fn pointer, found fn item
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> bool {bool_return}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:66:45
+   |
+66 |     let _ = ProcessingSourceContractV1::new(string_result);
+   |             ------------------------------- ^^^^^^^^^^^^^ expected fn pointer, found fn item
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), String> {string_result}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:67:45
+   |
+67 |     let _ = ProcessingSourceContractV1::new(async_handler);
+   |             ------------------------------- ^^^^^^^^^^^^^ expected fn pointer, found fn item
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> impl Future<Output = Result<(), ProcessingError>> {async_handler}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:69:45
+   |
+69 |       let _ = ProcessingSourceContractV1::new(move |context: &mut ProcessingContext, args: &[OsString]| {
+   |  _____________-------------------------------_^
+   | |             |
+   | |             arguments to this function are incorrect
+70 | |         let _ = captured;
+71 | |         let _ = context;
+72 | |         let _ = args;
+73 | |         Ok(())
+74 | |     });
+   | |_____^ expected fn pointer, found closure
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found closure `{closure@$DIR/tests/ui/processing_invalid_handlers.rs:69:45: 69:102}`
+note: closures can only be coerced to `fn` types if they do not capture any variables
+  --> tests/ui/processing_invalid_handlers.rs:70:17
+   |
+70 |         let _ = captured;
+   |                 ^^^^^^^^ `captured` captured here
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/processing_invalid_handlers.rs:75:45
+   |
+75 |     let _ = ProcessingSourceContractV1::new(function_returning_processing_result_bool);
+   |             ------------------------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected fn pointer, found fn item
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<(), ProcessingError>`
+                 found fn item `for<'a, 'b> fn(&'a mut ProcessingContext, &'b [OsString]) -> Result<bool, ProcessingError> {function_returning_processing_result_bool}`
+note: associated function defined here
+  --> src/processing/contract.rs
+   |
+   |     pub const fn new(process: ProcessDataFn) -> Self {
+   |                  ^^^
