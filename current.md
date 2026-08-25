@@ -1,88 +1,252 @@
-# Implementation report
+Current implementation request: versioned runtime-information JSON document
 
-Files created and changed:
-- `lexicon-core/src/runtime/information.rs`
-- `lexicon-core/src/runtime/mod.rs`
-- `lexicon-core/src/protocols/http/mod.rs`
-- `lexicon-core/src/protocols/http/contract.rs`
-- `current.md`
+Objective
 
-Exact runtime metadata representation:
+Add deterministic JSON serialization and parsing for RuntimeInformationV1.
 
-```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RuntimeInformationV1 {
-    identity: RuntimeIdentity,
-    descriptor_contract_version: u32,
-    required_capabilities: HttpCapabilitySet,
-    resume_handler_registered: bool,
+This is the next narrow step toward the bounded runtime-information probe required by the architecture. It defines the parent/child data format but does not add a runner, command-line probe, subprocess execution, or runtime admission.
+
+Required implementation
+
+1. Add the runtime-information schema version
+
+Define a distinct schema version:
+
+pub const RUNTIME_INFORMATION_SCHEMA_VERSION: u32 = 1;
+
+This version applies only to the serialized runtime-information document.
+
+It is distinct from:
+
+* source contract version;
+* Core crate version;
+* runtime invocation protocol version;
+* runner-template version;
+* project and source manifest versions;
+* raw-data and session schema versions.
+
+2. Define the serialized document
+
+Add a private serialization representation corresponding to:
+
+{
+  "schema_version": 1,
+  "identity": {
+    "source": "example-source",
+    "protocol": "http",
+    "operation": "acquisition",
+    "source_contract_version": 1
+  },
+  "descriptor": {
+    "contract_version": 1,
+    "required_capabilities": [
+      "client-certificate-v1"
+    ],
+    "resume_handler_registered": true
+  }
 }
-```
 
-Descriptor contract version:
+Use serde and serde_json internally.
 
-```rust
-impl HttpSourceContractV1 {
-    pub const CONTRACT_VERSION: u32 = 1;
-}
-```
+Do not expose the private Serde representation as the canonical runtime-information type. RuntimeInformationV1 remains the typed public model.
 
-Constructor and accessor APIs:
+3. Add deterministic encoding
 
-```rust
+Provide a public API such as:
+
 impl RuntimeInformationV1 {
-    pub const fn from_http_source(
-        identity: RuntimeIdentity,
-        source: &HttpSourceContractV1,
-    ) -> Self {
-        Self {
-            identity,
-            descriptor_contract_version: HttpSourceContractV1::CONTRACT_VERSION,
-            required_capabilities: source.required_capabilities(),
-            resume_handler_registered: source.resume_handler().is_some(),
-        }
-    }
-
-    pub const fn identity(&self) -> RuntimeIdentity;
-    pub const fn descriptor_contract_version(&self) -> u32;
-    pub const fn required_capabilities(&self) -> HttpCapabilitySet;
-    pub const fn resume_handler_registered(&self) -> bool;
+    pub fn to_json(&self) -> Result<String, RuntimeInformationEncodingError>;
 }
-```
 
-Constant-construction proof:
-- `RuntimeInformationV1::from_http_source(...)` is a `const fn` and was validated with a compile-time constant construction test.
-- The data model remains allocation-free and stores only the captured identity, a u32 descriptor version, the capability set value, and a bool registration flag.
+Requirements:
 
-Required-capability results:
-- Empty descriptors produce `HttpCapabilitySet::empty()`.
-- Declaring `.requires(HttpCapability::ClientCertificateV1)` retains the capability in the metadata snapshot.
+* output must be valid UTF-8 JSON;
+* stable enum and capability identifiers must be used;
+* capabilities must have deterministic ordering;
+* duplicate capabilities must not appear;
+* handler function pointers must never be serialized;
+* no memory addresses or debug representations may appear;
+* encoding must not execute acquisition or resume handlers.
 
-Resume-registration results:
-- `resume_handler_registered() == false` when no `.with_resume(...)` handler is attached.
-- `resume_handler_registered() == true` when a resume handler is attached.
+Compact JSON is sufficient. Pretty-printing is not required.
 
-Proof that handlers were not invoked:
-- Runtime metadata construction only reads `source.required_capabilities()` and `source.resume_handler().is_some()`.
-- The tests use `panic!`-based acquire/resume handlers to ensure `from_http_source` does not call either handler.
-- Construction succeeded without triggering those panic branches.
+4. Add strict decoding
 
-Proof that mismatched identity and descriptor versions remain independently representable:
-- `RuntimeIdentity::http_acquisition("example-source", 2)` was constructed alongside a descriptor whose contract version is `HttpSourceContractV1::CONTRACT_VERSION == 1`.
-- `RuntimeInformationV1` recorded both independently without rejecting the mismatch.
+Provide:
 
-Re-export equivalence:
-- `lexicon_core::runtime::RuntimeInformationV1` and `lexicon_core::http::RuntimeInformationV1` resolve to the same Rust type.
-- The test verifies that both export paths compare equal and are identical concrete types.
+impl RuntimeInformationV1 {
+    pub fn from_json(
+        input: &str,
+    ) -> Result<Self, RuntimeInformationDecodingError>;
+}
 
-Validation results:
-- `cargo test -p lexicon-core --quiet` -> passed (`33` unit tests + `1` trybuild UI test passed)
-- `cargo test --workspace --quiet` -> passed across the workspace
+Decoding must reject:
 
-Bundle/install result:
-- Attempted: `bash automation/build_bundle_install/build_bundle_install.sh`
-- Result: failed because the external MZA dependency is still unavailable in this environment:
-  `bash: /home/runner/work/lexicon/lexicon/automation/build_bundle_mza/mza/make-artifact.sh: No such file or directory`
-- This is the known external-MZA blocker, and no dependency-management expansion was undertaken as part of this task.
+* invalid JSON;
+* missing required fields;
+* unknown schema versions;
+* unknown protocol identifiers;
+* unknown operation identifiers;
+* unknown capability identifiers;
+* duplicate capability identifiers;
+* invalid or zero contract versions;
+* unknown fields.
 
-Implementation status: complete for the requested in-memory runtime-information metadata step, without adding serialization, probing, validation, or managed-runner execution.
+Do not silently ignore incompatible or malformed information.
+
+5. Add stable identifier parsing
+
+Add narrow parsing functions for the existing typed values:
+
+impl RuntimeProtocol {
+    pub fn from_identifier(
+        value: &str,
+    ) -> Result<Self, RuntimeIdentifierError>;
+}
+impl RuntimeOperation {
+    pub fn from_identifier(
+        value: &str,
+    ) -> Result<Self, RuntimeIdentifierError>;
+}
+impl HttpCapability {
+    pub fn from_identifier(
+        value: &str,
+    ) -> Result<Self, RuntimeIdentifierError>;
+}
+
+Parsing must use the same identifiers already returned by their identifier accessors.
+
+Do not implement FromStr unless it materially simplifies the existing API. Do not permit aliases, case folding, or guessed values.
+
+6. Preserve independent compatibility values
+
+Decoding must preserve both:
+
+identity.source_contract_version
+descriptor.contract_version
+
+It must not require them to be equal.
+
+Compatibility validation belongs to a later admission step. This step only parses structurally valid information.
+
+Error requirements
+
+Define typed errors rather than returning String.
+
+The exact internal representation is flexible, but callers must be able to distinguish at least:
+
+* JSON syntax failure;
+* unknown schema version;
+* unknown identifier;
+* duplicate capability;
+* invalid version;
+* structural document failure.
+
+Errors must not panic and must not include source handler arguments or other unrelated sensitive data.
+
+Required tests
+
+Add tests proving:
+
+1. A minimal RuntimeInformationV1 serializes successfully.
+2. The serialized document contains schema version 1.
+3. Runtime identity fields use their stable identifiers.
+4. ClientCertificateV1 serializes as "client-certificate-v1".
+5. Capability ordering is deterministic.
+6. No capability appears more than once.
+7. Resume registration serializes as true or false correctly.
+8. Serialization does not invoke acquisition or resume handlers.
+9. A serialize/deserialize round trip preserves equality.
+10. Invalid JSON is rejected.
+11. Missing required fields are rejected.
+12. Unknown fields are rejected.
+13. Unknown schema versions are rejected.
+14. Unknown protocols are rejected.
+15. Unknown operations are rejected.
+16. Unknown capabilities are rejected.
+17. Duplicate capabilities are rejected.
+18. Zero contract versions are rejected.
+19. Identity contract version 2 and descriptor contract version 1 survive a round trip without compatibility rejection.
+20. Existing descriptor, capability, resume, identity, and in-memory runtime-information tests continue to pass.
+
+Preserve existing external behavior
+
+Do not change:
+
+* source scaffolding;
+* generated implementation crates;
+* source create;
+* source build;
+* runtime publication;
+* CLI commands or output;
+* MZA configuration;
+* Protocol 1;
+* lexicon-bundle;
+* installer behavior;
+* bundle inputs;
+* installed paths.
+
+lexicon-bundle remains a binary installer compiled through cargo-bundler-v0.1.0.
+
+Validation
+
+Run:
+
+cargo test -p lexicon-core --quiet
+
+Run:
+
+cargo test --workspace --quiet
+
+If the external MZA checkout is available, run:
+
+bash automation/build_bundle_install/build_bundle_install.sh
+
+If the known MZA dependency is unavailable, report that blocker separately without changing MZA or installer code.
+
+Explicit exclusions
+
+Do not implement:
+
+* runner::run;
+* managed-runner generation;
+* a --runtime-information command;
+* writing runtime information to stdout;
+* subprocess probing;
+* probe timeouts;
+* Core capability availability;
+* capability compatibility checking;
+* build-time admission;
+* parent runtime admission;
+* child runtime admission;
+* invocation envelopes;
+* runtime.json;
+* executable hashing;
+* workspace migration;
+* source-library scaffolding;
+* processing runtime information;
+* HTTP transport;
+* raw recording;
+* sessions;
+* supervision;
+* __operator-host.
+
+Completion report
+
+After completion, replace current.md with a report containing:
+
+* files created and changed;
+* the exact JSON document structure;
+* the schema-version constant;
+* encoding and decoding APIs;
+* typed error representation;
+* every stable identifier accepted;
+* deterministic capability-ordering behavior;
+* round-trip test results;
+* every malformed-document rejection result;
+* confirmation that handlers are never serialized or invoked;
+* confirmation that compatibility values remain independent;
+* Core and workspace test results;
+* bundle/install result or the known external-MZA blocker.
+
+Then stop. Do not add the runtime probe or managed runner.
