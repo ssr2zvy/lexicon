@@ -1,5 +1,7 @@
 mod identity;
 pub mod information;
 
-pub use identity::{RuntimeIdentity, RuntimeOperation, RuntimeProtocol};
-pub use information::RuntimeInformationV1;
+pub use identity::{RuntimeIdentifierError, RuntimeIdentity, RuntimeOperation, RuntimeProtocol};
+pub use information::{
+    RuntimeInformationDecodingError, RuntimeInformationEncodingError, RuntimeInformationV1,
+};

@@ -2,18 +2,12 @@ use std::ffi::OsString;
 
 use crate::HttpAcquisitionContext;
 
-use super::{HttpCapability, HttpCapabilitySet};
 use super::error::AcquisitionResult;
+use super::{HttpCapability, HttpCapabilitySet};
 
-pub type HttpAcquireFn = fn(
-    &mut HttpAcquisitionContext,
-    &[OsString],
-) -> AcquisitionResult<()>;
+pub type HttpAcquireFn = fn(&mut HttpAcquisitionContext, &[OsString]) -> AcquisitionResult<()>;
 
-pub type HttpResumeFn = fn(
-    &mut HttpAcquisitionContext,
-    &[OsString],
-) -> AcquisitionResult<()>;
+pub type HttpResumeFn = fn(&mut HttpAcquisitionContext, &[OsString]) -> AcquisitionResult<()>;
 
 #[derive(Clone, Copy)]
 pub struct HttpSourceContractV1 {
@@ -84,8 +78,8 @@ mod tests {
     }
 
     const SOURCE: HttpSourceContractV1 = HttpSourceContractV1::new(acquire_handler);
-    const SOURCE_WITH_CAPABILITY: HttpSourceContractV1 = HttpSourceContractV1::new(acquire_handler)
-        .requires(HttpCapability::ClientCertificateV1);
+    const SOURCE_WITH_CAPABILITY: HttpSourceContractV1 =
+        HttpSourceContractV1::new(acquire_handler).requires(HttpCapability::ClientCertificateV1);
     const SOURCE_WITH_RESUME: HttpSourceContractV1 = HttpSourceContractV1::new(acquire_handler)
         .with_resume(resume_handler)
         .requires(HttpCapability::ClientCertificateV1);
@@ -95,7 +89,11 @@ mod tests {
         let contract = HttpSourceContractV1::new(acquire_handler);
 
         assert_eq!(contract.required_capabilities(), HttpCapabilitySet::empty());
-        assert!(!contract.required_capabilities().contains(HttpCapability::ClientCertificateV1));
+        assert!(
+            !contract
+                .required_capabilities()
+                .contains(HttpCapability::ClientCertificateV1)
+        );
     }
 
     #[test]

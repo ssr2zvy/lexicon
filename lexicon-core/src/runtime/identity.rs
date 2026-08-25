@@ -1,24 +1,38 @@
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-)]
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeIdentifierError {
+    UnknownIdentifier { kind: &'static str, value: String },
+}
+
+impl RuntimeIdentifierError {
+    pub fn unknown(kind: &'static str, value: impl Into<String>) -> Self {
+        Self::UnknownIdentifier {
+            kind,
+            value: value.into(),
+        }
+    }
+}
+
+impl fmt::Display for RuntimeIdentifierError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownIdentifier { kind, value } => {
+                write!(formatter, "unknown {kind} identifier: {value}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RuntimeIdentifierError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RuntimeProtocol {
     Http,
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RuntimeOperation {
     Acquisition,
@@ -30,6 +44,13 @@ impl RuntimeProtocol {
             Self::Http => "http",
         }
     }
+
+    pub fn from_identifier(value: &str) -> Result<Self, RuntimeIdentifierError> {
+        match value {
+            "http" => Ok(Self::Http),
+            _ => Err(RuntimeIdentifierError::unknown("protocol", value)),
+        }
+    }
 }
 
 impl RuntimeOperation {
@@ -38,16 +59,16 @@ impl RuntimeOperation {
             Self::Acquisition => "acquisition",
         }
     }
+
+    pub fn from_identifier(value: &str) -> Result<Self, RuntimeIdentifierError> {
+        match value {
+            "acquisition" => Ok(Self::Acquisition),
+            _ => Err(RuntimeIdentifierError::unknown("operation", value)),
+        }
+    }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RuntimeIdentity {
     source_name: &'static str,
     protocol: RuntimeProtocol,
@@ -56,16 +77,27 @@ pub struct RuntimeIdentity {
 }
 
 impl RuntimeIdentity {
-    pub const fn http_acquisition(
+    pub const fn from_parts(
         source_name: &'static str,
+        protocol: RuntimeProtocol,
+        operation: RuntimeOperation,
         source_contract_version: u32,
     ) -> Self {
         Self {
             source_name,
-            protocol: RuntimeProtocol::Http,
-            operation: RuntimeOperation::Acquisition,
+            protocol,
+            operation,
             source_contract_version,
         }
+    }
+
+    pub const fn http_acquisition(source_name: &'static str, source_contract_version: u32) -> Self {
+        Self::from_parts(
+            source_name,
+            RuntimeProtocol::Http,
+            RuntimeOperation::Acquisition,
+            source_contract_version,
+        )
     }
 
     pub const fn source_name(&self) -> &'static str {
@@ -87,7 +119,7 @@ impl RuntimeIdentity {
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeIdentity, RuntimeOperation, RuntimeProtocol};
+    use super::{RuntimeIdentifierError, RuntimeIdentity, RuntimeOperation, RuntimeProtocol};
 
     #[test]
     fn runtime_identity_http_acquisition_works_in_const() {
@@ -121,9 +153,39 @@ mod tests {
     }
 
     #[test]
+    fn runtime_protocol_from_identifier_accepts_known_value() {
+        assert_eq!(
+            RuntimeProtocol::from_identifier("http"),
+            Ok(RuntimeProtocol::Http)
+        );
+    }
+
+    #[test]
+    fn runtime_operation_from_identifier_accepts_known_value() {
+        assert_eq!(
+            RuntimeOperation::from_identifier("acquisition"),
+            Ok(RuntimeOperation::Acquisition)
+        );
+    }
+
+    #[test]
+    fn runtime_identifier_parse_rejects_unknown_values() {
+        assert!(matches!(
+            RuntimeProtocol::from_identifier("https"),
+            Err(RuntimeIdentifierError::UnknownIdentifier { .. })
+        ));
+        assert!(matches!(
+            RuntimeOperation::from_identifier("resume"),
+            Err(RuntimeIdentifierError::UnknownIdentifier { .. })
+        ));
+    }
+
+    #[test]
     fn runtime_identity_types_are_the_same() {
-        let left: crate::runtime::RuntimeIdentity = crate::http::RuntimeIdentity::http_acquisition("example-source", 1);
-        let right: crate::http::RuntimeIdentity = crate::runtime::RuntimeIdentity::http_acquisition("example-source", 1);
+        let left: crate::runtime::RuntimeIdentity =
+            crate::http::RuntimeIdentity::http_acquisition("example-source", 1);
+        let right: crate::http::RuntimeIdentity =
+            crate::runtime::RuntimeIdentity::http_acquisition("example-source", 1);
 
         assert_eq!(left, right);
     }

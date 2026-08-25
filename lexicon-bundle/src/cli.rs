@@ -164,11 +164,15 @@ fn read_line(prompt: &str) -> String {
 
 #[allow(dead_code)]
 fn prompt_default_yes(question: &str) -> bool {
-    let answer = read_line(&format!("{question} [Y/n] ")).trim().to_lowercase();
+    let answer = read_line(&format!("{question} [Y/n] "))
+        .trim()
+        .to_lowercase();
     answer.is_empty() || answer == "y" || answer == "yes"
 }
 
 fn prompt_default_no(question: &str) -> bool {
-    let answer = read_line(&format!("{question} [y/N] ")).trim().to_lowercase();
+    let answer = read_line(&format!("{question} [y/N] "))
+        .trim()
+        .to_lowercase();
     answer == "y" || answer == "yes"
 }
