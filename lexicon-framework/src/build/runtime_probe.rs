@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+use lexicon_core::processing::{
+    ProcessingRuntimeCompatibilityError, ProcessingRuntimeInformationV1,
+};
 use lexicon_core::protocols::http::runner::RUNTIME_INFORMATION_PROBE_ARGUMENT;
 use lexicon_core::runtime::{
     RuntimeCompatibilityError, RuntimeIdentity, RuntimeInformationDecodingError, RuntimeInformationV1,
@@ -34,6 +37,17 @@ impl AdmittedRuntimeInformation {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedProcessingRuntimeInformation {
+    information: ProcessingRuntimeInformationV1,
+}
+
+impl AdmittedProcessingRuntimeInformation {
+    pub fn information(&self) -> &ProcessingRuntimeInformationV1 {
+        &self.information
+    }
+}
+
 #[derive(Debug)]
 pub enum RuntimeProbeAdmissionError {
     OutputTooLarge {
@@ -46,6 +60,20 @@ pub enum RuntimeProbeAdmissionError {
     InvalidOutputBoundary,
     Decode(RuntimeInformationDecodingError),
     Incompatible(RuntimeCompatibilityError),
+}
+
+#[derive(Debug)]
+pub enum ProcessingRuntimeProbeAdmissionError {
+    OutputTooLarge {
+        maximum: usize,
+        actual: usize,
+    },
+    EmptyOutput,
+    ContainsNul,
+    InvalidUtf8(std::str::Utf8Error),
+    InvalidOutputBoundary,
+    Decode(lexicon_core::processing::ProcessingRuntimeInformationDecodingError),
+    Incompatible(ProcessingRuntimeCompatibilityError),
 }
 
 impl fmt::Display for RuntimeProbeAdmissionError {
@@ -66,6 +94,24 @@ impl fmt::Display for RuntimeProbeAdmissionError {
     }
 }
 
+impl fmt::Display for ProcessingRuntimeProbeAdmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutputTooLarge { maximum, actual } => write!(
+                formatter,
+                "processing runtime information probe output exceeds {} bytes (actual: {actual})",
+                maximum
+            ),
+            Self::EmptyOutput => formatter.write_str("processing runtime information probe output is empty"),
+            Self::ContainsNul => formatter.write_str("processing runtime information probe output contains a NUL byte"),
+            Self::InvalidUtf8(error) => write!(formatter, "processing runtime information probe output is not valid UTF-8: {error}"),
+            Self::InvalidOutputBoundary => formatter.write_str("processing runtime information probe output does not match the required exact boundary"),
+            Self::Decode(error) => write!(formatter, "processing runtime information probe decode failed: {error}"),
+            Self::Incompatible(error) => write!(formatter, "processing runtime information probe compatibility validation failed: {error}"),
+        }
+    }
+}
+
 impl std::error::Error for RuntimeProbeAdmissionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -77,6 +123,67 @@ impl std::error::Error for RuntimeProbeAdmissionError {
             | Self::ContainsNul
             | Self::InvalidOutputBoundary => None,
         }
+    }
+}
+
+impl std::error::Error for ProcessingRuntimeProbeAdmissionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidUtf8(error) => Some(error),
+            Self::Decode(error) => Some(error),
+            Self::Incompatible(error) => Some(error),
+            Self::OutputTooLarge { .. }
+            | Self::EmptyOutput
+            | Self::ContainsNul
+            | Self::InvalidOutputBoundary => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum RuntimeProbeTransportError {
+    Spawn {
+        source: std::io::Error,
+    },
+    Wait {
+        source: std::io::Error,
+    },
+    Timeout {
+        timeout: Duration,
+        cleanup_error: Option<String>,
+    },
+    StdoutRead {
+        source: std::io::Error,
+    },
+    StderrRead {
+        source: std::io::Error,
+    },
+    StdoutTooLarge {
+        maximum: usize,
+    },
+    StderrTooLarge {
+        maximum: usize,
+    },
+    UnsuccessfulExit {
+        status: ExitStatus,
+        stderr: Vec<u8>,
+        stderr_truncated: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedRuntimeProbe {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl CapturedRuntimeProbe {
+    pub fn stdout(&self) -> &[u8] {
+        &self.stdout
+    }
+
+    pub fn stderr(&self) -> &[u8] {
+        &self.stderr
     }
 }
 
@@ -112,6 +219,38 @@ pub enum RuntimeProbeExecutionError {
     Admission(RuntimeProbeAdmissionError),
 }
 
+#[derive(Debug)]
+pub enum ProcessingRuntimeProbeExecutionError {
+    Spawn {
+        source: std::io::Error,
+    },
+    Wait {
+        source: std::io::Error,
+    },
+    Timeout {
+        timeout: Duration,
+        cleanup_error: Option<String>,
+    },
+    StdoutRead {
+        source: std::io::Error,
+    },
+    StderrRead {
+        source: std::io::Error,
+    },
+    StdoutTooLarge {
+        maximum: usize,
+    },
+    StderrTooLarge {
+        maximum: usize,
+    },
+    UnsuccessfulExit {
+        status: ExitStatus,
+        stderr: Vec<u8>,
+        stderr_truncated: bool,
+    },
+    Admission(ProcessingRuntimeProbeAdmissionError),
+}
+
 impl fmt::Display for RuntimeProbeExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -134,7 +273,45 @@ impl fmt::Display for RuntimeProbeExecutionError {
     }
 }
 
+impl fmt::Display for ProcessingRuntimeProbeExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Spawn { source } => write!(formatter, "failed to spawn processing runtime information probe: {source}"),
+            Self::Wait { source } => write!(formatter, "failed waiting for processing runtime information probe to exit: {source}"),
+            Self::Timeout { timeout, cleanup_error } => {
+                let mut message = format!("processing runtime information probe timed out after {timeout:?}");
+                if let Some(cleanup_error) = cleanup_error {
+                    message.push_str(&format!(" (cleanup: {cleanup_error})"));
+                }
+                formatter.write_str(&message)
+            }
+            Self::StdoutRead { source } => write!(formatter, "failed reading stdout from processing runtime information probe: {source}"),
+            Self::StderrRead { source } => write!(formatter, "failed reading stderr from processing runtime information probe: {source}"),
+            Self::StdoutTooLarge { maximum } => write!(formatter, "processing runtime information probe stdout exceeded {maximum} bytes"),
+            Self::StderrTooLarge { maximum } => write!(formatter, "processing runtime information probe stderr exceeded {maximum} bytes"),
+            Self::UnsuccessfulExit { status, .. } => write!(formatter, "processing runtime information probe exited unsuccessfully: {status}"),
+            Self::Admission(error) => write!(formatter, "processing runtime information probe output was rejected: {error}"),
+        }
+    }
+}
+
 impl std::error::Error for RuntimeProbeExecutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Spawn { source } => Some(source),
+            Self::Wait { source } => Some(source),
+            Self::StdoutRead { source } => Some(source),
+            Self::StderrRead { source } => Some(source),
+            Self::Timeout { .. }
+            | Self::StdoutTooLarge { .. }
+            | Self::StderrTooLarge { .. }
+            | Self::UnsuccessfulExit { .. }
+            | Self::Admission(_) => None,
+        }
+    }
+}
+
+impl std::error::Error for ProcessingRuntimeProbeExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Spawn { source } => Some(source),
@@ -163,31 +340,74 @@ fn drain_bounded_stream<R: Read>(reader: R, maximum: usize) -> io::Result<Bounde
             Err(error) => return Err(error),
         };
 
-        let mut consumed = 0;
-        while consumed < bytes_read {
-            if retained.len() >= maximum {
-                truncated = true;
-                break;
-            }
-            let remaining_capacity = maximum - retained.len();
-            let available = bytes_read - consumed;
-            let chunk_len = remaining_capacity.min(available);
-            retained.extend_from_slice(&buffer[consumed..consumed + chunk_len]);
-            consumed += chunk_len;
-            if retained.len() == maximum && consumed < bytes_read {
-                truncated = true;
-            }
+        if retained.len() >= maximum {
+            truncated = true;
+            continue;
+        }
+
+        let allowed = maximum - retained.len();
+        let chunk_len = allowed.min(bytes_read);
+        retained.extend_from_slice(&buffer[..chunk_len]);
+        if bytes_read > chunk_len {
+            truncated = true;
         }
     }
 
     Ok(BoundedCapturedStream { retained, truncated })
 }
 
-pub(crate) fn probe_http_runtime_information_with_timeout(
+fn map_runtime_probe_transport_error(error: RuntimeProbeTransportError) -> RuntimeProbeExecutionError {
+    match error {
+        RuntimeProbeTransportError::Spawn { source } => RuntimeProbeExecutionError::Spawn { source },
+        RuntimeProbeTransportError::Wait { source } => RuntimeProbeExecutionError::Wait { source },
+        RuntimeProbeTransportError::Timeout { timeout, cleanup_error } => {
+            RuntimeProbeExecutionError::Timeout { timeout, cleanup_error }
+        }
+        RuntimeProbeTransportError::StdoutRead { source } => RuntimeProbeExecutionError::StdoutRead { source },
+        RuntimeProbeTransportError::StderrRead { source } => RuntimeProbeExecutionError::StderrRead { source },
+        RuntimeProbeTransportError::StdoutTooLarge { maximum } => {
+            RuntimeProbeExecutionError::StdoutTooLarge { maximum }
+        }
+        RuntimeProbeTransportError::StderrTooLarge { maximum } => {
+            RuntimeProbeExecutionError::StderrTooLarge { maximum }
+        }
+        RuntimeProbeTransportError::UnsuccessfulExit { status, stderr, stderr_truncated } => {
+            RuntimeProbeExecutionError::UnsuccessfulExit { status, stderr, stderr_truncated }
+        }
+    }
+}
+
+fn map_processing_runtime_probe_transport_error(
+    error: RuntimeProbeTransportError,
+) -> ProcessingRuntimeProbeExecutionError {
+    match error {
+        RuntimeProbeTransportError::Spawn { source } => ProcessingRuntimeProbeExecutionError::Spawn { source },
+        RuntimeProbeTransportError::Wait { source } => ProcessingRuntimeProbeExecutionError::Wait { source },
+        RuntimeProbeTransportError::Timeout { timeout, cleanup_error } => {
+            ProcessingRuntimeProbeExecutionError::Timeout { timeout, cleanup_error }
+        }
+        RuntimeProbeTransportError::StdoutRead { source } => {
+            ProcessingRuntimeProbeExecutionError::StdoutRead { source }
+        }
+        RuntimeProbeTransportError::StderrRead { source } => {
+            ProcessingRuntimeProbeExecutionError::StderrRead { source }
+        }
+        RuntimeProbeTransportError::StdoutTooLarge { maximum } => {
+            ProcessingRuntimeProbeExecutionError::StdoutTooLarge { maximum }
+        }
+        RuntimeProbeTransportError::StderrTooLarge { maximum } => {
+            ProcessingRuntimeProbeExecutionError::StderrTooLarge { maximum }
+        }
+        RuntimeProbeTransportError::UnsuccessfulExit { status, stderr, stderr_truncated } => {
+            ProcessingRuntimeProbeExecutionError::UnsuccessfulExit { status, stderr, stderr_truncated }
+        }
+    }
+}
+
+fn execute_runtime_information_probe(
     executable: &Path,
-    expected_identity: RuntimeIdentity,
     timeout: Duration,
-) -> Result<AdmittedRuntimeInformation, RuntimeProbeExecutionError> {
+) -> Result<CapturedRuntimeProbe, RuntimeProbeTransportError> {
     let mut child = {
         let mut command = Command::new(executable);
         command
@@ -201,7 +421,7 @@ pub(crate) fn probe_http_runtime_information_with_timeout(
             command.process_group(0);
         }
 
-        command.spawn().map_err(|source| RuntimeProbeExecutionError::Spawn { source })?
+        command.spawn().map_err(|source| RuntimeProbeTransportError::Spawn { source })?
     };
 
     let stdout = child.stdout.take().expect("stdout piped for runtime probe");
@@ -226,39 +446,39 @@ pub(crate) fn probe_http_runtime_information_with_timeout(
                 if Instant::now() >= deadline {
                     timed_out = true;
 
-                   #[cfg(unix)]
-                   {
-                       let group_id = child.id() as i32;
-                       let kill_result = Command::new("kill")
-                           .arg("-KILL")
-                           .arg(format!("-{group_id}"))
-                           .status();
-                       if let Err(error) = kill_result {
-                           timeout_error = Some(format!("process-group kill failed: {error}"));
-                       }
-                   }
+                    #[cfg(unix)]
+                    {
+                        let group_id = child.id() as i32;
+                        let kill_result = Command::new("kill")
+                            .arg("-KILL")
+                            .arg(format!("-{group_id}"))
+                            .status();
+                        if let Err(error) = kill_result {
+                            timeout_error = Some(format!("process-group kill failed: {error}"));
+                        }
+                    }
 
-                   #[cfg(not(unix))]
-                   {
-                       if let Err(error) = child.kill() {
-                           timeout_error = Some(format!("kill failed: {error}"));
-                       }
-                   }
+                    #[cfg(not(unix))]
+                    {
+                        if let Err(error) = child.kill() {
+                            timeout_error = Some(format!("kill failed: {error}"));
+                        }
+                    }
 
-                   match child.wait() {
-                       Ok(status) => {
-                           exit_status = Some(status);
-                       }
-                       Err(error) => {
-                           if let Some(existing) = timeout_error.as_mut() {
-                               existing.push_str(&format!("; wait failed: {error}"));
-                           } else {
-                               timeout_error = Some(format!("wait failed: {error}"));
-                           }
-                       }
-                   }
-                   break;
-               }
+                    match child.wait() {
+                        Ok(status) => {
+                            exit_status = Some(status);
+                        }
+                        Err(error) => {
+                            if let Some(existing) = timeout_error.as_mut() {
+                                existing.push_str(&format!("; wait failed: {error}"));
+                            } else {
+                                timeout_error = Some(format!("wait failed: {error}"));
+                            }
+                        }
+                    }
+                    break;
+                }
 
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 thread::sleep(remaining.min(Duration::from_millis(10)));
@@ -313,22 +533,22 @@ pub(crate) fn probe_http_runtime_information_with_timeout(
     };
 
     if timed_out {
-        return Err(RuntimeProbeExecutionError::Timeout {
+        return Err(RuntimeProbeTransportError::Timeout {
             timeout,
             cleanup_error: timeout_error,
         });
     }
 
     if let Some(source) = wait_error {
-        return Err(RuntimeProbeExecutionError::Wait { source });
+        return Err(RuntimeProbeTransportError::Wait { source });
     }
 
     if let Some(source) = stdout_read_error {
-        return Err(RuntimeProbeExecutionError::StdoutRead { source });
+        return Err(RuntimeProbeTransportError::StdoutRead { source });
     }
 
     if let Some(source) = stderr_read_error {
-        return Err(RuntimeProbeExecutionError::StderrRead { source });
+        return Err(RuntimeProbeTransportError::StderrRead { source });
     }
 
     let stdout_bytes = stdout_capture
@@ -344,7 +564,7 @@ pub(crate) fn probe_http_runtime_information_with_timeout(
         .as_ref()
         .is_some_and(|stream| stream.truncated)
     {
-        return Err(RuntimeProbeExecutionError::StdoutTooLarge {
+        return Err(RuntimeProbeTransportError::StdoutTooLarge {
             maximum: MAX_RUNTIME_INFORMATION_PROBE_BYTES,
         });
     }
@@ -353,7 +573,7 @@ pub(crate) fn probe_http_runtime_information_with_timeout(
         .as_ref()
         .is_some_and(|stream| stream.truncated)
     {
-        return Err(RuntimeProbeExecutionError::StderrTooLarge {
+        return Err(RuntimeProbeTransportError::StderrTooLarge {
             maximum: MAX_RUNTIME_INFORMATION_PROBE_STDERR_BYTES,
         });
     }
@@ -361,14 +581,14 @@ pub(crate) fn probe_http_runtime_information_with_timeout(
     let exit_status = match exit_status {
         Some(status) => status,
         None => {
-            return Err(RuntimeProbeExecutionError::Wait {
+            return Err(RuntimeProbeTransportError::Wait {
                 source: std::io::Error::new(std::io::ErrorKind::Other, "runtime information probe exited without a status"),
             });
         }
     };
 
     if !exit_status.success() {
-        return Err(RuntimeProbeExecutionError::UnsuccessfulExit {
+        return Err(RuntimeProbeTransportError::UnsuccessfulExit {
             status: exit_status,
             stderr: stderr_bytes,
             stderr_truncated: stderr_capture
@@ -377,7 +597,57 @@ pub(crate) fn probe_http_runtime_information_with_timeout(
         });
     }
 
-    match admit_http_runtime_information_probe(expected_identity, &stdout_bytes) {
+    Ok(CapturedRuntimeProbe {
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    })
+}
+
+impl std::error::Error for RuntimeProbeTransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Spawn { source } => Some(source),
+            Self::Wait { source } => Some(source),
+            Self::StdoutRead { source } => Some(source),
+            Self::StderrRead { source } => Some(source),
+            Self::Timeout { .. }
+            | Self::StdoutTooLarge { .. }
+            | Self::StderrTooLarge { .. }
+            | Self::UnsuccessfulExit { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for RuntimeProbeTransportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Spawn { source } => write!(formatter, "failed to spawn runtime information probe: {source}"),
+            Self::Wait { source } => write!(formatter, "failed waiting for runtime information probe to exit: {source}"),
+            Self::Timeout { timeout, cleanup_error } => {
+                let mut message = format!("runtime information probe timed out after {timeout:?}");
+                if let Some(cleanup_error) = cleanup_error {
+                    message.push_str(&format!(" (cleanup: {cleanup_error})"));
+                }
+                formatter.write_str(&message)
+            }
+            Self::StdoutRead { source } => write!(formatter, "failed reading stdout from runtime information probe: {source}"),
+            Self::StderrRead { source } => write!(formatter, "failed reading stderr from runtime information probe: {source}"),
+            Self::StdoutTooLarge { maximum } => write!(formatter, "runtime information probe stdout exceeded {maximum} bytes"),
+            Self::StderrTooLarge { maximum } => write!(formatter, "runtime information probe stderr exceeded {maximum} bytes"),
+            Self::UnsuccessfulExit { status, .. } => write!(formatter, "runtime information probe exited unsuccessfully: {status}"),
+        }
+    }
+}
+
+pub(crate) fn probe_http_runtime_information_with_timeout(
+    executable: &Path,
+    expected_identity: RuntimeIdentity,
+    timeout: Duration,
+) -> Result<AdmittedRuntimeInformation, RuntimeProbeExecutionError> {
+    let captured = execute_runtime_information_probe(executable, timeout)
+        .map_err(map_runtime_probe_transport_error)?;
+
+    match admit_http_runtime_information_probe(expected_identity, captured.stdout()) {
         Ok(admitted) => Ok(admitted),
         Err(error) => Err(RuntimeProbeExecutionError::Admission(error)),
     }
@@ -447,6 +717,86 @@ pub fn admit_http_runtime_information_probe(
         .map_err(RuntimeProbeAdmissionError::Incompatible)?;
 
     Ok(AdmittedRuntimeInformation { information })
+}
+
+pub fn admit_processing_runtime_information_probe(
+    expected_identity: RuntimeIdentity,
+    stdout: &[u8],
+) -> Result<AdmittedProcessingRuntimeInformation, ProcessingRuntimeProbeAdmissionError> {
+    if stdout.len() > MAX_RUNTIME_INFORMATION_PROBE_BYTES {
+        return Err(ProcessingRuntimeProbeAdmissionError::OutputTooLarge {
+            maximum: MAX_RUNTIME_INFORMATION_PROBE_BYTES,
+            actual: stdout.len(),
+        });
+    }
+
+    if stdout.is_empty() {
+        return Err(ProcessingRuntimeProbeAdmissionError::EmptyOutput);
+    }
+
+    if stdout.iter().any(|byte| *byte == 0) {
+        return Err(ProcessingRuntimeProbeAdmissionError::ContainsNul);
+    }
+
+    let text = std::str::from_utf8(stdout).map_err(ProcessingRuntimeProbeAdmissionError::InvalidUtf8)?;
+
+    if !text.ends_with('\n') {
+        return Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    if text.bytes().filter(|byte| *byte == b'\n').count() != 1 {
+        return Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    if text.starts_with('\n') || text.starts_with('\r') || text.contains('\r') {
+        return Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    let json_text = &text[..text.len() - 1];
+    if json_text
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_whitespace())
+        || json_text
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_whitespace())
+    {
+        return Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    let information = ProcessingRuntimeInformationV1::from_json(json_text)
+        .map_err(ProcessingRuntimeProbeAdmissionError::Decode)?;
+    information
+        .validate_compatibility(expected_identity)
+        .map_err(ProcessingRuntimeProbeAdmissionError::Incompatible)?;
+
+    Ok(AdmittedProcessingRuntimeInformation { information })
+}
+
+pub fn probe_processing_runtime_information(
+    executable: &Path,
+    expected_identity: RuntimeIdentity,
+) -> Result<AdmittedProcessingRuntimeInformation, ProcessingRuntimeProbeExecutionError> {
+    probe_processing_runtime_information_with_timeout(
+        executable,
+        expected_identity,
+        RUNTIME_INFORMATION_PROBE_TIMEOUT,
+    )
+}
+
+pub(crate) fn probe_processing_runtime_information_with_timeout(
+    executable: &Path,
+    expected_identity: RuntimeIdentity,
+    timeout: Duration,
+) -> Result<AdmittedProcessingRuntimeInformation, ProcessingRuntimeProbeExecutionError> {
+    let captured = execute_runtime_information_probe(executable, timeout)
+        .map_err(map_processing_runtime_probe_transport_error)?;
+
+    match admit_processing_runtime_information_probe(expected_identity, captured.stdout()) {
+        Ok(admitted) => Ok(admitted),
+        Err(error) => Err(ProcessingRuntimeProbeExecutionError::Admission(error)),
+    }
 }
 
 #[cfg(test)]

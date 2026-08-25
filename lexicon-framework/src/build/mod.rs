@@ -15,9 +15,12 @@ pub use runtime_manifest::{
 };
 pub use runtime_probe::{
     MAX_RUNTIME_INFORMATION_PROBE_BYTES, MAX_RUNTIME_INFORMATION_PROBE_STDERR_BYTES,
-    RUNTIME_INFORMATION_PROBE_TIMEOUT, AdmittedRuntimeInformation, RuntimeProbeAdmissionError,
+    RUNTIME_INFORMATION_PROBE_TIMEOUT, AdmittedProcessingRuntimeInformation,
+    AdmittedRuntimeInformation, ProcessingRuntimeProbeAdmissionError,
+    ProcessingRuntimeProbeExecutionError, RuntimeProbeAdmissionError,
     RuntimeProbeExecutionError, admit_http_runtime_information_probe,
-    probe_http_runtime_information,
+    admit_processing_runtime_information_probe, probe_http_runtime_information,
+    probe_processing_runtime_information,
 };
 pub use runtime_staging::{
     RuntimeBundleStagingError, StagedHttpRuntimeBundle, stage_verified_http_runtime_bundle,
