@@ -5,6 +5,8 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
+pub mod build;
+
 #[derive(Debug, Deserialize)]
 struct LexiconProjectConfig {
     schema_version: Option<u32>,
