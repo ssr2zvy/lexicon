@@ -100,7 +100,7 @@ mod tests {
     fn resume_handler_is_none_by_default() {
         let contract = HttpSourceContractV1::new(acquire_handler);
 
-        assert_eq!(contract.resume_handler(), None);
+        assert!(contract.resume_handler().is_none());
     }
 
     #[test]

@@ -1,0 +1,111 @@
+error[E0308]: mismatched types
+  --> tests/ui/invalid_resume_handlers.rs:62:60
+   |
+62 |     let _ = HttpSourceContractV1::new(acquire).with_resume(async_resume);
+   |                                                ----------- ^^^^^^^^^^^^ expected fn pointer, found fn item
+   |                                                |
+   |                                                arguments to this method are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [OsString]) -> Result<(), AcquisitionError>`
+                 found fn item `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [OsString]) -> impl Future<Output = Result<(), AcquisitionError>> {async_resume}`
+note: method defined here
+  --> src/protocols/http/contract.rs
+   |
+   |     pub const fn with_resume(mut self, resume: HttpResumeFn) -> Self {
+   |                  ^^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/invalid_resume_handlers.rs:63:60
+   |
+63 |     let _ = HttpSourceContractV1::new(acquire).with_resume(context_by_value_resume);
+   |                                                ----------- ^^^^^^^^^^^^^^^^^^^^^^^ expected fn pointer, found fn item
+   |                                                |
+   |                                                arguments to this method are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [OsString]) -> Result<(), AcquisitionError>`
+                 found fn item `for<'a> fn(HttpAcquisitionContext, &'a [OsString]) -> Result<(), AcquisitionError> {context_by_value_resume}`
+note: method defined here
+  --> src/protocols/http/contract.rs
+   |
+   |     pub const fn with_resume(mut self, resume: HttpResumeFn) -> Self {
+   |                  ^^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/invalid_resume_handlers.rs:64:60
+   |
+64 |     let _ = HttpSourceContractV1::new(acquire).with_resume(immutable_context_resume);
+   |                                                ----------- ^^^^^^^^^^^^^^^^^^^^^^^^ types differ in mutability
+   |                                                |
+   |                                                arguments to this method are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [OsString]) -> Result<(), AcquisitionError>`
+                 found fn item `for<'a, 'b> fn(&'a HttpAcquisitionContext, &'b [OsString]) -> Result<(), AcquisitionError> {immutable_context_resume}`
+note: method defined here
+  --> src/protocols/http/contract.rs
+   |
+   |     pub const fn with_resume(mut self, resume: HttpResumeFn) -> Self {
+   |                  ^^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/invalid_resume_handlers.rs:65:60
+   |
+65 |     let _ = HttpSourceContractV1::new(acquire).with_resume(missing_osstring_slice_resume);
+   |                                                ----------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected fn pointer, found fn item
+   |                                                |
+   |                                                arguments to this method are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [OsString]) -> Result<(), AcquisitionError>`
+                 found fn item `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [String]) -> Result<(), AcquisitionError> {missing_osstring_slice_resume}`
+note: method defined here
+  --> src/protocols/http/contract.rs
+   |
+   |     pub const fn with_resume(mut self, resume: HttpResumeFn) -> Self {
+   |                  ^^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/invalid_resume_handlers.rs:66:60
+   |
+66 |     let _ = HttpSourceContractV1::new(acquire).with_resume(reversed_parameters_resume);
+   |                                                ----------- ^^^^^^^^^^^^^^^^^^^^^^^^^^ types differ in mutability
+   |                                                |
+   |                                                arguments to this method are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [OsString]) -> Result<(), AcquisitionError>`
+                 found fn item `for<'a, 'b> fn(&'a [OsString], &'b mut HttpAcquisitionContext) -> Result<(), AcquisitionError> {reversed_parameters_resume}`
+note: method defined here
+  --> src/protocols/http/contract.rs
+   |
+   |     pub const fn with_resume(mut self, resume: HttpResumeFn) -> Self {
+   |                  ^^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/invalid_resume_handlers.rs:67:60
+   |
+67 |     let _ = HttpSourceContractV1::new(acquire).with_resume(bool_return_resume);
+   |                                                ----------- ^^^^^^^^^^^^^^^^^^ expected fn pointer, found fn item
+   |                                                |
+   |                                                arguments to this method are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [OsString]) -> Result<(), AcquisitionError>`
+                 found fn item `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [OsString]) -> bool {bool_return_resume}`
+note: method defined here
+  --> src/protocols/http/contract.rs
+   |
+   |     pub const fn with_resume(mut self, resume: HttpResumeFn) -> Self {
+   |                  ^^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/invalid_resume_handlers.rs:68:60
+   |
+68 |     let _ = HttpSourceContractV1::new(acquire).with_resume(string_result_resume);
+   |                                                ----------- ^^^^^^^^^^^^^^^^^^^^ expected fn pointer, found fn item
+   |                                                |
+   |                                                arguments to this method are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [OsString]) -> Result<(), AcquisitionError>`
+                 found fn item `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [OsString]) -> Result<(), String> {string_result_resume}`
+note: method defined here
+  --> src/protocols/http/contract.rs
+   |
+   |     pub const fn with_resume(mut self, resume: HttpResumeFn) -> Self {
+   |                  ^^^^^^^^^^^
