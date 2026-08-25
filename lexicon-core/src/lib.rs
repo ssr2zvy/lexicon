@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 
+pub mod protocols;
+pub use protocols::http;
+
 pub struct HttpAcquisitionContext {
     pub source_directory: PathBuf,
     pub raw_data_directory: PathBuf,

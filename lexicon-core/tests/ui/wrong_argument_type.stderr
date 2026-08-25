@@ -1,0 +1,23 @@
+warning: unused import: `std::ffi::OsString`
+ --> tests/ui/wrong_argument_type.rs:1:5
+  |
+1 | use std::ffi::OsString;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+  --> tests/ui/wrong_argument_type.rs:10:39
+   |
+10 |     let _ = HttpSourceContractV1::new(acquire);
+   |             ------------------------- ^^^^^^^ expected fn pointer, found fn item
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected fn pointer `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [OsString]) -> Result<(), AcquisitionError>`
+                 found fn item `for<'a, 'b> fn(&'a mut HttpAcquisitionContext, &'b [String]) -> Result<(), AcquisitionError> {acquire}`
+note: associated function defined here
+  --> src/protocols/http/contract.rs
+   |
+   |     pub const fn new(acquire: HttpAcquireFn) -> Self {
+   |                  ^^^
