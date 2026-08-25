@@ -155,6 +155,29 @@ pub struct StagedHttpRuntimeBundle {
     manifest: RuntimeManifestV1,
 }
 
+#[derive(Debug)]
+pub(crate) struct RuntimeBundleStagingTransferError {
+    path: PathBuf,
+    source: io::Error,
+}
+
+impl fmt::Display for RuntimeBundleStagingTransferError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "failed to transfer staging directory '{}' into publication ownership: {}",
+            self.path.display(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for RuntimeBundleStagingTransferError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 impl StagedHttpRuntimeBundle {
     pub fn directory(&self) -> &Path {
         self.directory.path()
@@ -170,6 +193,10 @@ impl StagedHttpRuntimeBundle {
 
     pub fn manifest(&self) -> &RuntimeManifestV1 {
         &self.manifest
+    }
+
+    pub(crate) fn into_staging_directory(self) -> Result<PathBuf, RuntimeBundleStagingTransferError> {
+        Ok(self.directory.keep())
     }
 }
 
