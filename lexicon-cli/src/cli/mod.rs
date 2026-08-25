@@ -160,6 +160,18 @@ fn framework_binary_path(explicit_path: Option<&std::path::Path>) -> Result<Stri
         ));
     }
 
+    if let Some(path) = std::env::var_os("LEXICON_FRAMEWORK_PATH") {
+        let path = std::path::PathBuf::from(path);
+        if path.is_file() {
+            write_framework_path(&path)?;
+            return Ok(path.to_string_lossy().into_owned());
+        }
+        return Err(format!(
+            "LEXICON_FRAMEWORK_PATH was set to '{}' but the framework binary does not exist",
+            path.display()
+        ));
+    }
+
     if let Some(path) = read_framework_path()? {
         if path.is_file() {
             return Ok(path.to_string_lossy().into_owned());
