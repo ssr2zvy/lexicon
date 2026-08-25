@@ -4,7 +4,7 @@ use std::fmt;
 use crate::protocols::http::{HttpCapabilitySet, HttpSourceContractV1};
 use crate::runtime::{RuntimeIdentity, RuntimeInformationEncodingError, RuntimeInformationV1};
 
-pub const RUNTIME_INFORMATION_PROBE_ARGUMENT: &str = "--lexicon-runtime-information-v1";
+pub const RUNTIME_INFORMATION_PROBE_ARGUMENT: &str = crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeInformationProbeOutcome {
