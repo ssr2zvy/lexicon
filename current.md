@@ -1,154 +1,171 @@
-# Implementation report
+Current implementation request: processing runtime identity
 
-Implemented the reversible single-bundle publication leg as an internal crate-private primitive for lexicon-framework.
+Objective
 
-What changed
+Extend the canonical Core runtime identity model to represent HTTP processing runtimes.
 
-- Added the publication module structure at `lexicon-framework/src/publication/mod.rs`.
-- Added `lexicon-framework/src/publication/runtime_bundle_replacement.rs` with:
-  - `pub(crate) fn prepare_runtime_bundle_replacement(...)`
-  - `pub(crate) struct PreparedRuntimeBundleReplacement`
-  - `pub(crate) struct PublishedRuntimeBundle`
-  - `commit()` and `rollback()` methods with explicit state transitions
-  - best-effort rollback in `Drop` for prepared-but-uncommitted replacements
-  - destination backup handling using unique sibling backup paths
-  - parent synchronization and restoration semantics required for publication safety
-- Added the staging ownership transfer API on `StagedHttpRuntimeBundle` inside `lexicon-framework/src/build/runtime_staging.rs`:
-  - `pub(crate) fn into_staging_directory(self) -> Result<PathBuf, RuntimeBundleStagingTransferError>`
-- Kept all publication logic crate-private so no public single-runtime publication API was exposed.
+This is the first micro-step toward the processing side required before paired acquisition-and-processing publication can be implemented.
 
-Validation
+Do not add a processing descriptor, runner, build, staging, or publication coordinator yet.
 
-- Ran: `cargo test --workspace --quiet`
-- Result: pass (workspace tests successful)
+Required changes
 
-not per-file replacement.
+Update:
 
-Typed errors
+lexicon-core/src/runtime/identity.rs
 
-Define a crate-private error equivalent to:
+and its existing exports/tests.
 
-pub(crate) enum RuntimeBundleReplacementError {
-    InvalidDestination {
-        path: PathBuf,
-    },
-    InvalidDestinationParent {
-        path: PathBuf,
-    },
-    DestinationIsSymlink {
-        path: PathBuf,
-    },
-    Admission(
-        RuntimeBundleAdmissionError,
-    ),
-    BackupCollision {
-        path: PathBuf,
-    },
-    MoveExistingToBackup {
-        source_path: PathBuf,
-        backup_path: PathBuf,
-        source: std::io::Error,
-    },
-    TransferStagingOwnership {
-        source: RuntimeBundleStagingTransferError,
-    },
-    MoveStagedToDestination {
-        staging_path: PathBuf,
-        destination_path: PathBuf,
-        source: std::io::Error,
-        restore_error: Option<String>,
-    },
-    RemoveNewDestination {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    RestoreBackup {
-        backup_path: PathBuf,
-        destination_path: PathBuf,
-        source: std::io::Error,
-    },
-    RemoveBackup {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    SyncParent {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    InvalidState,
+Runtime operation
+
+Extend:
+
+pub enum RuntimeOperation {
+    Acquisition,
+    Processing,
 }
 
-Equivalent organization is acceptable.
+Stable identifiers must be:
 
-Implement:
+Acquisition → "acquisition"
+Processing  → "processing"
 
-std::fmt::Display
-std::error::Error
+Update:
 
-Do not return plain String, print diagnostics, or exit.
+RuntimeOperation::identifier()
+RuntimeOperation::from_identifier(...)
 
-Test seams
+so "processing" round-trips to RuntimeOperation::Processing.
 
-Use private filesystem-operation seams where necessary to deterministically fail:
+Continue rejecting:
 
-* moving the existing destination to backup;
-* moving staging into the destination;
-* restoring the backup;
-* deleting the backup;
-* synchronizing the parent.
+* unknown identifiers;
+* aliases;
+* capitalization differences;
+* surrounding whitespace.
 
-Do not expose these seams publicly.
+Processing identity constructor
+
+Add:
+
+impl RuntimeIdentity {
+    pub const fn http_processing(
+        source: &'static str,
+        source_contract_version: u32,
+    ) -> Self;
+}
+
+It must construct:
+
+source                  = supplied source
+protocol                = RuntimeProtocol::Http
+operation               = RuntimeOperation::Processing
+source_contract_version = supplied version
+
+Retain the existing acquisition constructor unchanged:
+
+RuntimeIdentity::http_acquisition(...)
+
+Accessors and equality
+
+Existing accessors must correctly expose processing identity values:
+
+source()
+protocol()
+operation()
+source_contract_version()
+
+Processing identities must participate in existing Debug, Clone, Copy, PartialEq, and Eq behavior.
+
+An acquisition identity and processing identity for the same source and contract version must not compare equal.
+
+Runtime-information JSON
+
+Because RuntimeInformationV1 already serializes RuntimeIdentity, update its structural encoding and decoding to support:
+
+{
+  "operation": "processing"
+}
+
+Requirements:
+
+* processing identity must serialize with "processing";
+* processing identity must decode successfully;
+* a processing identity must survive a JSON round trip;
+* unknown operation identifiers must remain rejected.
+
+Do not change:
+
+RUNTIME_INFORMATION_SCHEMA_VERSION
+
+Adding the already-planned processing operation does not create a new document schema.
+
+Compatibility behavior
+
+The existing compatibility validator must compare processing identities exactly like acquisition identities.
+
+Tests must prove:
+
+* expected processing and actual processing can match;
+* expected acquisition and actual processing produce IdentityMismatch;
+* expected processing and actual acquisition produce IdentityMismatch.
+
+Do not add processing-specific descriptor or capability validation.
+
+HTTP descriptor construction guard
+
+RuntimeInformationV1::from_http_source(...) currently represents an HTTP acquisition descriptor.
+
+Do not silently reinterpret it as a processing descriptor.
+
+If no type-level guard currently prevents supplying a processing identity to from_http_source(...), document that limitation in the completion report. Do not redesign the runtime-information hierarchy in this step.
+
+A later processing-descriptor step will define the proper construction path.
 
 Required tests
 
-Add tests proving:
+Add focused tests proving:
 
-1. Preparing with no previous destination installs the staged bundle.
-2. Preparing with an existing destination moves it to a unique backup.
-3. The destination after prepare contains the complete new bundle.
-4. The backup after prepare contains the complete old bundle.
-5. Prepare validates the staged bundle before changing the destination.
-6. Invalid staged admission leaves the old destination untouched.
-7. Failure moving the old destination leaves staging self-cleanable.
-8. Failure moving staging restores the old destination.
-9. A restore failure is retained with the primary move failure.
-10. Explicit rollback restores the complete previous bundle.
-11. Rollback with no previous destination removes the new destination.
-12. Explicit commit keeps the new destination.
-13. Commit removes the old backup.
-14. Commit failure does not falsely report publication success.
-15. Dropping a prepared replacement attempts rollback.
-16. Drop never panics.
-17. Existing destination symlinks are rejected.
-18. A missing destination parent is rejected.
-19. A parent path that is a file is rejected.
-20. Backup collisions are rejected without deleting the collision.
-21. No files are replaced individually.
-22. The new destination remains admissible after prepare.
-23. The restored old destination remains byte-for-byte unchanged after rollback.
-24. A committed destination remains admissible.
-25. The primitive is not publicly exported from lexicon-framework.
-26. Existing staging and admission tests remain unchanged.
-27. All workspace tests pass.
+1. RuntimeOperation::Processing.identifier() returns "processing".
+2. RuntimeOperation::from_identifier("processing") succeeds.
+3. Processing parsing rejects aliases and incorrect capitalization.
+4. RuntimeIdentity::http_processing(...) works in a constant.
+5. Its protocol is HTTP.
+6. Its operation is Processing.
+7. It preserves source identity.
+8. It preserves source contract version.
+9. Acquisition and processing identities are unequal.
+10. Processing identity serializes as "processing".
+11. Processing identity survives runtime-information JSON round trip.
+12. Unknown operation identifiers remain rejected.
+13. Matching processing identities pass exact identity comparison.
+14. Acquisition-versus-processing compatibility returns IdentityMismatch.
+15. Processing-versus-acquisition compatibility returns IdentityMismatch.
+16. Existing acquisition identity behavior remains unchanged.
+17. Existing runtime probe behavior remains unchanged.
+18. Existing framework tests continue to pass.
+19. All workspace tests pass.
 
-Tests may use different runtime identities for old and new bundle contents when admission expectations are supplied explicitly.
+Do not create fake additional protocols solely for testing.
 
 Preserve existing behavior
 
 Do not change:
 
-* Core runtime-information behavior;
+* acquisition descriptor behavior;
+* acquisition capabilities or resume handler;
 * runtime probing;
 * hashing;
 * verification;
 * manifest schema;
-* staging bundle shape;
+* staging;
+* runtime-bundle admission;
+* reversible publication leg;
 * source scaffolding;
-* source implementation crates;
 * source create;
 * source build;
 * Cargo invocation;
-* existing legacy publication flow;
+* legacy publication;
 * CLI behavior;
 * MZA;
 * Protocol 1;
@@ -165,7 +182,7 @@ Validation
 
 Run:
 
-cargo test -p lexicon-framework --quiet
+cargo test -p lexicon-core --quiet
 
 Run:
 
@@ -175,27 +192,32 @@ If the external MZA checkout is available, run:
 
 bash automation/build_bundle_install/build_bundle_install.sh
 
-If the MZA checkout remains unavailable, report it separately. Do not modify MZA or installer code.
+If it remains unavailable, report the known external blocker separately. Do not modify MZA or installer code.
 
 Explicit exclusions
 
 Do not implement:
 
-* the paired acquisition/processing coordinator;
+* ProcessingSourceContractV1;
+* processing handler signatures;
+* processing capabilities;
+* processing runtime-information construction;
+* processing probes;
+* processing verification;
+* processing manifests;
+* processing staging;
+* processing bundle admission;
+* paired publication;
 * public single-runtime publication;
 * integration with source build;
-* processing runtime staging;
-* processing runtime admission;
-* final runtime-directory naming policy;
-* Cargo build-plan changes;
-* managed-runner generation;
-* runner main.rs;
+* managed runners;
 * runner::run;
 * source workspace migration;
 * runtime execution;
 * invocation envelopes;
-* HTTP transport;
+* HTTP execution;
 * raw recording;
+* SQLite processing;
 * sessions;
 * supervision;
 * __operator-host.
@@ -204,20 +226,17 @@ Completion report
 
 After completion, replace current.md with a report containing:
 
-* files created and changed;
-* crate-private APIs;
-* staged ownership-transfer behavior;
-* prepared replacement state model;
-* exact prepare sequence;
-* commit behavior;
-* rollback behavior;
-* automatic drop rollback;
-* backup naming and collision behavior;
-* typed errors;
-* deterministic failure tests;
-* confirmation that the primitive is not publicly exposed;
-* confirmation that no paired publication or source build integration occurred;
-* framework and workspace test results;
+* files changed;
+* the updated RuntimeOperation;
+* stable processing identifier;
+* processing identity constructor;
+* constant-construction proof;
+* accessor and equality results;
+* runtime-information JSON round-trip results;
+* acquisition/processing compatibility mismatch results;
+* confirmation that acquisition behavior remains unchanged;
+* any remaining lack of a type-level guard in from_http_source(...);
+* Core and workspace test results;
 * bundle/install result or the known external-MZA blocker.
 
-Then stop. Do not implement the paired publication coordinator.
+Then stop. Do not add the processing descriptor.
