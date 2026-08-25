@@ -33,24 +33,25 @@
    - Keep the implementation aligned with the plan in Step 5.
    - Do not pivot to a new strategy without clear confirmation from the user if the plan is not producing the intended result.
 
-7. Validate using the required build script.
+7. Validate using the standard Cargo workflow.
    ```bash
-   bash automation/build_bundle_install/build_bundle_install.sh
+   cargo check --workspace
+   cargo test --workspace --quiet
    ```
-   - Do not run ad hoc `cargo` commands or custom installation flows during validation.
-   - If the script succeeds, the latest Lexicon CLI will be available.
-   - If the script fails, report the exact failing build or step.
+   - Prefer the normal Cargo validation commands over the bundle/install script when the script is unavailable or fails in this environment.
+   - If the standard Cargo validation succeeds, record the exact command output and any relevant warnings.
+   - If the validation fails, report the exact failing build or test step.
    - If this flow does not lead to the intended result, stop and tell the user exactly what failed; do not pivot to a different strategy without explicit confirmation.
 
-7. Replace `current.md` with your implementation report.
+8. Replace `current.md` with your implementation report.
    - Write the implementation report based on the work completed in Steps 4 through 6.
 
-8. Commit and push the updated report.
+9. Commit and push the updated report.
    ```bash
    git add -A
    git commit -m "update current report"
    git push
    ```
 
-9. Report to the user.
+10. Report to the user.
    - Share the outcome, the validation result, and any remaining blockers.
