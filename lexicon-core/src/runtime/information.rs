@@ -214,7 +214,11 @@ impl RuntimeInformationV1 {
         }
     }
 
-    pub const fn validate_compatibility(
+    // The underlying comparisons are const-friendly, but the current compiler still rejects
+    // `PartialEq` and `Result::map_err`/`?` in const functions. Keeping the public validator as a
+    // regular method preserves the const-friendly data model while still exposing the compatibility
+    // decision at runtime.
+    pub fn validate_compatibility(
         &self,
         expected_identity: RuntimeIdentity,
     ) -> Result<(), RuntimeCompatibilityError> {
@@ -232,10 +236,10 @@ impl RuntimeInformationV1 {
             });
         }
 
-        self.validate_capabilities()
-            .map_err(RuntimeCompatibilityError::MissingCapabilities)?;
-
-        Ok(())
+        match self.validate_capabilities() {
+            Ok(()) => Ok(()),
+            Err(error) => Err(RuntimeCompatibilityError::MissingCapabilities(error)),
+        }
     }
 
     pub const fn resume_handler_registered(&self) -> bool {
