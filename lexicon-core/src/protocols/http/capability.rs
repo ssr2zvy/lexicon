@@ -40,6 +40,16 @@ impl HttpCapabilitySet {
         (self.bits & Self::bit_for(capability)) != 0
     }
 
+    pub const fn is_subset_of(self, available: HttpCapabilitySet) -> bool {
+        (self.bits & available.bits) == self.bits
+    }
+
+    pub const fn missing_from(self, available: HttpCapabilitySet) -> Self {
+        Self {
+            bits: self.bits & !available.bits,
+        }
+    }
+
     pub fn ordered_capabilities(self) -> Vec<HttpCapability> {
         let mut capabilities = Vec::new();
         if self.contains(HttpCapability::ClientCertificateV1) {
@@ -91,5 +101,33 @@ mod tests {
             required.ordered_capabilities(),
             vec![HttpCapability::ClientCertificateV1]
         );
+    }
+
+    #[test]
+    fn capability_set_subset_and_missing_checks_are_correct() {
+        let required = HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1);
+        let available = HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1);
+        let empty = HttpCapabilitySet::empty();
+
+        assert!(required.is_subset_of(available));
+        assert_eq!(required.missing_from(available), HttpCapabilitySet::empty());
+        assert!(!required.is_subset_of(empty));
+        assert_eq!(
+            required.missing_from(empty),
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1)
+        );
+    }
+
+    #[test]
+    fn repeated_capability_insertion_does_not_create_duplicates() {
+        let set = HttpCapabilitySet::empty()
+            .insert(HttpCapability::ClientCertificateV1)
+            .insert(HttpCapability::ClientCertificateV1);
+
+        assert_eq!(
+            set.ordered_capabilities(),
+            vec![HttpCapability::ClientCertificateV1]
+        );
+        assert!(set.contains(HttpCapability::ClientCertificateV1));
     }
 }
