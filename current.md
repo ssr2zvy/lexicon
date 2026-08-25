@@ -1,128 +1,314 @@
-# Implementation report
+Current implementation request: stage a verified HTTP runtime bundle
 
-Implemented the in-memory runtime.json manifest contract in `lexicon-framework` without writing runtime manifests to disk or integrating them into source build.
+Objective
 
-Changes completed
-- Added `lexicon-framework/src/build/runtime_manifest.rs` with the `RuntimeManifestV1` API, schema version constant, strict executable-name validation, strict SHA-256 parsing, deterministic JSON encoding, and strict JSON decoding.
-- Exported the public manifest API from `lexicon-framework/src/build/mod.rs`.
-- Reused the existing Core `RuntimeInformationV1` JSON contract for the nested `runtime_information` object instead of duplicating the schema.
-- Kept the construct path limited to `VerifiedHttpRuntime` to ensure the manifest integrity fields are copied only from the verified runtime state.
-- Added duplicate-field rejection and structural validation around invalid schema versions, executable names, zero-size artifacts, malformed digests, and malformed nested runtime data.
+Implement the framework operation that copies a verified HTTP runtime executable into a uniquely owned staging directory and writes its corresponding runtime.json.
 
-Validation
-- Ran: `cargo test --workspace --quiet`
-- Result: pass (all workspace tests succeeded)
+This produces a self-consistent staged bundle for later publication.
 
-Notes
-- This step remains in-memory only and does not stage a bundle or write `runtime.json` to disk, as required by the current implementation contract.
+Do not publish, replace, back up, or roll back an existing runtime.
 
-Nested runtime-information handling
+Required module
 
-The framework must not define a second Rust representation of Core’s identity, descriptor, capability, or resume fields.
+Create:
 
-A private Serde document may hold the nested value as:
+lexicon-framework/src/build/runtime_staging.rs
 
-serde_json::Value
+Export its public API through:
 
-The nested value must then be converted through the existing Core JSON APIs.
+lexicon-framework/src/build/mod.rs
 
-Encoding must likewise obtain the canonical Core representation through:
+lexicon-framework remains library-only.
 
-RuntimeInformationV1::to_json()
+Staged directory shape
 
-Do not reconstruct Core’s JSON field-by-field in framework code.
+A successful staging operation creates exactly:
 
-Typed errors
+<unique-staging-directory>/
+├── <executable-name>
+└── runtime.json
 
-Define separate typed errors for:
+No additional files or directories may exist inside the staged bundle.
 
-Construction
+Staged result type
 
-pub enum RuntimeManifestConstructionError {
-    InvalidExecutableName,
+Define an opaque type:
+
+pub struct StagedHttpRuntimeBundle {
+    directory: PathBuf,
+    executable_path: PathBuf,
+    manifest_path: PathBuf,
+    manifest: RuntimeManifestV1,
+    // Private temporary-directory ownership.
 }
 
-Encoding
+Provide:
 
-pub enum RuntimeManifestEncodingError {
-    RuntimeInformation(
-        RuntimeInformationEncodingError,
+impl StagedHttpRuntimeBundle {
+    pub fn directory(&self) -> &Path;
+    pub fn executable_path(&self) -> &Path;
+    pub fn manifest_path(&self) -> &Path;
+    pub fn manifest(&self) -> &RuntimeManifestV1;
+}
+
+Do not provide a public unchecked constructor.
+
+A successful value must prove that:
+
+* the staging directory was uniquely created;
+* the executable was copied;
+* the copied size and SHA-256 match the verified artifact;
+* runtime.json was completely written;
+* the manifest describes the staged executable.
+
+Staging ownership
+
+Use an owned temporary-directory mechanism such as:
+
+tempfile::TempDir
+
+The staging directory must be removed automatically if the staged bundle is dropped before a later publication operation consumes it.
+
+Do not expose TempDir in the public API.
+
+Do not persist or leak the staging directory in this step.
+
+Public API
+
+Provide:
+
+pub fn stage_verified_http_runtime_bundle(
+    staging_parent: &Path,
+    executable_name: &str,
+    verified: &VerifiedHttpRuntime,
+) -> Result<
+    StagedHttpRuntimeBundle,
+    RuntimeBundleStagingError,
+>;
+
+Required operation order
+
+Perform these operations in order:
+
+1. Construct RuntimeManifestV1 from executable_name and verified.
+2. Verify that staging_parent exists and is a directory.
+3. Create a uniquely named temporary directory directly beneath it.
+4. Construct the staged executable path using the validated manifest filename.
+5. Copy the verified candidate executable to that path.
+6. Preserve ordinary source permissions where supported.
+7. Hash the staged executable with:
+
+hash_runtime_executable(...)
+
+8. Compare staged size and SHA-256 against the verified artifact.
+9. Encode the manifest using:
+
+RuntimeManifestV1::to_json()
+
+10. Create runtime.json using create-new semantics.
+11. Write the JSON followed by exactly one ASCII newline.
+12. Flush and synchronize the staged executable.
+13. Flush and synchronize runtime.json.
+14. Synchronize the staging directory where supported.
+15. Return StagedHttpRuntimeBundle.
+
+Staging directory creation
+
+Create a unique implementation-controlled name such as:
+
+.lexicon-http-runtime-stage-<random>
+
+The suffix and complete staging-directory name are not public compatibility surfaces.
+
+Do not:
+
+* reuse an existing directory;
+* delete an existing path;
+* overwrite an existing path;
+* create the directory outside staging_parent;
+* use the final published runtime path as the staging directory.
+
+Copy verification
+
+Do not trust fs::copy alone.
+
+After copying, require:
+
+staged size == verified size
+staged SHA-256 == verified SHA-256
+
+Path equality is not required because the copy intentionally has a different path.
+
+If the original candidate changes between verification and copying, staging must fail when the copied bytes differ from the verified artifact.
+
+The failure must preserve expected and actual size and digest values.
+
+Manifest file contract
+
+The manifest path is exactly:
+
+<staging-directory>/runtime.json
+
+Its bytes are exactly:
+
+RuntimeManifestV1::to_json()
++ "\n"
+
+The file must contain:
+
+* no leading text;
+* no byte-order mark;
+* no additional trailing whitespace;
+* no second newline;
+* no diagnostic output;
+* no temporary candidate path.
+
+Use create-new semantics. Never overwrite a preexisting manifest.
+
+Permission behavior
+
+The copied executable must preserve its source permissions where the platform supports them.
+
+Do not broaden permissions or add executable bits.
+
+runtime.json must remain an ordinary non-executable file, subject to platform defaults and the process umask.
+
+Durability behavior
+
+Before returning success:
+
+* all executable bytes must be written;
+* all manifest bytes must be written;
+* both files must be flushed;
+* sync_all() must succeed for both files;
+* the staging directory must be synchronized where supported.
+
+If directory synchronization is unsupported on a specific target, isolate and document that platform behavior. Do not weaken file synchronization.
+
+Typed error
+
+Define an error equivalent to:
+
+#[derive(Debug)]
+pub enum RuntimeBundleStagingError {
+    ManifestConstruction(
+        RuntimeManifestConstructionError,
     ),
-    Serialization(String),
+    InvalidStagingParent {
+        path: PathBuf,
+    },
+    CreateStagingDirectory {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    CopyExecutable {
+        source_path: PathBuf,
+        destination_path: PathBuf,
+        source: std::io::Error,
+    },
+    HashStagedExecutable(
+        RuntimeArtifactHashError,
+    ),
+    CopiedArtifactMismatch {
+        expected_size: u64,
+        actual_size: u64,
+        expected_sha256: ExecutableSha256,
+        actual_sha256: ExecutableSha256,
+    },
+    EncodeManifest(
+        RuntimeManifestEncodingError,
+    ),
+    CreateManifest {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    WriteManifest {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    SyncExecutable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    SyncManifest {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    SyncDirectory {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
-Decoding
-
-The decoding error must distinguish at least:
-
-* JSON syntax or structural failure;
-* unknown manifest schema version;
-* invalid executable name;
-* invalid executable size;
-* invalid SHA-256;
-* malformed nested runtime information.
-
-Equivalent representations are acceptable.
+Equivalent organization is acceptable, but callers must distinguish each major staging phase.
 
 Implement:
 
 std::fmt::Display
 std::error::Error
 
-Do not return plain String from public manifest APIs.
+Do not return plain String, print errors, or exit.
+
+Failure cleanup
+
+If any operation fails after the unique staging directory is created:
+
+* return the typed primary error;
+* automatically remove the partial staging directory where possible;
+* do not touch existing runtime directories;
+* do not produce StagedHttpRuntimeBundle.
+
+A cleanup failure may be retained as supplementary diagnostic information, but it must not replace the primary failure.
 
 Required tests
 
 Add tests proving:
 
-1. A verified runtime constructs a manifest successfully.
-2. Executable size comes from the verified artifact.
-3. SHA-256 comes from the verified artifact.
-4. Runtime information comes from the admitted probe result.
-5. Construction cannot independently substitute another digest.
-6. A simple native filename is accepted.
-7. A Windows .exe filename is accepted.
-8. Empty filename is rejected.
-9. "." is rejected.
-10. ".." is rejected.
-11. Forward-slash paths are rejected.
-12. Backslash paths are rejected.
-13. Absolute paths are rejected.
-14. NUL-containing names are rejected.
-15. JSON encoding contains no temporary candidate path.
-16. SHA-256 encoding is exactly 64 lowercase characters.
-17. A manifest JSON round trip preserves equality.
-18. Invalid JSON is rejected.
-19. Unknown fields are rejected.
-20. Missing fields are rejected.
-21. Unknown manifest schema versions are rejected.
-22. Zero executable size is rejected.
-23. Short SHA-256 values are rejected.
-24. Uppercase SHA-256 values are rejected.
-25. Non-hexadecimal SHA-256 values are rejected.
-26. Malformed nested runtime information is rejected through the Core decoder.
-27. Structurally valid incompatible runtime information may decode successfully.
-28. Existing verification, hashing, and probing tests remain unchanged.
-29. All workspace tests pass.
+1. A verified runtime stages successfully.
+2. The staging directory is directly under the requested parent.
+3. The staged directory contains exactly two files.
+4. The executable has the requested validated filename.
+5. The manifest path is exactly runtime.json.
+6. The staged executable bytes match the candidate.
+7. The staged executable size matches the verified artifact.
+8. The staged executable SHA-256 matches the verified artifact.
+9. runtime.json decodes through RuntimeManifestV1::from_json().
+10. The decoded manifest contains the admitted runtime information.
+11. runtime.json ends with exactly one newline.
+12. The manifest contains no temporary candidate path.
+13. An invalid executable name fails before staging-directory creation.
+14. A missing staging parent is rejected.
+15. A staging parent that is a file is rejected.
+16. Copy failure returns the typed copy error.
+17. Changed source bytes produce CopiedArtifactMismatch.
+18. Same-size changed bytes are detected through SHA-256.
+19. Manifest creation or writing failure cleans up the staging directory.
+20. Synchronization failure is typed using a deterministic private seam.
+21. Dropping a successful staged bundle removes its directory.
+22. Failure leaves unrelated directories unchanged.
+23. Failure leaves existing runtime fixtures unchanged.
+24. No publication, backup, or rollback operation occurs.
+25. Existing manifest, verification, probe, and hashing tests pass.
+26. All workspace tests pass.
 
-For successful construction tests, use a real VerifiedHttpRuntime produced through the existing verification test seam. Do not add a public unchecked verified-runtime constructor.
+Use private test seams where deterministic mutation, writing, or synchronization failures are otherwise unreliable.
 
 Preserve existing behavior
 
 Do not change:
 
-* Core runtime-information schema;
+* Core runtime-information behavior;
 * runtime probing;
-* compatibility validation;
 * executable hashing;
 * candidate verification;
+* runtime manifest schema;
 * source scaffolding;
 * source implementation crates;
 * source create;
 * source build;
 * Cargo invocation;
 * artifact selection;
-* runtime publication;
+* existing publication behavior;
 * CLI behavior;
 * MZA;
 * Protocol 1;
@@ -147,26 +333,24 @@ If the external MZA checkout is available, run:
 
 bash automation/build_bundle_install/build_bundle_install.sh
 
-If the known MZA dependency remains unavailable, report it separately. Do not modify MZA or installer code.
+If the MZA checkout remains unavailable, report it separately. Do not modify MZA or installer code.
 
 Explicit exclusions
 
 Do not implement:
 
-* writing runtime.json;
-* runtime bundle directories;
-* executable copying;
-* staging;
-* publication;
+* publication into runtime/;
+* replacement of existing runtime bundles;
+* backup creation;
 * rollback;
+* paired acquisition and processing publication;
 * integration with source build;
-* runtime admission from disk;
-* executable hash comparison against a published manifest;
 * Cargo build-plan changes;
 * managed-runner generation;
 * runner main.rs;
 * runner::run;
 * source workspace migration;
+* disk-based runtime admission;
 * invocation envelopes;
 * acquisition or resume execution;
 * HTTP transport;
@@ -174,25 +358,26 @@ Do not implement:
 * sessions;
 * supervision;
 * __operator-host;
-* processing runtime manifests.
+* processing-runtime staging.
 
 Completion report
 
 After completion, replace current.md with a report containing:
 
 * files created and changed;
-* manifest schema version;
-* exact JSON structure;
-* manifest construction API;
-* executable-name validation;
-* digest parsing behavior;
-* encoding and decoding APIs;
+* the staging API;
+* staged-bundle ownership model;
+* exact directory shape;
+* executable copying and verification behavior;
+* manifest file format;
+* permission behavior;
+* durability behavior;
 * typed errors;
-* nested Core runtime-information delegation;
-* round-trip results;
-* every malformed manifest rejection result;
-* confirmation that no file was written or published;
+* failure cleanup;
+* successful staging results;
+* mutation and partial-failure results;
+* confirmation that no runtime was published or replaced;
 * framework and workspace test results;
 * bundle/install result or the known external-MZA blocker.
 
-Then stop. Do not write or publish a runtime bundle.
+Then stop. Do not publish the staged runtime bundle.
