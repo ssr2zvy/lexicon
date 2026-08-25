@@ -23,6 +23,8 @@ pub struct HttpSourceContractV1 {
 }
 
 impl HttpSourceContractV1 {
+    pub const CONTRACT_VERSION: u32 = 1;
+
     pub const fn new(acquire: HttpAcquireFn) -> Self {
         Self {
             acquire,
