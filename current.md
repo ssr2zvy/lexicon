@@ -1,252 +1,61 @@
-Current implementation request: add the mandatory HTTP source descriptor contract
+# Implementation report
 
-Objective
+Implemented the HTTP source descriptor contract in `lexicon-core` and preserved the compatibility API for the existing source runner.
 
-Implement the first compile-time source-contract slice in lexicon-core.
+## Summary
 
-Add:
+The merged change adds the first typed HTTP acquisition contract under Core without changing the current source scaffolding or runtime execution model yet.
 
-HttpSourceContractV1
+It introduces:
 
-Its constructor must accept exactly one mandatory acquisition function with this signature:
+- `lexicon_core::http` as the new public protocol namespace
+- `AcquisitionResult<T>` and a minimal `AcquisitionError` implementation
+- `HttpAcquireFn` and `HttpSourceContractV1` as a typed, compile-time-safe descriptor
+- a `const`-friendly constructor that stores a real function pointer instead of a dynamic registry
+- compatibility re-exports for the historical root API:
+  - `lexicon_core::HttpAcquisition`
+  - `lexicon_core::HttpAcquisitionContext`
+  - `lexicon_core::run_http_source`
 
-fn(
-    &mut HttpAcquisitionContext,
-    &[OsString],
-) -> AcquisitionResult<()>
+## Files added or updated
 
-This task defines and tests the typed descriptor only.
+- `lexicon-core/src/lib.rs`
+- `lexicon-core/src/protocols/mod.rs`
+- `lexicon-core/src/protocols/http/mod.rs`
+- `lexicon-core/src/protocols/http/contract.rs`
+- `lexicon-core/src/protocols/http/error.rs`
+- `lexicon-core/tests/contract_ui.rs`
+- `lexicon-core/tests/ui/*.rs`
+- `lexicon-core/Cargo.toml`
+- `Cargo.lock`
 
-Do not change source scaffolding, source builds, executable entrypoints, or runtime behavior yet.
+## What the contract does
 
-Required public API
+The new descriptor enforces a typed acquisition function shape:
 
-The following imports must compile:
+- `fn(&mut HttpAcquisitionContext, &[OsString]) -> AcquisitionResult<()>`
 
-use lexicon_core::http::{
-    AcquisitionError,
-    AcquisitionResult,
-    HttpAcquisitionContext,
-    HttpSourceContractV1,
-};
+This ensures compile-time rejection for malformed handlers such as:
 
-A valid source contract must compile:
+- missing handler arguments
+- async handlers
+- pass-by-value context
+- immutable context
+- missing `&[OsString]`
+- wrong argument type
+- reversed parameters
+- bool returns
+- `Result<(), String>` returns
 
-use std::ffi::OsString;
-use lexicon_core::http::{
-    AcquisitionResult,
-    HttpAcquisitionContext,
-    HttpSourceContractV1,
-};
-pub const SOURCE: HttpSourceContractV1 =
-    HttpSourceContractV1::new(acquire);
-pub fn acquire(
-    context: &mut HttpAcquisitionContext,
-    args: &[OsString],
-) -> AcquisitionResult<()> {
-    let _ = context;
-    let _ = args;
-    Ok(())
-}
+The descriptor is intentionally a simple typed pointer-based contract; it does not add a dynamic plugin ABI, registry, or serialization layer.
 
-Required module structure
+## Validation
 
-Introduce the HTTP protocol module under Core:
+This change was validated through the workspace Rust test suite using the standard Cargo path:
 
-lexicon-core/
-└── src/
-    ├── lib.rs
-    └── protocols/
-        ├── mod.rs
-        └── http/
-            ├── mod.rs
-            ├── contract.rs
-            └── error.rs
+- `cargo test --workspace --quiet`
 
-Expose it at:
-
-lexicon_core::http
-
-For example, lib.rs may contain:
-
-pub mod protocols;
-pub use protocols::http;
-
-Do not create empty placeholder modules for unrelated future functionality.
-
-Acquisition result and error
-
-Define:
-
-pub type AcquisitionResult<T> =
-    Result<T, AcquisitionError>;
-
-Provide a minimal owned AcquisitionError suitable for source failures.
-
-It must:
-
-* implement Debug;
-* implement Display;
-* implement std::error::Error;
-* preserve a human-readable error message;
-* provide a straightforward constructor from a message.
-
-Do not design the complete future error taxonomy in this task.
-
-A representative API is:
-
-#[derive(Debug)]
-pub struct AcquisitionError {
-    message: String,
-}
-impl AcquisitionError {
-    pub fn source_message(
-        message: impl Into<String>,
-    ) -> Self {
-        // ...
-    }
-}
-
-Do not add HTTP status, transport, recording, session, retry, or capability variants yet.
-
-Descriptor representation
-
-Define the mandatory handler type:
-
-pub type HttpAcquireFn = fn(
-    &mut HttpAcquisitionContext,
-    &[OsString],
-) -> AcquisitionResult<()>;
-
-Define the versioned descriptor:
-
-#[derive(Clone, Copy)]
-pub struct HttpSourceContractV1 {
-    acquire: HttpAcquireFn,
-}
-
-Its constructor must be:
-
-impl HttpSourceContractV1 {
-    pub const fn new(
-        acquire: HttpAcquireFn,
-    ) -> Self {
-        // ...
-    }
-}
-
-Requirements:
-
-* the handler field must not be publicly writable;
-* callers must construct the descriptor through new;
-* new must be usable in a public constant;
-* the descriptor must contain a real typed function pointer;
-* do not erase the handler behind dyn Any;
-* do not use a string function name;
-* do not use a macro-generated registry;
-* do not serialize the handler;
-* do not introduce a dynamic plugin ABI.
-
-The descriptor may expose a narrowly scoped handler accessor or invocation method if needed for direct testing. Do not implement the managed runner yet.
-
-Compile-time guarantees
-
-Rust compilation must reject descriptor construction when the handler is:
-
-* missing;
-* asynchronous;
-* given HttpAcquisitionContext by value;
-* given an immutable context reference;
-* missing the source-argument slice;
-* given the wrong argument type;
-* given parameters in the wrong order;
-* returning bool;
-* returning Result<(), String>;
-* returning any type other than AcquisitionResult<()>.
-
-Rust does not enforce parameter variable names. These are equivalent:
-
-pub fn acquire(
-    context: &mut HttpAcquisitionContext,
-    args: &[OsString],
-) -> AcquisitionResult<()>
-pub fn acquire(
-    first: &mut HttpAcquisitionContext,
-    second: &[OsString],
-) -> AcquisitionResult<()>
-
-Do not claim otherwise.
-
-A handler does not technically have to be public when a public SOURCE descriptor contains its function pointer. Do not add a false compile-fail test claiming Rust rejects a private handler. Generated source templates may still make acquire public later as a Lexicon convention.
-
-Tests
-
-Add positive tests proving:
-
-* a correctly typed function constructs HttpSourceContractV1;
-* the descriptor can be declared as pub const SOURCE;
-* the descriptor retains the supplied handler;
-* invoking the retained handler receives the same mutable context and native argument slice;
-* AcquisitionError preserves and displays its message.
-
-Add compile-fail coverage proving rejection of at least:
-
-1. no handler argument;
-2. async handler;
-3. context by value;
-4. immutable context;
-5. missing &[OsString];
-6. wrong source-argument type;
-7. reversed parameters;
-8. bool return;
-9. Result<(), String> return.
-
-Use Rust compile-fail documentation tests or another focused compile-test mechanism. Do not create tests that merely compare source text or search for type names.
-
-Preserve the historical API temporarily
-
-The existing API must continue compiling and behaving as before:
-
-lexicon_core::{
-    HttpAcquisition,
-    HttpAcquisitionContext,
-    run_http_source,
-}
-
-It is acceptable to move its implementation internally and re-export it from the root, but do not change its behavior or signatures in this task.
-
-The new path must also expose the context:
-
-lexicon_core::http::HttpAcquisitionContext
-
-Do not remove the historical trait until generated sources have migrated to the new descriptor and managed runner.
-
-No source-template migration
-
-Do not change the currently generated source crates.
-
-They must continue using the historical compatibility contract during this step.
-
-Do not modify:
-
-get-raw-data-impl/src/main.rs
-process-data-impl/src/main.rs
-source create
-source build
-
-Do not generate SOURCE yet. This task only ensures that Core possesses and tests the descriptor type required by the following migration.
-
-Bundle and installation preservation
-
-Preserve:
-
-external pinned MZA
-→ lexicon_cli artifact
-→ cargo-bundler-v0.1.0
-→ lexicon-bundle installer
-→ installed lexicon
-
-Do not change:
+The merged implementation keeps the historical API intact while exposing the new HTTP contract path for future migration work.
 
 * mza_artifacts.toml;
 * Protocol 1;
