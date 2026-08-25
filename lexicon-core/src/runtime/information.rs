@@ -61,6 +61,77 @@ impl fmt::Display for RuntimeInformationDecodingError {
 
 impl std::error::Error for RuntimeInformationDecodingError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeCompatibilityError {
+    IdentityMismatch {
+        expected: RuntimeIdentity,
+        actual: RuntimeIdentity,
+    },
+    DescriptorContractVersionMismatch {
+        identity_version: u32,
+        descriptor_version: u32,
+    },
+    MissingCapabilities(MissingHttpCapabilities),
+}
+
+impl fmt::Display for RuntimeCompatibilityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IdentityMismatch { expected, actual } => write!(
+                formatter,
+                "runtime identity mismatch: expected {expected:?}, actual {actual:?}"
+            ),
+            Self::DescriptorContractVersionMismatch {
+                identity_version,
+                descriptor_version,
+            } => write!(
+                formatter,
+                "descriptor contract version mismatch: identity version {identity_version}, descriptor version {descriptor_version}"
+            ),
+            Self::MissingCapabilities(missing) => write!(formatter, "{missing}"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeCompatibilityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::MissingCapabilities(error) => Some(error),
+            Self::IdentityMismatch { .. } | Self::DescriptorContractVersionMismatch { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingHttpCapabilities {
+    missing: HttpCapabilitySet,
+}
+
+impl MissingHttpCapabilities {
+    pub const fn missing(&self) -> HttpCapabilitySet {
+        self.missing
+    }
+}
+
+impl fmt::Display for MissingHttpCapabilities {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let capabilities: Vec<_> = self
+            .missing
+            .ordered_capabilities()
+            .into_iter()
+            .map(|capability| capability.identifier())
+            .collect();
+
+        if capabilities.is_empty() {
+            formatter.write_str("missing runtime capabilities: none")
+        } else {
+            write!(formatter, "missing runtime capabilities: {}", capabilities.join(", "))
+        }
+    }
+}
+
+impl std::error::Error for MissingHttpCapabilities {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimeInformationDocumentV1 {
@@ -141,6 +212,30 @@ impl RuntimeInformationV1 {
                 missing: self.required_capabilities.missing_from(self.available_capabilities),
             })
         }
+    }
+
+    pub const fn validate_compatibility(
+        &self,
+        expected_identity: RuntimeIdentity,
+    ) -> Result<(), RuntimeCompatibilityError> {
+        if self.identity() != expected_identity {
+            return Err(RuntimeCompatibilityError::IdentityMismatch {
+                expected: expected_identity,
+                actual: self.identity(),
+            });
+        }
+
+        if self.descriptor_contract_version() != self.identity().source_contract_version() {
+            return Err(RuntimeCompatibilityError::DescriptorContractVersionMismatch {
+                identity_version: self.identity().source_contract_version(),
+                descriptor_version: self.descriptor_contract_version(),
+            });
+        }
+
+        self.validate_capabilities()
+            .map_err(RuntimeCompatibilityError::MissingCapabilities)?;
+
+        Ok(())
     }
 
     pub const fn resume_handler_registered(&self) -> bool {
@@ -305,20 +400,11 @@ impl RuntimeInformationV1 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MissingHttpCapabilities {
-    missing: HttpCapabilitySet,
-}
-
-impl MissingHttpCapabilities {
-    pub const fn missing(&self) -> HttpCapabilitySet {
-        self.missing
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeInformationDecodingError, RuntimeInformationV1};
+    use super::{
+        RuntimeCompatibilityError, RuntimeInformationDecodingError, RuntimeInformationV1,
+    };
     use crate::http::HttpCapability;
     use crate::protocols::http::{HttpCapabilitySet, HttpSourceContractV1};
     use crate::runtime::RuntimeIdentity;
@@ -556,6 +642,224 @@ mod tests {
         assert!(info.validate_capabilities().is_err());
         let error = info.validate_capabilities().unwrap_err();
         assert!(error.missing().contains(HttpCapability::ClientCertificateV1));
+    }
+
+    #[test]
+    fn compatibility_accepts_matching_identity_and_capabilities() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
+
+        assert_eq!(info.validate_compatibility(identity), Ok(()));
+    }
+
+    #[test]
+    fn compatibility_rejects_different_identity() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
+
+        let error = info
+            .validate_compatibility(RuntimeIdentity::http_acquisition("other-source", 1))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeCompatibilityError::IdentityMismatch { expected, actual }
+                if expected == RuntimeIdentity::http_acquisition("other-source", 1)
+                    && actual == identity
+        ));
+    }
+
+    #[test]
+    fn compatibility_rejects_mismatched_expected_source_version() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
+
+        let error = info
+            .validate_compatibility(RuntimeIdentity::http_acquisition("example-source", 2))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeCompatibilityError::IdentityMismatch { expected, actual }
+                if expected == RuntimeIdentity::http_acquisition("example-source", 2)
+                    && actual == identity
+        ));
+    }
+
+    #[test]
+    fn compatibility_rejects_descriptor_version_mismatch() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 2);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
+
+        let error = info.validate_compatibility(identity).unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeCompatibilityError::DescriptorContractVersionMismatch {
+                identity_version: 2,
+                descriptor_version: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn descriptor_version_mismatch_preserves_values() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 2);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
+
+        let error = info.validate_compatibility(identity).unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeCompatibilityError::DescriptorContractVersionMismatch {
+                identity_version,
+                descriptor_version,
+            } if identity_version == 2 && descriptor_version == 1
+        ));
+    }
+
+    #[test]
+    fn compatibility_rejects_missing_capabilities() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(identity, &source, HttpCapabilitySet::empty());
+
+        let error = info.validate_compatibility(identity).unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeCompatibilityError::MissingCapabilities(missing)
+                if missing.missing().contains(HttpCapability::ClientCertificateV1)
+        ));
+    }
+
+    #[test]
+    fn compatibility_keeps_complete_missing_capability_set() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(identity, &source, HttpCapabilitySet::empty());
+
+        let error = info.validate_compatibility(identity).unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeCompatibilityError::MissingCapabilities(missing)
+                if missing.missing().ordered_capabilities() == vec![HttpCapability::ClientCertificateV1]
+        ));
+    }
+
+    #[test]
+    fn extra_available_capabilities_do_not_reject() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
+
+        assert_eq!(info.validate_compatibility(identity), Ok(()));
+    }
+
+    #[test]
+    fn empty_required_capabilities_with_empty_available_set_succeeds() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler);
+        let info = RuntimeInformationV1::from_http_source(identity, &source, HttpCapabilitySet::empty());
+
+        assert_eq!(info.validate_compatibility(identity), Ok(()));
+    }
+
+    #[test]
+    fn compatibility_checks_identity_before_descriptor_version() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 2);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty(),
+        );
+
+        let error = info
+            .validate_compatibility(RuntimeIdentity::http_acquisition("other-source", 2))
+            .unwrap_err();
+        assert!(matches!(error, RuntimeCompatibilityError::IdentityMismatch { .. }));
+    }
+
+    #[test]
+    fn compatibility_checks_descriptor_before_capabilities() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 2);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty(),
+        );
+
+        let error = info.validate_compatibility(identity).unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeCompatibilityError::DescriptorContractVersionMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn compatibility_validation_does_not_invoke_acquire_or_resume() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(failing_acquire)
+            .with_resume(failing_resume)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(identity, &source, HttpCapabilitySet::empty());
+
+        let error = info.validate_compatibility(identity).unwrap_err();
+        assert!(matches!(error, RuntimeCompatibilityError::MissingCapabilities(_)));
+    }
+
+    #[test]
+    fn compatibility_validation_does_not_mutate_information() {
+        let identity = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty(),
+        );
+
+        let before = info;
+        let _ = info.validate_compatibility(identity);
+        assert_eq!(info, before);
     }
 
     #[test]
