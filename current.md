@@ -1,91 +1,332 @@
-# Implementation report
+Current implementation request: typed processing source descriptor
 
-## Files changed
-- `lexicon-core/src/runtime/identity.rs`
-- `lexicon-core/src/runtime/information.rs`
+Objective
 
-## Updated RuntimeOperation
-The canonical runtime operation enum now includes the processing runtime alongside acquisition:
+Add the first compile-time processing source contract to lexicon-core.
 
-- `RuntimeOperation::Acquisition`
-- `RuntimeOperation::Processing`
+A processing implementation library must export a typed descriptor containing one mandatory processing function.
 
-Stable identifiers are:
-- `Acquisition` -> `"acquisition"`
-- `Processing` -> `"processing"`
+This step defines types only. Do not add processing execution, SQLite operations, runners, probes, manifests, staging, or publication.
 
-`RuntimeOperation::identifier()` and `RuntimeOperation::from_identifier(...)` now round-trip `"processing"` to `RuntimeOperation::Processing`, while continuing to reject aliases, capitalization differences, and surrounding whitespace.
+Required public namespace
 
-## Processing identity constructor
-Added:
+Expose the new API through:
 
-- `RuntimeIdentity::http_processing(source_name, source_contract_version) -> Self`
+lexicon_core::processing
 
-It constructs:
-- `source_name` from the supplied source
-- `protocol` = `RuntimeProtocol::Http`
-- `operation` = `RuntimeOperation::Processing`
-- `source_contract_version` from the supplied version
+Use the appropriate existing or new files under:
 
-The existing acquisition constructor remains unchanged:
-- `RuntimeIdentity::http_acquisition(...)`
+lexicon-core/src/processing/
+├── mod.rs
+├── contract.rs
+├── context.rs
+└── error.rs
 
-## Constant-construction proof
-The processing identity constructor is const-safe and verified with:
+Equivalent internal file organization is acceptable.
 
-- `const IDENTITY: RuntimeIdentity = RuntimeIdentity::http_processing("example-source", 1);`
+Processing result and error
 
-The test asserts:
-- `source_name() == "example-source"`
-- `protocol() == RuntimeProtocol::Http`
-- `operation() == RuntimeOperation::Processing`
-- `source_contract_version() == 1`
+Define:
 
-## Accessor and equality results
-Processing identities expose the expected values through the existing accessors and participate in the established `Debug`, `Clone`, `Copy`, `PartialEq`, and `Eq` behavior.
+pub type ProcessingResult<T> =
+    Result<T, ProcessingError>;
 
-Equality checks confirm:
-- acquisition identity and processing identity for the same source/version are not equal
-- processing identity compares equal only to the same processing identity
-- acquisition behavior remains consistent with the existing identity semantics
+Add a minimal typed error:
 
-## Runtime-information JSON round-trip results
-`RuntimeInformationV1` now supports processing operation JSON by serializing and decoding `"operation": "processing"` without changing the schema version.
+#[derive(Debug)]
+pub struct ProcessingError {
+    // Private representation.
+}
 
-Validated results:
-- processing identity serializes with `"operation":"processing"`
-- `RuntimeInformationV1::from_json(...)` accepts the processing operation
-- a processing identity survives a JSON round trip without loss of identity information
-- unknown operation identifiers are still rejected
+Provide only the minimal construction and trait support needed for the descriptor tests:
 
-## Acquisition/processing compatibility mismatch results
-The compatibility validator compares identities exactly as required.
+std::fmt::Display
+std::error::Error
 
-Verified cases:
-- matching processing identity passes compatibility
-- expected acquisition vs actual processing returns `RuntimeCompatibilityError::IdentityMismatch`
-- expected processing vs actual acquisition returns `RuntimeCompatibilityError::IdentityMismatch`
+Do not design detailed SQLite, session, checkpoint, parsing, or filesystem error categories yet.
 
-## Acquisition behavior confirmation
-Acquisition identity behavior remains unchanged:
-- acquisition serialization still emits `"operation":"acquisition"`
-- acquisition parsing and compatibility checks continue to pass
-- the existing runtime probe and framework behavior remains intact
+Do not use:
 
-## Type-level guard limitation in from_http_source(...)
-`RuntimeInformationV1::from_http_source(...)` still accepts any `RuntimeIdentity` in this step; there is no type-level guard preventing a processing identity from being passed through the HTTP-source constructor. This limitation is documented here and intentionally left unchanged because a later processing-descriptor step will define the proper construction path rather than redesigning the runtime-information hierarchy in this micro-step.
+Result<T, String>
 
-## Core and workspace test results
-Validation succeeded with the standard Cargo flow:
-- `cargo test -p lexicon-core --quiet` ✅
-- `cargo test --workspace --quiet` ✅
+as the processing contract.
 
-## Bundle/install result
-The optional bundle/install helper was attempted with:
+Processing context
 
-- `bash automation/build_bundle_install/build_bundle_install.sh`
+Define:
 
-It failed because the external MZA checkout is unavailable in this environment:
-- `/home/runner/work/lexicon/lexicon/automation/build_bundle_install/../build_bundle_mza/mza/make-artifact.sh: No such file or directory`
+pub struct ProcessingContext {
+    // Private fields.
+}
 
-This is the known external blocker, and no MZA or installer code was modified.
+The context must be a Core-owned type with private representation.
+
+Provide the smallest test construction mechanism needed inside lexicon-core, such as a crate-private or test-only constructor.
+
+Do not expose a public empty constructor implying that source code controls context creation.
+
+Do not add paths, database handles, sessions, transaction readers, or SQLite behavior yet.
+
+Mandatory processing function type
+
+Define the exact function-pointer type:
+
+pub type ProcessDataFn = fn(
+    context: &mut ProcessingContext,
+    args: &[OsString],
+) -> ProcessingResult<()>;
+
+The contract is synchronous ordinary Rust.
+
+Do not use:
+
+* async fn;
+* boxed futures;
+* dynamic trait objects;
+* a serialized workflow;
+* callbacks for individual raw transactions;
+* a plugin ABI.
+
+Versioned descriptor
+
+Define:
+
+#[derive(Clone, Copy)]
+pub struct ProcessingSourceContractV1 {
+    process: ProcessDataFn,
+}
+
+The field must remain private.
+
+Provide:
+
+impl ProcessingSourceContractV1 {
+    pub const CONTRACT_VERSION: u32 = 1;
+    pub const fn new(
+        process: ProcessDataFn,
+    ) -> Self;
+    pub const fn process_handler(
+        &self,
+    ) -> ProcessDataFn;
+}
+
+The descriptor must:
+
+* store a real typed function pointer;
+* be allocation-free;
+* support construction in a pub const;
+* contain no dynamic registry;
+* contain no serialization;
+* contain no source instance or trait object.
+
+Required source shape
+
+This must compile:
+
+use std::ffi::OsString;
+use lexicon_core::processing::{
+    ProcessingContext,
+    ProcessingResult,
+    ProcessingSourceContractV1,
+};
+pub const SOURCE: ProcessingSourceContractV1 =
+    ProcessingSourceContractV1::new(process);
+pub fn process(
+    context: &mut ProcessingContext,
+    args: &[OsString],
+) -> ProcessingResult<()> {
+    let _ = context;
+    let _ = args;
+    Ok(())
+}
+
+The symbol name SOURCE is a managed-runner convention to be used later.
+
+Rust type enforcement comes from the declared descriptor type and new(...) parameter.
+
+Required compile-time enforcement
+
+Add UI compile-fail coverage proving rejection of processing handlers with:
+
+1. no parameters;
+2. missing args;
+3. context passed by value;
+4. immutable context reference;
+5. wrong context type;
+6. wrong argument type;
+7. mutable argument slice;
+8. reversed parameters;
+9. bool return;
+10. Result<(), String> return;
+11. async function;
+12. closure requiring captured state;
+13. function returning ProcessingResult<bool>.
+
+The failures must occur when the malformed function is passed to:
+
+ProcessingSourceContractV1::new(...)
+
+Use the project’s existing compile-fail test approach.
+
+Visibility semantics
+
+Do not falsely claim Rust requires the handler itself to be public.
+
+This is valid inside one implementation crate:
+
+pub const SOURCE: ProcessingSourceContractV1 =
+    ProcessingSourceContractV1::new(process);
+fn process(
+    context: &mut ProcessingContext,
+    args: &[OsString],
+) -> ProcessingResult<()> {
+    Ok(())
+}
+
+The managed runner accesses the public descriptor, not the function symbol directly.
+
+Add a positive test proving a public constant may contain a private handler.
+
+Descriptor behavior tests
+
+Add tests proving:
+
+1. CONTRACT_VERSION == 1.
+2. A valid processing function constructs the descriptor.
+3. The descriptor works in a constant.
+4. The descriptor is Copy.
+5. process_handler() returns the stored function.
+6. The retained function pointer is callable.
+7. The handler receives mutable ProcessingContext.
+8. The handler receives &[OsString].
+9. Nonempty native arguments reach the handler unchanged.
+10. Constructing the descriptor does not invoke the handler.
+11. Copying the descriptor does not invoke the handler.
+12. A private handler works behind a public descriptor constant.
+13. Acquisition descriptor behavior remains unchanged.
+14. Processing runtime identity behavior remains unchanged.
+15. All workspace tests pass.
+
+Add non-UTF-8 argument coverage on Unix if it can reuse the existing native-argument test pattern without introducing runtime execution.
+
+No acquisition capability reuse
+
+Do not add HttpCapabilitySet to the processing descriptor.
+
+Do not add:
+
+* .requires(...);
+* .with_resume(...);
+* processing capabilities;
+* optional handlers.
+
+Those require demonstrated processing requirements and belong to later steps.
+
+No descriptor/runtime-information connection yet
+
+Do not add:
+
+RuntimeInformationV1::from_processing_source(...)
+
+in this step.
+
+Do not fix the existing lack of a type-level operation guard in from_http_source(...) yet.
+
+The next processing micro-step can define processing runtime information and the correct operation-specific construction path.
+
+Preserve existing behavior
+
+Do not change:
+
+* HTTP acquisition descriptor behavior;
+* acquisition capabilities;
+* acquisition resume handler;
+* runtime identity JSON;
+* Core probe behavior;
+* framework probing;
+* hashing;
+* verification;
+* manifests;
+* staging;
+* bundle admission;
+* reversible publication;
+* source scaffolding;
+* source create;
+* source build;
+* Cargo invocation;
+* existing publication;
+* CLI behavior;
+* MZA;
+* Protocol 1;
+* lexicon-bundle;
+* installer behavior;
+* bundle inputs;
+* installed paths.
+
+lexicon-framework remains library-only.
+
+lexicon-bundle remains a binary installer built through cargo-bundler-v0.1.0.
+
+Validation
+
+Run:
+
+cargo test -p lexicon-core --quiet
+
+Run:
+
+cargo test --workspace --quiet
+
+If the external MZA checkout is available, run:
+
+bash automation/build_bundle_install/build_bundle_install.sh
+
+If it remains unavailable, report the known external blocker separately. Do not modify MZA or installer code.
+
+Explicit exclusions
+
+Do not implement:
+
+* processing runtime-information construction;
+* processing runtime probe;
+* processing compatibility specialization;
+* processing verification;
+* processing manifest construction;
+* processing staging;
+* processing bundle admission;
+* paired publication;
+* processing runner;
+* processing main.rs;
+* processing execution;
+* raw-transaction discovery;
+* SQLite creation;
+* processing sessions;
+* checkpoints;
+* source workspace migration;
+* managed acquisition runners;
+* runner::run;
+* invocation envelopes;
+* HTTP execution;
+* raw recording;
+* supervision;
+* __operator-host.
+
+Completion report
+
+After completion, replace current.md with a report containing:
+
+* files created and changed;
+* exact public processing API;
+* descriptor representation;
+* exact mandatory function type;
+* contract-version constant;
+* constant-construction proof;
+* positive descriptor tests;
+* every compile-fail case and result;
+* confirmation that a private handler works behind public SOURCE;
+* confirmation that construction does not invoke the handler;
+* acquisition compatibility results;
+* Core and workspace test results;
+* bundle/install result or the known external-MZA blocker.
+
+Then stop. Do not connect the descriptor to runtime information or generate a processing runner.
