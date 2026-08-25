@@ -1,18 +1,154 @@
-# RuntimeInformationV1 implementation report
+Current implementation request: HTTP capability availability and compatibility
 
-## Files changed
-- `lexicon-core/Cargo.toml`
-- `lexicon-core/src/lib.rs`
-- `lexicon-core/src/runtime/mod.rs`
-- `lexicon-core/src/runtime/identity.rs`
-- `lexicon-core/src/protocols/http/capability.rs`
-- `lexicon-core/src/runtime/information.rs`
-- `current.md`
+Objective
 
-## Exact JSON document structure
-The serialized runtime-information document is:
+Add the in-memory model that distinguishes capabilities required by a source from capabilities available in a compiled managed runtime.
 
-```json
+Then add a pure compatibility check that determines whether the runtime satisfies the source descriptor.
+
+This step must not create a runner, execute a source handler, perform a subprocess probe, or admit a runtime.
+
+Architectural requirement
+
+The existing field:
+
+descriptor.required_capabilities
+
+states what the source needs.
+
+It does not state what the compiled Core and runner provide.
+
+The runtime-information model must carry both sets independently:
+
+source requirements
+runtime availability
+
+Compatibility is:
+
+every required capability exists in the available set
+
+Required implementation
+
+1. Extend RuntimeInformationV1
+
+Add a private field:
+
+available_capabilities: HttpCapabilitySet,
+
+The representation becomes conceptually:
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeInformationV1 {
+    identity: RuntimeIdentity,
+    descriptor_contract_version: u32,
+    required_capabilities: HttpCapabilitySet,
+    available_capabilities: HttpCapabilitySet,
+    resume_handler_registered: bool,
+}
+
+Do not create a second capability enum or a second bitset type. Both requirement and availability sets contain the same versioned HttpCapability values.
+
+2. Require availability during construction
+
+Update construction to accept the capabilities compiled into the selected runtime:
+
+pub const fn from_http_source(
+    identity: RuntimeIdentity,
+    source: &HttpSourceContractV1,
+    available_capabilities: HttpCapabilitySet,
+) -> Self;
+
+Do not infer availability from the source’s requirements.
+
+In particular, this is invalid reasoning:
+
+source requires ClientCertificateV1
+therefore runtime provides ClientCertificateV1
+
+The caller must supply the runtime’s actual available set.
+
+3. Add an accessor
+
+Provide:
+
+pub const fn available_capabilities(
+    &self,
+) -> HttpCapabilitySet;
+
+Preserve the existing:
+
+pub const fn required_capabilities(
+    &self,
+) -> HttpCapabilitySet;
+
+4. Add capability-set compatibility operations
+
+Add the smallest required operations to HttpCapabilitySet:
+
+pub const fn is_subset_of(
+    self,
+    available: HttpCapabilitySet,
+) -> bool;
+pub const fn missing_from(
+    self,
+    available: HttpCapabilitySet,
+) -> HttpCapabilitySet;
+
+Semantics:
+
+required.is_subset_of(available)
+
+is true only when every required capability is available.
+
+required.missing_from(available)
+
+returns only required capabilities absent from the available set.
+
+These operations must remain allocation-free and const-friendly.
+
+5. Add a typed compatibility error
+
+Define:
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingHttpCapabilities {
+    missing: HttpCapabilitySet,
+}
+
+Provide:
+
+impl MissingHttpCapabilities {
+    pub const fn missing(&self) -> HttpCapabilitySet;
+}
+
+Do not use String as the compatibility error.
+
+6. Add pure compatibility validation
+
+Provide:
+
+impl RuntimeInformationV1 {
+    pub const fn validate_capabilities(
+        &self,
+    ) -> Result<(), MissingHttpCapabilities>;
+}
+
+It must:
+
+* return Ok(()) when every required capability is available;
+* return all missing requirements together;
+* not invoke acquisition or resume handlers;
+* not inspect the filesystem;
+* not inspect the installed CLI;
+* not use the Core crate version as a proxy for capability availability;
+* not mutate the runtime-information object.
+
+This validates capability-set compatibility only. It must not validate identity or contract-version compatibility.
+
+JSON document update
+
+Extend the serialized document to include runtime availability:
+
 {
   "schema_version": 1,
   "identity": {
@@ -27,98 +163,152 @@ The serialized runtime-information document is:
       "client-certificate-v1"
     ],
     "resume_handler_registered": true
+  },
+  "runtime": {
+    "available_capabilities": [
+      "client-certificate-v1"
+    ]
   }
 }
-```
 
-The document is represented internally by a private `serde` model and is not exposed as the canonical public type.
+Because the runtime-information format has not yet been connected to a released probe or published runtime schema, keep:
 
-## Schema-version constant
-```rust
-pub const RUNTIME_INFORMATION_SCHEMA_VERSION: u32 = 1;
-```
+RUNTIME_INFORMATION_SCHEMA_VERSION == 1
 
-## Encoding and decoding APIs
-```rust
-impl RuntimeInformationV1 {
-    pub fn to_json(&self) -> Result<String, RuntimeInformationEncodingError>;
-    pub fn from_json(input: &str) -> Result<Self, RuntimeInformationDecodingError>;
-}
-```
+Update the private Serde representation and tests accordingly.
 
-The public model remains `RuntimeInformationV1`; the private Serde document is only used as the wire format.
+Decoding must reject:
 
-## Typed error representation
-```rust
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeInformationEncodingError {
-    Serialization(String),
-}
+* a missing runtime object;
+* a missing available_capabilities field;
+* unknown runtime fields;
+* unknown available-capability identifiers;
+* duplicate available capabilities.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeInformationDecodingError {
-    JsonSyntax(String),
-    UnknownSchemaVersion(u32),
-    UnknownIdentifier { field: &'static str, value: String },
-    DuplicateCapability(String),
-    InvalidVersion { field: &'static str, value: u32 },
-    StructuralDocument(String),
-}
-```
+Decoding must not automatically reject missing required capabilities. A structurally valid but incompatible document must decode successfully, after which:
 
-The stable identifier parsing errors are represented by:
-```rust
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeIdentifierError {
-    UnknownIdentifier { kind: &'static str, value: String },
-}
-```
+information.validate_capabilities()
 
-## Stable identifiers accepted
-- `RuntimeProtocol::from_identifier("http") -> Ok(RuntimeProtocol::Http)`
-- `RuntimeOperation::from_identifier("acquisition") -> Ok(RuntimeOperation::Acquisition)`
-- `HttpCapability::from_identifier("client-certificate-v1") -> Ok(HttpCapability::ClientCertificateV1)`
+reports the incompatibility.
 
-No aliases, case folding, or guessed values are accepted.
+No false capability claims
 
-## Deterministic capability ordering
-`HttpCapabilitySet::ordered_capabilities()` returns capabilities in a fixed order (`ClientCertificateV1` first, and only once). The set is serialized from the bitset into a deduplicated `Vec<String>` before JSON emission.
+Do not add a function claiming that ClientCertificateV1 is supplied by the current production HTTP implementation unless that facility actually exists.
 
-## Round-trip and rejection results
-Round-trip validation passed for equality-preserving JSON serialization and deserialization, including a case where `identity.source_contract_version` is `2` while `descriptor.contract_version` is `1`.
+Tests may explicitly construct an available set containing it, but production code must not declare it available merely to make compatibility tests pass.
 
-Malformed-document rejection results covered:
-- invalid JSON
-- missing required fields
-- unknown fields
-- unknown schema versions
-- unknown protocols
-- unknown operations
-- unknown capabilities
-- duplicate capabilities
-- zero contract versions
+Do not add:
 
-## Handler safety confirmation
-- Serialization calls only `identity`, `descriptor`, and capability data.
-- No acquisition or resume function pointer is serialized.
-- No pointer addresses or debug representations are emitted in JSON.
-- The failing acquisition and resume handlers included in tests were not invoked during `to_json()`.
+HttpCapabilitySet::all()
 
-## Compatibility independence confirmation
-The parsed runtime information preserves both:
-- `identity.source_contract_version`
-- `descriptor.contract_version`
+or equivalent as the default runtime availability.
 
-They are validated independently and are not required to be equal during this structural decode step.
+An empty available set must be representable.
 
-## Validation results
-Executed successfully:
-- `cargo test -p lexicon-core --quiet`
-- `cargo test --workspace --quiet`
+Required tests
 
-Result: all tests passed.
+Add tests proving:
 
-## Bundle/install status
-The known external MZA dependency is unavailable in this environment.
-- `automation/build_bundle_install/build_bundle_install.sh` exists, but the required MZA checkout is missing (`automation/build_bundle_mza/mza` is not present).
-- The bundle/install script was not run because the external MZA dependency is not available, and no MZA or installer code was changed.
+1. No requirements plus no availability is compatible.
+2. No requirements plus an available capability is compatible.
+3. A required and available ClientCertificateV1 is compatible.
+4. Required ClientCertificateV1 with empty availability is incompatible.
+5. The compatibility error contains ClientCertificateV1.
+6. missing_from(...) returns only missing requirements.
+7. Repeated capability insertion does not create duplicates.
+8. Construction preserves required and available sets independently.
+9. Compatibility validation does not invoke acquire.
+10. Compatibility validation does not invoke resume.
+11. Runtime information with missing capabilities serializes successfully.
+12. Runtime information with missing capabilities deserializes successfully.
+13. Compatibility is rejected only when validate_capabilities() is called.
+14. Available capabilities serialize with stable deterministic ordering.
+15. Available capabilities survive a JSON round trip.
+16. Duplicate available capabilities in JSON are rejected.
+17. Unknown available capabilities in JSON are rejected.
+18. Missing runtime availability fields are rejected structurally.
+19. Existing identity and descriptor contract-version independence remains unchanged.
+20. All existing Core and workspace tests continue to pass.
+
+Preserve existing behavior
+
+Do not change:
+
+* source scaffolding;
+* source implementation crates;
+* source create;
+* source build;
+* Cargo build invocation;
+* runtime publication;
+* CLI behavior;
+* MZA;
+* Protocol 1;
+* lexicon-bundle;
+* installer behavior;
+* bundle inputs;
+* installed paths.
+
+lexicon-bundle remains a binary installer using cargo-bundler-v0.1.0.
+
+Validation
+
+Run:
+
+cargo test -p lexicon-core --quiet
+
+Run:
+
+cargo test --workspace --quiet
+
+If the external MZA checkout is available, run:
+
+bash automation/build_bundle_install/build_bundle_install.sh
+
+If it remains unavailable, report the known external dependency blocker separately. Do not modify MZA or installer code.
+
+Explicit exclusions
+
+Do not implement:
+
+* production availability for ClientCertificateV1;
+* capability negotiation;
+* automatic capability inference;
+* runner generation;
+* runner::run;
+* runtime-information CLI output;
+* subprocess probing;
+* build-time capability validation;
+* parent admission;
+* child admission;
+* identity validation;
+* contract-version validation;
+* invocation envelopes;
+* runtime.json;
+* executable hashing;
+* source workspace migration;
+* processing capabilities;
+* HTTP transport;
+* raw recording;
+* sessions;
+* supervision;
+* __operator-host.
+
+Completion report
+
+After completion, replace current.md with a focused report containing:
+
+* files changed;
+* the updated RuntimeInformationV1 representation;
+* the updated constructor signature;
+* capability-set operations;
+* the typed compatibility error;
+* compatibility-validation behavior;
+* the updated JSON structure;
+* compatible and incompatible test results;
+* malformed availability-document rejection results;
+* confirmation that incompatibility is not confused with structural decoding failure;
+* confirmation that no production capability was falsely declared available;
+* Core and workspace test results;
+* bundle/install result or the known external-MZA blocker.
+
+Then stop. Do not implement the runtime probe or managed runner.
