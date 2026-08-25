@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+pub mod protocols;
+
 pub struct HttpAcquisitionContext {
     pub source_directory: PathBuf,
     pub raw_data_directory: PathBuf,
@@ -34,10 +36,7 @@ impl HttpAcquisitionContext {
 }
 
 pub trait HttpAcquisition {
-    fn acquire(
-        &self,
-        context: &mut HttpAcquisitionContext,
-    ) -> Result<(), String>;
+    fn acquire(&self, context: &mut HttpAcquisitionContext) -> Result<(), String>;
 }
 
 pub fn run_http_source<A>(acquisition: A) -> Result<(), String>
@@ -47,6 +46,19 @@ where
     let mut context = HttpAcquisitionContext::from_env()?;
     acquisition.acquire(&mut context)
 }
+
+pub mod http {
+    pub use crate::protocols::http::*;
+    pub use crate::{HttpAcquisition, HttpAcquisitionContext, run_http_source};
+}
+
+pub use crate::protocols::http::{
+    AcquisitionError,
+    AcquisitionResult,
+    HttpCapability,
+    HttpSourceContractV1,
+    RuntimeIdentity,
+};
 
 #[cfg(test)]
 mod tests {
@@ -103,5 +115,23 @@ mod tests {
                 source_directory.to_string_lossy().to_string()
             );
         });
+    }
+
+    #[test]
+    fn typed_http_source_contract_rejects_invalid_handler_shapes_at_compile_time() {
+        use std::ffi::OsString;
+
+        fn acquire(
+            context: &mut HttpAcquisitionContext,
+            args: &[OsString],
+        ) -> crate::http::AcquisitionResult<()> {
+            let _ = context;
+            let _ = args;
+            Ok(())
+        }
+
+        let contract = crate::http::HttpSourceContractV1::new(acquire);
+        assert!(contract.capabilities().is_empty());
+        assert!(contract.resume_fn().is_none());
     }
 }
