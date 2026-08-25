@@ -3,7 +3,10 @@ use std::path::PathBuf;
 pub mod protocols;
 pub mod runtime;
 pub use protocols::http;
-pub use runtime::{RuntimeIdentity, RuntimeOperation, RuntimeProtocol};
+pub use runtime::{
+    RuntimeIdentifierError, RuntimeIdentity, RuntimeInformationDecodingError,
+    RuntimeInformationEncodingError, RuntimeOperation, RuntimeProtocol,
+};
 
 pub struct HttpAcquisitionContext {
     pub source_directory: PathBuf,
@@ -39,10 +42,7 @@ impl HttpAcquisitionContext {
 }
 
 pub trait HttpAcquisition {
-    fn acquire(
-        &self,
-        context: &mut HttpAcquisitionContext,
-    ) -> Result<(), String>;
+    fn acquire(&self, context: &mut HttpAcquisitionContext) -> Result<(), String>;
 }
 
 pub fn run_http_source<A>(acquisition: A) -> Result<(), String>
@@ -60,7 +60,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{run_http_source, HttpAcquisition, HttpAcquisitionContext};
+    use super::{HttpAcquisition, HttpAcquisitionContext, run_http_source};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -68,7 +68,10 @@ mod tests {
 
     impl HttpAcquisition for Dummy {
         fn acquire(&self, context: &mut HttpAcquisitionContext) -> Result<(), String> {
-            assert_eq!(context.raw_data_directory, context.source_directory.join("data/raw"));
+            assert_eq!(
+                context.raw_data_directory,
+                context.source_directory.join("data/raw")
+            );
             Ok(())
         }
     }
@@ -79,7 +82,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let source_directory = std::env::temp_dir().join(format!("lexicon-http-context-{timestamp}"));
+        let source_directory =
+            std::env::temp_dir().join(format!("lexicon-http-context-{timestamp}"));
         fs::create_dir_all(&source_directory).unwrap();
 
         let prior = std::env::var("LEXICON_SOURCE_DIRECTORY").ok();

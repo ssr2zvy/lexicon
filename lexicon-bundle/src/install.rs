@@ -52,7 +52,9 @@ pub fn do_install(dest: &Destinations) -> i32 {
         Ok(path_modification) => {
             println!("[[LEXICON-BUNDLE]] Lexicon installed successfully.");
             if path_modification.method == "profile-append" {
-                println!("[[LEXICON-BUNDLE]] Start a new terminal session for the `lexicon` command to become available.");
+                println!(
+                    "[[LEXICON-BUNDLE]] Start a new terminal session for the `lexicon` command to become available."
+                );
             }
             0
         }
@@ -158,8 +160,7 @@ fn now_unix() -> u64 {
 #[cfg(unix)]
 fn set_executable(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-        .map_err(|err| err.to_string())
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(|err| err.to_string())
 }
 
 pub fn write_record(record_path: &Path, record: &InstallationRecord) -> Result<(), String> {
@@ -188,7 +189,7 @@ fn validate_archive(archive_bytes: &[u8]) -> Result<(), String> {
             other => {
                 return Err(format!(
                     "archive contains a disallowed entry type: {other:?}"
-                ))
+                ));
             }
         }
     }

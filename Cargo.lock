@@ -238,6 +238,8 @@ dependencies = [
 name = "lexicon-core"
 version = "0.1.2"
 dependencies = [
+ "serde",
+ "serde_json",
  "trybuild",
 ]
 

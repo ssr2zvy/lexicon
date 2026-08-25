@@ -37,10 +37,8 @@ mod tests {
     #[test]
     fn rejects_unsafe_project_names() {
         for bad_name in [".", "..", "bad/name", "bad\\name", "../evil"] {
-            let result = lexicon_framework::commands::init(
-                &std::path::PathBuf::from("/tmp"),
-                bad_name,
-            );
+            let result =
+                lexicon_framework::commands::init(&std::path::PathBuf::from("/tmp"), bad_name);
             assert!(result.is_err(), "expected invalid project name: {bad_name}");
         }
     }
@@ -68,7 +66,8 @@ mod tests {
 
     #[test]
     fn does_not_delete_stale_pid_style_temp_directory() {
-        let parent = std::env::temp_dir().join(format!("lexicon-init-stale-temp-{}", std::process::id()));
+        let parent =
+            std::env::temp_dir().join(format!("lexicon-init-stale-temp-{}", std::process::id()));
         let stale = parent.join(".example-project.tmp-12345");
         let _ = fs::remove_dir_all(&parent);
         fs::create_dir_all(&stale).unwrap();
@@ -82,7 +81,8 @@ mod tests {
 
     #[test]
     fn successful_init_leaves_no_temp_directory() {
-        let parent = std::env::temp_dir().join(format!("lexicon-init-temp-clean-{}", std::process::id()));
+        let parent =
+            std::env::temp_dir().join(format!("lexicon-init-temp-clean-{}", std::process::id()));
         let _ = fs::remove_dir_all(&parent);
         fs::create_dir_all(&parent).unwrap();
 
@@ -91,11 +91,19 @@ mod tests {
         let temp_dirs = fs::read_dir(&parent)
             .unwrap()
             .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".clean-project.tmp-"))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".clean-project.tmp-")
+            })
             .collect::<Vec<_>>();
 
         assert!(project_dir.exists());
-        assert!(temp_dirs.is_empty(), "no temp directories should remain after successful init");
+        assert!(
+            temp_dirs.is_empty(),
+            "no temp directories should remain after successful init"
+        );
         let _ = fs::remove_dir_all(parent);
     }
 }

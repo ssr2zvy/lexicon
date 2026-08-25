@@ -81,7 +81,10 @@ fn try_symlink_into_path(cli_dest: &Path, path_var: &str) -> Option<PathModifica
 /// candidate if verification fails — rolling back the unverified edit rather
 /// than leaving stray PATH exports in multiple files.
 #[cfg(target_os = "linux")]
-fn ensure_linux_path_via_profile(bin_dir: &Path, entry: String) -> Result<PathModification, String> {
+fn ensure_linux_path_via_profile(
+    bin_dir: &Path,
+    entry: String,
+) -> Result<PathModification, String> {
     let home = env::var("HOME").map_err(|_| "could not determine $HOME".to_string())?;
     let export_line = format!("export PATH=\"{entry}:$PATH\"\n");
     let candidates = candidate_profiles(&home);
@@ -184,7 +187,11 @@ fn verify_path_picked_up(kind: ProfileKind, bin_dir: &Path) -> bool {
         ProfileKind::Login => ("bash", &["-l", "-c", "echo \"$PATH\""]),
     };
 
-    let output = Command::new(shell).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    let output = Command::new(shell)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
     match output {
         Ok(out) if out.status.success() => {
             let reported_path = String::from_utf8_lossy(&out.stdout);
@@ -208,7 +215,9 @@ pub fn reverse_path_modification(path_modification: &PathModification) {
 
 fn reverse_profile_append(path_modification: &PathModification) {
     let location = Path::new(&path_modification.location);
-    let Ok(contents) = fs::read_to_string(location) else { return };
+    let Ok(contents) = fs::read_to_string(location) else {
+        return;
+    };
 
     let export_line = format!("export PATH=\"{}:$PATH\"", path_modification.entry);
     let filtered: Vec<&str> = contents
@@ -226,8 +235,8 @@ fn reverse_profile_append(path_modification: &PathModification) {
 /// broadcasts WM_SETTINGCHANGE so running processes pick up the change.
 #[cfg(target_os = "windows")]
 pub fn ensure_windows_path(bin_dir: &Path) -> Result<PathModification, String> {
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
     use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 
     let entry = bin_dir.display().to_string();
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -236,7 +245,9 @@ pub fn ensure_windows_path(bin_dir: &Path) -> Result<PathModification, String> {
         .map_err(|err| format!("failed to open HKCU\\Environment: {err}"))?;
 
     let current: String = env_key.get_value("Path").unwrap_or_default();
-    let already_present = current.split(';').any(|existing| existing.eq_ignore_ascii_case(&entry));
+    let already_present = current
+        .split(';')
+        .any(|existing| existing.eq_ignore_ascii_case(&entry));
     if already_present {
         return Ok(PathModification {
             entry,
@@ -246,8 +257,14 @@ pub fn ensure_windows_path(bin_dir: &Path) -> Result<PathModification, String> {
         });
     }
 
-    let new_path = if current.is_empty() { entry.clone() } else { format!("{current};{entry}") };
-    env_key.set_value("Path", &new_path).map_err(|err| format!("failed to update user PATH: {err}"))?;
+    let new_path = if current.is_empty() {
+        entry.clone()
+    } else {
+        format!("{current};{entry}")
+    };
+    env_key
+        .set_value("Path", &new_path)
+        .map_err(|err| format!("failed to update user PATH: {err}"))?;
 
     broadcast_environment_change();
 
@@ -264,10 +281,13 @@ fn broadcast_environment_change() {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
+        HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
     };
 
-    let param: Vec<u16> = OsStr::new("Environment").encode_wide().chain(std::iter::once(0)).collect();
+    let param: Vec<u16> = OsStr::new("Environment")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let mut result: usize = 0;
     unsafe {
         SendMessageTimeoutW(

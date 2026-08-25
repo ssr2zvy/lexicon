@@ -1,7 +1,7 @@
 mod cli;
 
-use cli::{dispatch, Cli};
 use clap::Parser;
+use cli::{Cli, dispatch};
 
 fn main() {
     let cli = Cli::parse();

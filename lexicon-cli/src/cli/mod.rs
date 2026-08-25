@@ -47,10 +47,7 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
             };
             println!(
                 "Parsed data command: {} (bg={}, abandon_past_fail={}, passthrough={:?})",
-                action,
-                command.bg,
-                command.abandon_past_fail,
-                command.passthrough
+                action, command.bg, command.abandon_past_fail, command.passthrough
             );
             Ok(())
         }
@@ -88,7 +85,8 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
             }
         },
         Some(RootCommand::Init(command)) => {
-            let result = lexicon_framework::commands::init(&command.parent_path, &command.project_name)?;
+            let result =
+                lexicon_framework::commands::init(&command.parent_path, &command.project_name)?;
             println!(
                 "[lexicon] Initialized project '{}' at {}",
                 command.project_name,
@@ -125,7 +123,11 @@ mod tests {
 
         match cli.command {
             Some(RootCommand::Source(SourceCommand {
-                action: SourceAction::Create(CreateSourceCommand { source_name, protocol }),
+                action:
+                    SourceAction::Create(CreateSourceCommand {
+                        source_name,
+                        protocol,
+                    }),
             })) => {
                 assert_eq!(source_name, "example-source");
                 assert_eq!(protocol, "http");
@@ -152,7 +154,11 @@ mod tests {
             r
         };
 
-        assert!(result.is_ok(), "source scaffold should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "source scaffold should succeed: {:?}",
+            result
+        );
         let info = result.unwrap();
         assert_eq!(info.source_name, "example-source");
         assert_eq!(info.protocol, "http");
@@ -233,8 +239,7 @@ mod tests {
         }
 
         assert_eq!(
-            fs::read_to_string(project_root.join("sources/preexisting-scratch/keep.txt"))
-                .unwrap(),
+            fs::read_to_string(project_root.join("sources/preexisting-scratch/keep.txt")).unwrap(),
             "keep-me\n"
         );
         assert!(

@@ -1,7 +1,10 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "source", about = "Create or build a source definition and project scaffold.")]
+#[command(
+    name = "source",
+    about = "Create or build a source definition and project scaffold."
+)]
 pub struct SourceCommand {
     #[command(subcommand)]
     pub action: SourceAction,
@@ -78,7 +81,10 @@ mod tests {
     #[test]
     fn rejects_create_source_command_when_protocol_is_missing() {
         let result = Cli::try_parse_from(["lexicon", "source", "create", "example-source"]);
-        assert!(result.is_err(), "--protocol must be required and cannot be omitted");
+        assert!(
+            result.is_err(),
+            "--protocol must be required and cannot be omitted"
+        );
     }
 
     #[test]
@@ -90,7 +96,10 @@ mod tests {
             "example-source",
             "--protocol",
         ]);
-        assert!(result.is_err(), "--protocol requires a value and must fail without one");
+        assert!(
+            result.is_err(),
+            "--protocol requires a value and must fail without one"
+        );
     }
 
     #[test]
@@ -149,19 +158,21 @@ mod tests {
 
     #[test]
     fn rejects_build_source_command_without_protocol_value() {
-        let result = Cli::try_parse_from([
-            "lexicon",
-            "source",
-            "build",
-            "example-source",
-            "--protocol",
-        ]);
+        let result =
+            Cli::try_parse_from(["lexicon", "source", "build", "example-source", "--protocol"]);
         assert!(result.is_err(), "--protocol requires a value");
     }
 
     #[test]
     fn rejects_old_source_new_command() {
-        let result = Cli::try_parse_from(["lexicon", "source", "new", "example-source", "--protocol", "http"]);
+        let result = Cli::try_parse_from([
+            "lexicon",
+            "source",
+            "new",
+            "example-source",
+            "--protocol",
+            "http",
+        ]);
         assert!(result.is_err(), "source new must be rejected");
     }
 
@@ -191,8 +202,14 @@ mod tests {
         let create_error = create.normalized_protocol().unwrap_err();
         let build_error = build.normalized_protocol().unwrap_err();
 
-        assert!(create_error.contains("unsupported protocol 'browser'; only 'http' is currently supported"));
-        assert!(build_error.contains("unsupported protocol 'browser'; only 'http' is currently supported"));
+        assert!(
+            create_error
+                .contains("unsupported protocol 'browser'; only 'http' is currently supported")
+        );
+        assert!(
+            build_error
+                .contains("unsupported protocol 'browser'; only 'http' is currently supported")
+        );
         assert!(!create_error.contains("source creation"));
         assert!(!build_error.contains("source build"));
     }
