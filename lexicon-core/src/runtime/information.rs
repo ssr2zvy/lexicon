@@ -483,6 +483,26 @@ mod tests {
     }
 
     #[test]
+    fn processing_identity_serializes_and_round_trips() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
+
+        let json = info.to_json().unwrap();
+        assert!(json.contains("\"operation\":\"processing\""));
+
+        let parsed = RuntimeInformationV1::from_json(&json).unwrap();
+        assert_eq!(parsed, info);
+        assert_eq!(parsed.identity(), identity);
+        assert_eq!(parsed.identity().operation(), crate::runtime::RuntimeOperation::Processing);
+    }
+
+    #[test]
     fn capability_ordering_is_deterministic() {
         let identity = RuntimeIdentity::http_acquisition("example-source", 1);
         let source = HttpSourceContractV1::new(acquire_handler)
@@ -663,6 +683,20 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_accepts_matching_processing_identity() {
+        let identity = RuntimeIdentity::http_processing("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            identity,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
+
+        assert_eq!(info.validate_compatibility(identity), Ok(()));
+    }
+
+    #[test]
     fn compatibility_rejects_different_identity() {
         let identity = RuntimeIdentity::http_acquisition("example-source", 1);
         let source = HttpSourceContractV1::new(acquire_handler)
@@ -682,6 +716,46 @@ mod tests {
             RuntimeCompatibilityError::IdentityMismatch { expected, actual }
                 if expected == RuntimeIdentity::http_acquisition("other-source", 1)
                     && actual == identity
+        ));
+    }
+
+    #[test]
+    fn compatibility_rejects_acquisition_vs_processing_mismatch() {
+        let expected = RuntimeIdentity::http_acquisition("example-source", 1);
+        let actual = RuntimeIdentity::http_processing("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            actual,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
+
+        let error = info.validate_compatibility(expected).unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeCompatibilityError::IdentityMismatch { expected: expected_identity, actual: actual_identity }
+                if expected_identity == expected && actual_identity == actual
+        ));
+    }
+
+    #[test]
+    fn compatibility_rejects_processing_vs_acquisition_mismatch() {
+        let expected = RuntimeIdentity::http_processing("example-source", 1);
+        let actual = RuntimeIdentity::http_acquisition("example-source", 1);
+        let source = HttpSourceContractV1::new(acquire_handler)
+            .requires(HttpCapability::ClientCertificateV1);
+        let info = RuntimeInformationV1::from_http_source(
+            actual,
+            &source,
+            HttpCapabilitySet::empty().insert(HttpCapability::ClientCertificateV1),
+        );
+
+        let error = info.validate_compatibility(expected).unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeCompatibilityError::IdentityMismatch { expected: expected_identity, actual: actual_identity }
+                if expected_identity == expected && actual_identity == actual
         ));
     }
 
