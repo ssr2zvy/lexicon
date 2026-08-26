@@ -1244,6 +1244,13 @@ mod tests {
 
     static TEST_CWD_LOCK: Mutex<()> = Mutex::new(());
 
+    fn unique_test_dir(prefix: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .unwrap()
+    }
+
     fn with_test_cwd<T>(project_root: &std::path::Path, func: impl FnOnce() -> T) -> T {
         let _guard = TEST_CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
@@ -1297,14 +1304,10 @@ mod tests {
 
     #[test]
     fn configured_sources_directory_rejects_symlink_escape() {
-        let root =
-            std::env::temp_dir().join(format!("lexicon-sources-symlink-{}", std::process::id()));
-        let outside =
-            std::env::temp_dir().join(format!("lexicon-sources-outside-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&outside);
-        fs::create_dir_all(&root).unwrap();
-        fs::create_dir_all(&outside).unwrap();
+        let outside_dir = unique_test_dir("lexicon-sources-outside-");
+        let root_dir = unique_test_dir("lexicon-sources-symlink-");
+        let root = root_dir.path().to_path_buf();
+        let outside = outside_dir.path().to_path_buf();
 
         let symlink_path = root.join("sources");
         std::os::unix::fs::symlink(&outside, &symlink_path).unwrap();
@@ -1316,25 +1319,14 @@ mod tests {
 
         let result = configured_sources_directory(&root);
         assert!(result.is_err(), "symlink escape should be rejected");
-
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
     fn configured_sources_directory_rejects_escaping_symlink_then_missing_child() {
-        let root = std::env::temp_dir().join(format!(
-            "lexicon-sources-escape-child-{}",
-            std::process::id()
-        ));
-        let outside = std::env::temp_dir().join(format!(
-            "lexicon-sources-escape-outside-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&outside);
-        fs::create_dir_all(&root).unwrap();
-        fs::create_dir_all(&outside).unwrap();
+        let outside_dir = unique_test_dir("lexicon-sources-escape-outside-");
+        let root_dir = unique_test_dir("lexicon-sources-escape-child-");
+        let root = root_dir.path().to_path_buf();
+        let outside = outside_dir.path().to_path_buf();
 
         let link = root.join("link");
         std::os::unix::fs::symlink(&outside, &link).unwrap();
@@ -1349,16 +1341,13 @@ mod tests {
             result.is_err(),
             "escaped symlink path with missing child should be rejected"
         );
-
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
     fn find_project_root_rejects_descendant_nested_project() {
-        let root = std::env::temp_dir().join(format!("lexicon-nested-root-{}", std::process::id()));
+        let root_dir = unique_test_dir("lexicon-nested-root-");
+        let root = root_dir.path().to_path_buf();
         let nested = root.join("tools/inner");
-        let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&nested).unwrap();
         fs::write(
             root.join("lexicon.toml"),
@@ -1379,17 +1368,15 @@ mod tests {
         let text = result.unwrap_err();
         assert!(text.contains("Outer project:"));
         assert!(text.contains("Nested project:"));
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn find_descendant_project_root_prunes_excluded_directories() {
-        let root = std::env::temp_dir().join(format!("lexicon-prune-root-{}", std::process::id()));
+        let root_dir = unique_test_dir("lexicon-prune-root-");
+        let root = root_dir.path().to_path_buf();
         let raw = root.join("data/raw");
         let processed = root.join("data/processed");
         let nested = root.join("data/nested-project");
-        let _ = fs::remove_dir_all(&root);
 
         fs::create_dir_all(&raw).unwrap();
         fs::create_dir_all(&processed).unwrap();
@@ -1422,8 +1409,6 @@ mod tests {
             Some(nested),
             "data/raw and data/processed must be ignored while a real nested project under data/ is still detected"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1513,20 +1498,14 @@ mod tests {
     fn stage_runtime_file_uses_randomized_unique_suffixes_in_runtime_directory() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root =
-            std::env::temp_dir().join(format!("lexicon-runtime-staging-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-
+        let root_dir = unique_test_dir("lexicon-runtime-staging-");
+        let root = root_dir.path().to_path_buf();
         let executable = root.join("example-source-process-data");
         fs::write(&executable, "binary\n").unwrap();
         let permissions = std::fs::Permissions::from_mode(0o755);
         fs::set_permissions(&executable, permissions).unwrap();
 
-        let stale_pid_path = root.join(format!(
-            ".example-source-process-data.staging-{}",
-            std::process::id()
-        ));
+        let stale_pid_path = root.join(".example-source-process-data.staging");
         fs::write(&stale_pid_path, "stale-value\n").unwrap();
 
         let first = stage_runtime_file(&root, &executable, "process-data").unwrap();
@@ -1551,10 +1530,7 @@ mod tests {
         );
         assert_ne!(
             first.file_name().unwrap().to_string_lossy().as_ref(),
-            format!(
-                ".example-source-process-data.staging-{}",
-                std::process::id()
-            )
+            ".example-source-process-data.staging"
         );
         assert!(
             stale_pid_path.exists(),
@@ -1568,14 +1544,12 @@ mod tests {
         let _ = fs::remove_file(&first);
         let _ = fs::remove_file(&second);
         let _ = fs::remove_file(&stale_pid_path);
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn build_single_crate_keeps_the_built_executable_available_after_return() {
-        let root =
-            std::env::temp_dir().join(format!("lexicon-build-artifact-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root_dir = unique_test_dir("lexicon-build-artifact-");
+        let root = root_dir.path().to_path_buf();
         fs::create_dir_all(root.join("src")).unwrap();
 
         fs::write(
@@ -1603,16 +1577,12 @@ mod tests {
                 .to_string_lossy()
                 .contains("temporary-build-check")
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn publication_transaction_publishes_both_executables_successfully() {
-        let root =
-            std::env::temp_dir().join(format!("lexicon-publish-success-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root_dir = unique_test_dir("lexicon-publish-success-");
+        let root = root_dir.path().to_path_buf();
 
         let get_final = root.join("get-raw-data");
         let process_final = root.join("process-data");
@@ -1645,16 +1615,12 @@ mod tests {
         fs::remove_file(process_backup.as_ref().unwrap()).unwrap();
         assert!(!get_backup.as_ref().unwrap().exists());
         assert!(!process_backup.as_ref().unwrap().exists());
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn publication_transaction_backs_up_existing_executables() {
-        let root =
-            std::env::temp_dir().join(format!("lexicon-publish-backup-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root_dir = unique_test_dir("lexicon-publish-backup-");
+        let root = root_dir.path().to_path_buf();
 
         let get_final = root.join("get-raw-data");
         let process_final = root.join("process-data");
@@ -1671,43 +1637,33 @@ mod tests {
             fs::read_to_string(&process_backup).unwrap(),
             "old-process\n"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn framework_init_returns_typed_result_not_exit() {
-        let parent = std::env::temp_dir().join(format!("lexicon-fw-init-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&parent);
-        fs::create_dir_all(&parent).unwrap();
+        let parent_dir = unique_test_dir("lexicon-fw-init-");
+        let parent = parent_dir.path().to_path_buf();
 
         let result = init(&parent, "my-project");
         assert!(result.is_ok());
         let info = result.unwrap();
         assert_eq!(info.project_directory, parent.join("my-project"));
         assert!(info.project_directory.join("lexicon.toml").is_file());
-
-        let _ = fs::remove_dir_all(&parent);
     }
 
     #[test]
     fn framework_init_fails_with_error_not_exit_for_bad_name() {
-        let parent =
-            std::env::temp_dir().join(format!("lexicon-fw-init-bad-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&parent);
-        fs::create_dir_all(&parent).unwrap();
+        let parent_dir = unique_test_dir("lexicon-fw-init-bad-");
+        let parent = parent_dir.path().to_path_buf();
 
         let result = init(&parent, "../evil");
         assert!(result.is_err(), "bad project name should return Err");
-
-        let _ = fs::remove_dir_all(&parent);
     }
 
     #[test]
     fn framework_source_create_fails_with_error_not_exit_for_bad_protocol() {
-        let temp = std::env::temp_dir().join(format!("lexicon-fw-sc-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&temp);
-        fs::create_dir_all(&temp).unwrap();
+        let temp_dir = unique_test_dir("lexicon-fw-sc-");
+        let temp = temp_dir.path().to_path_buf();
         fs::write(
             temp.join("lexicon.toml"),
             "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n",
@@ -1721,18 +1677,12 @@ mod tests {
             result.unwrap_err().contains("unsupported protocol"),
             "error must describe the unsupported protocol"
         );
-
-        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]
     fn publication_failure_in_second_publish_restores_the_first_runtime() {
-        let root = std::env::temp_dir().join(format!(
-            "lexicon-publish-second-fail-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root_dir = unique_test_dir("lexicon-publish-second-fail-");
+        let root = root_dir.path().to_path_buf();
 
         let get_final = root.join("get-raw-data");
         let process_final = root.join("process-data");
@@ -1772,18 +1722,12 @@ mod tests {
         assert_eq!(fs::read_to_string(&process_final).unwrap(), "old-process\n");
         assert!(!get_staged.exists());
         assert!(!process_staged.exists());
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn publication_failure_restores_both_previous_runtime_executables() {
-        let root = std::env::temp_dir().join(format!(
-            "lexicon-publish-both-restore-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root_dir = unique_test_dir("lexicon-publish-both-restore-");
+        let root = root_dir.path().to_path_buf();
 
         let get_final = root.join("get-raw-data");
         let process_final = root.join("process-data");
@@ -1821,16 +1765,12 @@ mod tests {
         assert_eq!(fs::read_to_string(&process_final).unwrap(), "old-process\n");
         assert!(!get_staged.exists());
         assert!(!process_staged.exists());
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn transaction_cleanup_removes_staged_files_after_failure() {
-        let root =
-            std::env::temp_dir().join(format!("lexicon-staged-cleanup-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root_dir = unique_test_dir("lexicon-staged-cleanup-");
+        let root = root_dir.path().to_path_buf();
 
         let get_final = root.join("get-raw-data");
         let process_final = root.join("process-data");
@@ -1855,16 +1795,12 @@ mod tests {
         assert!(!process_staged.exists());
         assert!(get_final.exists());
         assert!(process_final.exists());
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn transaction_cleanup_removes_backup_files_after_success() {
-        let root =
-            std::env::temp_dir().join(format!("lexicon-backup-cleanup-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root_dir = unique_test_dir("lexicon-backup-cleanup-");
+        let root = root_dir.path().to_path_buf();
 
         let get_final = root.join("get-raw-data");
         let process_final = root.join("process-data");
@@ -1882,16 +1818,12 @@ mod tests {
         fs::remove_file(&process_backup).unwrap();
         assert!(!get_backup.exists());
         assert!(!process_backup.exists());
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn unrelated_runtime_files_remain_untouched() {
-        let root =
-            std::env::temp_dir().join(format!("lexicon-unrelated-keep-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root_dir = unique_test_dir("lexicon-unrelated-keep-");
+        let root = root_dir.path().to_path_buf();
 
         let get_final = root.join("get-raw-data");
         let process_final = root.join("process-data");
@@ -1912,16 +1844,12 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(fs::read_to_string(&unrelated).unwrap(), "keep-me\n");
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn gitignore_file_remains_untouched_after_runtime_restore() {
-        let root =
-            std::env::temp_dir().join(format!("lexicon-gitignore-restore-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root_dir = unique_test_dir("lexicon-gitignore-restore-");
+        let root = root_dir.path().to_path_buf();
 
         let get_directory = root.join("get-raw-data");
         let process_directory = root.join("process-data");
@@ -1960,17 +1888,14 @@ mod tests {
             fs::read_to_string(process_directory.join(".gitignore")).unwrap(),
             "*\n!.gitignore\n"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn finalize_source_staging_cleans_up_tempdir_when_rename_fails() {
-        let root =
-            std::env::temp_dir().join(format!("lexicon-stage-cleanup-{}", std::process::id()));
+        let root_dir = unique_test_dir("lexicon-stage-cleanup-");
+        let root = root_dir.path().to_path_buf();
         let sources_dir = root.join("sources");
         let source_dir = sources_dir.join("example-source");
-        let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&sources_dir).unwrap();
         fs::write(
             root.join("lexicon.toml"),
@@ -2001,7 +1926,5 @@ mod tests {
             source_dir.join("existing.txt").exists(),
             "existing content must remain untouched"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 }
