@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 use std::fmt;
-use std::path::{Component, Path};
 
 use lexicon_core::runtime::{RuntimeInformationDecodingError, RuntimeInformationEncodingError, RuntimeInformationV1};
 
+use super::is_safe_executable_name;
 use super::runtime_verification::VerifiedHttpRuntime;
 
 pub const RUNTIME_MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -315,33 +315,6 @@ impl<'de> serde::Deserialize<'de> for RuntimeManifestDocumentV1 {
             runtime_information: document.runtime_information,
         })
     }
-}
-
-fn is_safe_executable_name(name: &str) -> bool {
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('\0')
-        || name.contains('/')
-        || name.contains('\\')
-        || name.contains(':')
-        || Path::new(name).is_absolute()
-    {
-        return false;
-    }
-
-    let mut components = Path::new(name).components();
-    if matches!(components.next(), Some(Component::CurDir | Component::ParentDir)) {
-        return false;
-    }
-
-    if let Some(Component::Normal(part)) = components.next() {
-        if part == std::ffi::OsStr::new(".") || part == std::ffi::OsStr::new("..") {
-            return false;
-        }
-    }
-
-    !name.is_empty() && !name.starts_with("/") && !name.starts_with("\\")
 }
 
 fn reject_duplicate_json_keys(input: &str) -> Result<(), RuntimeManifestDecodingError> {

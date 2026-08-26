@@ -1,9 +1,43 @@
+use std::path::{Component, Path};
+
+fn is_safe_executable_name(name: &str) -> bool {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('\0')
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains(':')
+        || Path::new(name).is_absolute()
+    {
+        return false;
+    }
+
+    let mut components = Path::new(name).components();
+    if matches!(components.next(), Some(Component::CurDir | Component::ParentDir)) {
+        return false;
+    }
+
+    if let Some(Component::Normal(part)) = components.next() {
+        if part == std::ffi::OsStr::new(".") || part == std::ffi::OsStr::new("..") {
+            return false;
+        }
+    }
+
+    !name.is_empty() && !name.starts_with("/") && !name.starts_with("\\")
+}
+
+pub mod processing_runtime_manifest;
 pub mod runtime_bundle_admission;
 pub mod runtime_manifest;
 pub mod runtime_probe;
 pub mod runtime_staging;
 pub mod runtime_verification;
 
+pub use processing_runtime_manifest::{
+    ProcessingRuntimeManifestConstructionError, ProcessingRuntimeManifestDecodingError,
+    ProcessingRuntimeManifestEncodingError, ProcessingRuntimeManifestV1,
+};
 pub use runtime_bundle_admission::{
     MAX_RUNTIME_MANIFEST_BYTES, AdmittedHttpRuntimeBundle, RuntimeBundleAdmissionError,
     admit_http_runtime_bundle,
