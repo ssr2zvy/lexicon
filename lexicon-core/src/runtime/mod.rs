@@ -11,6 +11,7 @@ pub use information::{
 };
 pub use invocation::{
     ProjectInvocationIdentity, RuntimeExecutionMode, RuntimeInvocationConstructionError,
+    RuntimeInvocationDecodingError, RuntimeInvocationEncodingError,
     RuntimeInvocationEnvelopeV1, RuntimeInvocationIdentifierError, RuntimeInvocationValueError,
     RuntimeSupervisionMode, SessionInvocationIdentity, RUNTIME_INVOCATION_PROTOCOL_VERSION,
 };
