@@ -15,7 +15,8 @@ pub use invocation::{
 };
 pub use runner::{
     ProcessingRuntimeInformationProbeError, ProcessingRuntimeInformationProbeOutcome,
-    RUNTIME_INFORMATION_PROBE_ARGUMENT, try_write_runtime_information_probe,
+    ProcessingRuntimeInvocationExecutionError, RUNTIME_INFORMATION_PROBE_ARGUMENT,
+    run_processing_runtime_invocation, try_write_runtime_information_probe,
 };
 pub use runtime_information::{
     ProcessingRuntimeCompatibilityError, ProcessingRuntimeInformationConstructionError,

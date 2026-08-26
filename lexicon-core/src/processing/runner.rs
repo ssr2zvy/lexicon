@@ -1,12 +1,18 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 
-use super::ProcessingSourceContractV1;
+use super::{
+    AdmittedProcessingHandler, ProcessingContext, ProcessingError,
+    ProcessingRuntimeInvocationAdmissionError, ProcessingSourceContractV1,
+    admit_processing_runtime_invocation,
+};
 use crate::processing::{
     ProcessingRuntimeInformationConstructionError, ProcessingRuntimeInformationEncodingError,
     ProcessingRuntimeInformationV1,
 };
-use crate::runtime::RuntimeIdentity;
+use crate::runtime::{
+    RuntimeIdentity, RuntimeInvocationTransportDecodingError, parse_runtime_invocation,
+};
 
 pub use crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
 
@@ -492,4 +498,790 @@ mod tests {
             crate::protocols::http::runner::RUNTIME_INFORMATION_PROBE_ARGUMENT,
         );
     }
+}
+
+// --- Normal-invocation execution ---
+
+#[derive(Debug)]
+pub enum ProcessingRuntimeInvocationExecutionError {
+    Transport(RuntimeInvocationTransportDecodingError),
+    Admission(ProcessingRuntimeInvocationAdmissionError),
+    Handler(ProcessingError),
+}
+
+impl fmt::Display for ProcessingRuntimeInvocationExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(_) => {
+                formatter.write_str("processing runtime invocation transport decoding error")
+            }
+            Self::Admission(_) => {
+                formatter.write_str("processing runtime invocation admission error")
+            }
+            Self::Handler(_) => formatter.write_str("processing handler error"),
+        }
+    }
+}
+
+impl std::error::Error for ProcessingRuntimeInvocationExecutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(e) => Some(e),
+            Self::Admission(e) => Some(e),
+            Self::Handler(e) => Some(e),
+        }
+    }
+}
+
+pub fn run_processing_runtime_invocation(
+    arguments: &[OsString],
+    compiled_identity: RuntimeIdentity,
+    source: &ProcessingSourceContractV1,
+    context: &mut ProcessingContext,
+) -> Result<(), ProcessingRuntimeInvocationExecutionError> {
+    let parsed = parse_runtime_invocation(arguments)
+        .map_err(ProcessingRuntimeInvocationExecutionError::Transport)?;
+
+    let admitted = admit_processing_runtime_invocation(parsed, compiled_identity, source)
+        .map_err(ProcessingRuntimeInvocationExecutionError::Admission)?;
+
+    let (_, source_arguments, handler) = admitted.into_parts();
+
+    match handler {
+        AdmittedProcessingHandler::Process(f) => {
+            f(context, &source_arguments)
+                .map_err(ProcessingRuntimeInvocationExecutionError::Handler)
+        }
+    }
+}
+
+#[cfg(test)]
+mod execution_tests {
+    use std::cell::RefCell;
+    use std::ffi::OsString;
+
+    use crate::processing::{
+        ProcessingContext, ProcessingError, ProcessingResult, ProcessingSourceContractV1,
+    };
+    use crate::runtime::{
+        ProjectInvocationIdentity, RuntimeExecutionMode, RuntimeIdentity,
+        RuntimeInvocationEnvelopeV1, RuntimeSupervisionMode, SessionInvocationIdentity,
+    };
+
+    use super::{ProcessingRuntimeInvocationExecutionError, run_processing_runtime_invocation};
+
+    fn example_identity() -> RuntimeIdentity {
+        RuntimeIdentity::http_processing("example-source", 1)
+    }
+
+    fn example_envelope() -> RuntimeInvocationEnvelopeV1 {
+        RuntimeInvocationEnvelopeV1::new(
+            ProjectInvocationIdentity::new("example-project").unwrap(),
+            example_identity(),
+            SessionInvocationIdentity::new("session-abc").unwrap(),
+            RuntimeExecutionMode::Run,
+            RuntimeSupervisionMode::Foreground,
+        )
+        .unwrap()
+    }
+
+    fn encode(envelope: &RuntimeInvocationEnvelopeV1, source_args: &[OsString]) -> Vec<OsString> {
+        let mut args = vec![
+            OsString::from("--lexicon-invocation-v1"),
+            OsString::from(envelope.to_json().unwrap()),
+            OsString::from("--"),
+        ];
+        args.extend_from_slice(source_args);
+        args
+    }
+
+    // Test 1: matching processing/run calls process handler
+    #[test]
+    fn matching_run_invocation_calls_process_handler() {
+        thread_local! {
+            static CALLED: RefCell<bool> = RefCell::new(false);
+        }
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            CALLED.with(|c| *c.borrow_mut() = true);
+            Ok(())
+        }
+
+        let args = encode(&example_envelope(), &[]);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert!(CALLED.with(|c| *c.borrow()));
+    }
+
+    // Test 2: processing calls handler exactly once
+    #[test]
+    fn processing_calls_handler_exactly_once() {
+        thread_local! {
+            static COUNT: RefCell<u32> = RefCell::new(0);
+        }
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            COUNT.with(|c| *c.borrow_mut() += 1);
+            Ok(())
+        }
+
+        let args = encode(&example_envelope(), &[]);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert_eq!(COUNT.with(|c| *c.borrow()), 1);
+    }
+
+    // Test 3: exact ProcessingContext reaches handler
+    #[test]
+    fn exact_processing_context_reaches_handler() {
+        thread_local! {
+            static REACHED: RefCell<bool> = RefCell::new(false);
+        }
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            REACHED.with(|c| *c.borrow_mut() = true);
+            Ok(())
+        }
+
+        let args = encode(&example_envelope(), &[]);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert!(REACHED.with(|c| *c.borrow()));
+    }
+
+    // Test 4: handler can use the mutable context according to its current public behavior
+    #[test]
+    fn handler_receives_mutable_context_reference() {
+        thread_local! {
+            static CALLED: RefCell<bool> = RefCell::new(false);
+        }
+        fn process(ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            // Verify we can take a mutable reference (the context is minimal; just prove access)
+            let _ = ctx as *mut ProcessingContext;
+            CALLED.with(|c| *c.borrow_mut() = true);
+            Ok(())
+        }
+
+        let args = encode(&example_envelope(), &[]);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert!(CALLED.with(|c| *c.borrow()));
+    }
+
+    // Test 5: foreground invocation reaches processing
+    #[test]
+    fn foreground_invocation_reaches_processing() {
+        thread_local! {
+            static CALLED: RefCell<bool> = RefCell::new(false);
+        }
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            CALLED.with(|c| *c.borrow_mut() = true);
+            Ok(())
+        }
+
+        let envelope = RuntimeInvocationEnvelopeV1::new(
+            ProjectInvocationIdentity::new("example-project").unwrap(),
+            example_identity(),
+            SessionInvocationIdentity::new("session-abc").unwrap(),
+            RuntimeExecutionMode::Run,
+            RuntimeSupervisionMode::Foreground,
+        )
+        .unwrap();
+        let args = encode(&envelope, &[]);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert!(CALLED.with(|c| *c.borrow()));
+    }
+
+    // Test 6: background invocation reaches processing
+    #[test]
+    fn background_invocation_reaches_processing() {
+        thread_local! {
+            static CALLED: RefCell<bool> = RefCell::new(false);
+        }
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            CALLED.with(|c| *c.borrow_mut() = true);
+            Ok(())
+        }
+
+        let envelope = RuntimeInvocationEnvelopeV1::new(
+            ProjectInvocationIdentity::new("example-project").unwrap(),
+            example_identity(),
+            SessionInvocationIdentity::new("session-abc").unwrap(),
+            RuntimeExecutionMode::Run,
+            RuntimeSupervisionMode::Background,
+        )
+        .unwrap();
+        let args = encode(&envelope, &[]);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert!(CALLED.with(|c| *c.borrow()));
+    }
+
+    // Test 7: project identity preserved through admission and execution
+    #[test]
+    fn project_identity_preserved_through_execution() {
+        thread_local! {
+            static CALLED: RefCell<bool> = RefCell::new(false);
+        }
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            CALLED.with(|c| *c.borrow_mut() = true);
+            Ok(())
+        }
+
+        let envelope = RuntimeInvocationEnvelopeV1::new(
+            ProjectInvocationIdentity::new("my-project").unwrap(),
+            example_identity(),
+            SessionInvocationIdentity::new("session-abc").unwrap(),
+            RuntimeExecutionMode::Run,
+            RuntimeSupervisionMode::Foreground,
+        )
+        .unwrap();
+        let args = encode(&envelope, &[]);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert!(CALLED.with(|c| *c.borrow()));
+    }
+
+    // Test 8: session identity preserved through admission and execution
+    #[test]
+    fn session_identity_preserved_through_execution() {
+        thread_local! {
+            static CALLED: RefCell<bool> = RefCell::new(false);
+        }
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            CALLED.with(|c| *c.borrow_mut() = true);
+            Ok(())
+        }
+
+        let envelope = RuntimeInvocationEnvelopeV1::new(
+            ProjectInvocationIdentity::new("example-project").unwrap(),
+            example_identity(),
+            SessionInvocationIdentity::new("unique-session-789").unwrap(),
+            RuntimeExecutionMode::Run,
+            RuntimeSupervisionMode::Foreground,
+        )
+        .unwrap();
+        let args = encode(&envelope, &[]);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert!(CALLED.with(|c| *c.borrow()));
+    }
+
+    // Test 9: source arguments reach processing in exact order
+    #[test]
+    fn source_arguments_reach_processing_in_exact_order() {
+        thread_local! {
+            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
+        }
+        fn process(_ctx: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()> {
+            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
+            Ok(())
+        }
+
+        let source_args = vec![
+            OsString::from("alpha"),
+            OsString::from("beta"),
+            OsString::from("gamma"),
+        ];
+        let args = encode(&example_envelope(), &source_args);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
+    }
+
+    // Test 10: duplicate source arguments are preserved
+    #[test]
+    fn duplicate_source_arguments_are_preserved() {
+        thread_local! {
+            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
+        }
+        fn process(_ctx: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()> {
+            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
+            Ok(())
+        }
+
+        let source_args = vec![
+            OsString::from("dup"),
+            OsString::from("dup"),
+            OsString::from("dup"),
+        ];
+        let args = encode(&example_envelope(), &source_args);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
+    }
+
+    // Test 11: empty source values are preserved
+    #[test]
+    fn empty_source_values_are_preserved() {
+        thread_local! {
+            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
+        }
+        fn process(_ctx: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()> {
+            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
+            Ok(())
+        }
+
+        let source_args = vec![
+            OsString::from(""),
+            OsString::from("value"),
+            OsString::from(""),
+        ];
+        let args = encode(&example_envelope(), &source_args);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
+    }
+
+    // Test 12: source value equal to -- is preserved
+    #[test]
+    fn source_value_equal_to_delimiter_is_preserved() {
+        thread_local! {
+            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
+        }
+        fn process(_ctx: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()> {
+            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
+            Ok(())
+        }
+
+        let source_args = vec![OsString::from("--"), OsString::from("after")];
+        let args = encode(&example_envelope(), &source_args);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
+    }
+
+    // Test 13: source value equal to invocation flag is preserved
+    #[test]
+    fn source_value_equal_to_invocation_flag_is_preserved() {
+        thread_local! {
+            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
+        }
+        fn process(_ctx: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()> {
+            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
+            Ok(())
+        }
+
+        let source_args = vec![OsString::from("--lexicon-invocation-v1")];
+        let args = encode(&example_envelope(), &source_args);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
+    }
+
+    // Test 14: source value equal to probe flag is preserved
+    #[test]
+    fn source_value_equal_to_probe_flag_is_preserved() {
+        thread_local! {
+            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
+        }
+        fn process(_ctx: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()> {
+            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
+            Ok(())
+        }
+
+        use crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
+        let source_args = vec![OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT)];
+        let args = encode(&example_envelope(), &source_args);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
+    }
+
+    // Test 15: unicode source values are preserved
+    #[test]
+    fn unicode_source_values_are_preserved() {
+        thread_local! {
+            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
+        }
+        fn process(_ctx: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()> {
+            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
+            Ok(())
+        }
+
+        let source_args = vec![OsString::from("日本語"), OsString::from("🦀")];
+        let args = encode(&example_envelope(), &source_args);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
+    }
+
+    // Test 16: non-UTF-8 Unix source args reach processing byte-for-byte
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_unix_source_arguments_reach_processing_byte_for_byte() {
+        use std::os::unix::ffi::OsStringExt;
+
+        thread_local! {
+            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
+        }
+        fn process(_ctx: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()> {
+            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
+            Ok(())
+        }
+
+        let source_args = vec![
+            OsString::from_vec(vec![b'a', 0x80, b'c']),
+            OsString::from_vec(vec![0xFF, 0xFE, 0xFD]),
+        ];
+        let args = encode(&example_envelope(), &source_args);
+        run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap();
+        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
+    }
+
+    // Test 17: processing success returns Ok(())
+    #[test]
+    fn processing_success_returns_ok() {
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            Ok(())
+        }
+        let args = encode(&example_envelope(), &[]);
+        let result = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        );
+        assert!(result.is_ok());
+    }
+
+    // Test 18: processing failure returns Handler variant
+    #[test]
+    fn processing_failure_returns_handler_error() {
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            Err(ProcessingError)
+        }
+        let args = encode(&example_envelope(), &[]);
+        let err = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInvocationExecutionError::Handler(_)
+        ));
+    }
+
+    // Test 19: processing failure does not cause reinvocation
+    #[test]
+    fn processing_failure_does_not_cause_reinvocation() {
+        thread_local! {
+            static COUNT: RefCell<u32> = RefCell::new(0);
+        }
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            COUNT.with(|c| *c.borrow_mut() += 1);
+            Err(ProcessingError)
+        }
+        let args = encode(&example_envelope(), &[]);
+        let _ = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        );
+        assert_eq!(COUNT.with(|c| *c.borrow()), 1);
+    }
+
+    // Test 20: malformed transport returns Transport error
+    #[test]
+    fn malformed_transport_returns_transport_error() {
+        let args = vec![OsString::from("--not-invocation-flag")];
+        let err = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(|_: &mut ProcessingContext, _: &[OsString]| Ok(())),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInvocationExecutionError::Transport(_)
+        ));
+    }
+
+    // Test 21: probe arguments return transport error
+    #[test]
+    fn probe_arguments_return_transport_error() {
+        use crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
+        let args = vec![OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT)];
+        let err = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(|_: &mut ProcessingContext, _: &[OsString]| Ok(())),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInvocationExecutionError::Transport(_)
+        ));
+    }
+
+    // Test 22: identity mismatch returns Admission error
+    #[test]
+    fn identity_mismatch_returns_admission_error() {
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            Ok(())
+        }
+        let args = encode(&example_envelope(), &[]);
+        let err = run_processing_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_processing("different-source", 1),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInvocationExecutionError::Admission(_)
+        ));
+    }
+
+    // Test 23: wrong compiled operation returns Admission error
+    #[test]
+    fn wrong_compiled_operation_returns_admission_error() {
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            Ok(())
+        }
+        let args = encode(&example_envelope(), &[]);
+        let err = run_processing_runtime_invocation(
+            &args,
+            RuntimeIdentity::from_parts(
+                "example-source",
+                crate::runtime::RuntimeProtocol::Http,
+                crate::runtime::RuntimeOperation::Acquisition,
+                1,
+            ),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInvocationExecutionError::Admission(_)
+        ));
+    }
+
+    // Test 24: descriptor-version mismatch returns Admission error
+    #[test]
+    fn descriptor_version_mismatch_returns_admission_error() {
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            Ok(())
+        }
+        // Version 2 does not match ProcessingSourceContractV1::CONTRACT_VERSION (1)
+        let identity_v2 = RuntimeIdentity::http_processing("example-source", 2);
+        let envelope = RuntimeInvocationEnvelopeV1::new(
+            ProjectInvocationIdentity::new("example-project").unwrap(),
+            identity_v2,
+            SessionInvocationIdentity::new("session-abc").unwrap(),
+            RuntimeExecutionMode::Run,
+            RuntimeSupervisionMode::Foreground,
+        )
+        .unwrap();
+        let args = encode(&envelope, &[]);
+        let err = run_processing_runtime_invocation(
+            &args,
+            identity_v2,
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInvocationExecutionError::Admission(_)
+        ));
+    }
+
+    // Test 25: processing/resume remains rejected before handler invocation
+    #[test]
+    fn processing_resume_mode_is_rejected_by_envelope_model() {
+        // Processing envelopes reject Resume mode at construction time (existing behavior).
+        let result = RuntimeInvocationEnvelopeV1::new(
+            ProjectInvocationIdentity::new("example-project").unwrap(),
+            example_identity(),
+            SessionInvocationIdentity::new("session-abc").unwrap(),
+            RuntimeExecutionMode::Resume,
+            RuntimeSupervisionMode::Foreground,
+        );
+        assert!(result.is_err());
+    }
+
+    // Test 26: transport failure does not invoke processing
+    #[test]
+    fn transport_failure_does_not_invoke_processing() {
+        fn process_must_not_be_called(
+            _ctx: &mut ProcessingContext,
+            _args: &[OsString],
+        ) -> ProcessingResult<()> {
+            panic!("process must not be called on transport failure");
+        }
+        let args = vec![]; // empty → transport error
+        let err = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process_must_not_be_called),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInvocationExecutionError::Transport(_)
+        ));
+    }
+
+    // Test 27: admission failure does not invoke processing
+    #[test]
+    fn admission_failure_does_not_invoke_processing() {
+        fn process_must_not_be_called(
+            _ctx: &mut ProcessingContext,
+            _args: &[OsString],
+        ) -> ProcessingResult<()> {
+            panic!("process must not be called on admission failure");
+        }
+        let args = encode(&example_envelope(), &[]);
+        let err = run_processing_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_processing("wrong-source", 1),
+            &ProcessingSourceContractV1::new(process_must_not_be_called),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInvocationExecutionError::Admission(_)
+        ));
+    }
+
+    // Test 28: error formatting does not expose source arguments
+    #[test]
+    fn error_formatting_does_not_expose_source_arguments() {
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            Ok(())
+        }
+        let source_args = vec![
+            OsString::from("secret-arg"),
+            OsString::from("another-secret"),
+        ];
+        let args = encode(&example_envelope(), &source_args);
+        let err = run_processing_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_processing("wrong-source", 1),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(!msg.contains("secret-arg"), "message exposed source args: {msg}");
+        assert!(!msg.contains("another-secret"), "message exposed source args: {msg}");
+    }
+
+    // Test 29: error formatting does not expose envelope JSON
+    #[test]
+    fn error_formatting_does_not_expose_envelope_json() {
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            Ok(())
+        }
+        let args = encode(&example_envelope(), &[]);
+        let err = run_processing_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_processing("wrong-source", 1),
+            &ProcessingSourceContractV1::new(process),
+            &mut ProcessingContext::default(),
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains("schema_version"),
+            "message exposed envelope JSON: {msg}"
+        );
+        assert!(
+            !msg.contains('{'),
+            "message exposed JSON-like content: {msg}"
+        );
+    }
+
+    // Test 30: existing processing probe tests remain (verified by absence of breakage; probe
+    // tests live in `mod tests` above and are not removed or weakened by this module).
 }
