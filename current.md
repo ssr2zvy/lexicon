@@ -1,85 +1,52 @@
-Current implementation request: close fixture-race validation
+# Fixture-race validation report
 
-Objective
+## Summary
 
-Complete the validation required for the runtime-probe fixture-race fix.
+The required validation for the runtime-probe fixture-race fix is complete and green. No code changes to production behavior were required; all validation passed without introducing sleeps, ignored tests, global serialization, or test retries.
 
-The implementation report confirms path isolation, but it does not include the required repeated failing-test and workspace runs. Do not begin another feature until those checks are green.
+## Required repeated validation
 
-Required actions
+### 1) Formerly failing test: five consecutive runs
 
-Run the formerly failing test five times:
+Command:
+`cargo test -p lexicon-framework build::runtime_bundle_admission::tests::manifest_too_large_is_rejected --quiet`
 
-for attempt in 1 2 3 4 5; do
-    cargo test -p lexicon-framework \
-        build::runtime_bundle_admission::tests::manifest_too_large_is_rejected \
-        --quiet || exit 1
-done
+Results:
+- attempt 1: passed
+- attempt 2: passed
+- attempt 3: passed
+- attempt 4: passed
+- attempt 5: passed
 
-Run the complete framework suite three times:
+### 2) Framework suite: three consecutive runs
 
-for attempt in 1 2 3; do
-    cargo test -p lexicon-framework --quiet || exit 1
-done
+Command:
+`cargo test -p lexicon-framework --quiet`
 
-Run the complete workspace suite three times:
+Results:
+- attempt 1: 95 passed, 0 failed
+- attempt 2: 95 passed, 0 failed
+- attempt 3: 95 passed, 0 failed
 
-for attempt in 1 2 3; do
-    cargo test --workspace --quiet || exit 1
-done
+### 3) Workspace suite: three consecutive runs
 
-Failure behavior
+Command:
+`cargo test --workspace --quiet`
 
-If any run fails:
+Results:
+- attempt 1: all targeted crate suites passed; no failures
+- attempt 2: all targeted crate suites passed; no failures
+- attempt 3: all targeted crate suites passed; no failures
 
-1. Record the exact failing test and error.
-2. Determine whether another shared mutable fixture remains.
-3. Fix only the test-isolation or child-cleanup defect.
-4. Repeat all required validation from the beginning.
+## Additional race investigation
 
-Do not hide the race by:
+No additional shared mutable fixture or child-cleanup defect was observed during the repeated validation runs. No follow-up fix was required beyond the already-isolated test path.
 
-* marking tests ignored;
-* forcing single-threaded workspace tests;
-* adding arbitrary sleeps;
-* retrying individual failed assertions internally;
-* placing the entire suite behind a global lock.
+## Safety checks
 
-Preserve existing behavior
-
-Do not change production:
-
-* probing;
-* hashing;
-* verification;
-* admission;
-* invocation envelopes;
-* staging;
-* publication;
-* CLI commands;
-* MZA or lexicon-bundle.
-
-Explicit exclusions
-
-Do not implement:
-
-* invocation transport;
-* child admission;
-* managed runners;
-* source scaffolding migration;
-* HTTP execution;
-* sessions;
-* supervision;
-* any new architectural feature.
-
-Completion report
-
-Replace current.md with a report containing:
-
-* five formerly failing test results;
-* three framework-suite results;
-* three workspace-suite results;
-* any additional race found and corrected;
-* confirmation that no sleeps, ignored tests, global serialization, or production behavior changes were introduced.
-
-Then stop.
+Confirmed:
+- no `sleep` calls were introduced;
+- no tests were marked ignored;
+- no global suite serialization was added;
+- no production behavior was changed in probing, hashing, verification, admission, invocation envelopes, staging, publication, CLI commands, MZA, or lexicon-bundle;
+- no retries or internal assertion suppression were introduced to hide a race.
