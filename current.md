@@ -1,59 +1,202 @@
-# Runtime invocation-envelope JSON contract
+Current implementation request: eliminate runtime-probe fixture race
 
-Implemented the strict runtime invocation envelope in `lexicon-core`.
+Objective
 
-## Changes made
-- Added `RuntimeInvocationEncodingError` and `RuntimeInvocationDecodingError` to the runtime API.
-- Implemented `RuntimeInvocationEnvelopeV1::to_json` and `RuntimeInvocationEnvelopeV1::from_json` in `lexicon-core/src/runtime/invocation.rs`.
-- Used a private Serde representation with `deny_unknown_fields` and exact field names:
-  - `schema_version`
-  - `project.name`
-  - `runtime.source`
-  - `runtime.protocol`
-  - `runtime.operation`
-  - `runtime.source_contract_version`
-  - `session.id`
-  - `execution.mode`
-  - `execution.supervision`
-- Enforced canonical runtime/execution/supervision identifiers and validation through the existing constructors and identifier parsers.
-- Rejected duplicate keys, invalid JSON, unknown fields, missing fields, unsupported schema versions, invalid project/session identities, and invalid construction cases.
-- Exported the new runtime error types from `lexicon-core/src/runtime/mod.rs`.
-- Added regression coverage for serializing, round-tripping, and invalid input rejection.
+Fix the intermittent ExecutableFileBusy workspace-test failure before adding another architectural feature.
 
-## Validation
-- `cargo test -p lexicon-core --quiet` ✅
-- `cargo test --workspace --quiet` ⚠️ still fails in `lexicon-framework`, specifically `build::runtime_bundle_admission::tests::manifest_too_large_is_rejected`, due `Probe(Spawn { source: Os { code: 26, kind: ExecutableFileBusy, message: "Text file busy" })`. This failure is outside the runtime invocation change and remains a pre-existing/unrelated workspace issue.
+The known failure is:
 
-## Files updated
-- `lexicon-core/src/runtime/invocation.rs`
-- `lexicon-core/src/runtime/mod.rs`
+build::runtime_bundle_admission::tests::
+    manifest_too_large_is_rejected
+Probe(
+    Spawn {
+        source: Os {
+            code: 26,
+            kind: ExecutableFileBusy,
+            message: "Text file busy",
+        },
+    },
+)
 
-19. Invalid session identity is rejected.
-20. Unknown protocol is rejected.
-21. Unknown operation is rejected.
-22. Unknown execution mode is rejected.
-23. Unknown supervision mode is rejected.
-24. Identifier capitalization and whitespace are rejected.
-25. Zero source contract version is rejected.
-26. Processing/resume is rejected through construction validation.
-27. An args field is rejected as unknown.
-28. Encoding and decoding invoke no acquisition handler.
-29. Encoding and decoding invoke no processing handler.
-30. Existing in-memory invocation tests remain unchanged.
-31. Existing runtime identity and runtime-information JSON tests pass.
-32. All workspace tests pass repeatedly.
+This micro-step is test-infrastructure hardening only.
+
+Do not change production runtime probing, admission, staging, publication, or invocation behavior.
+
+Root cause to verify
+
+Inspect every runtime-probe test fixture for shared executable paths or writes occurring near execution.
+
+The expected cause is:
+
+one test writes or replaces a fixture executable
+while another test tries to execute that same path
+
+On Linux this can produce ETXTBSY.
+
+Confirm the actual cause in the completion report rather than assuming it.
+
+Required fixture isolation
+
+Every test that creates, writes, changes, or executes a runtime fixture must use:
+
+* its own TempDir;
+* its own executable path inside that directory;
+* no shared mutable global fixture path;
+* no fixed filename in a shared directory;
+* no reuse of another test’s candidate executable.
+
+The same filename may be used inside different unique temporary directories.
+
+Write-before-execute boundary
+
+Fixture creation must follow this order:
+
+1. Create the test’s unique temporary directory.
+2. Create the fixture executable.
+3. Write all fixture bytes.
+4. Flush the file.
+5. Call sync_all() where appropriate.
+6. Set required permissions.
+7. Drop every writable file handle.
+8. Only then pass the path to hashing, probing, verification, staging, or admission.
+
+No writable handle to the executable may remain open when the process is spawned.
+
+Immutable fixture behavior
+
+After a fixture becomes executable, ordinary tests must treat that fixture path as immutable.
+
+Tests requiring changed bytes must:
+
+* use a separate unique path; or
+* perform mutation through an explicitly synchronized private test seam where no process is executing the file.
+
+Do not overwrite an executable that another thread or process may currently be running.
+
+Shared test helper
+
+Add or refactor a private test helper such as:
+
+struct RuntimeProbeFixture {
+    _directory: TempDir,
+    executable: PathBuf,
+}
+
+Provide operation-specific fixture constructors for deterministic modes, for example:
+
+RuntimeProbeFixture::http_valid(...)
+RuntimeProbeFixture::processing_valid(...)
+RuntimeProbeFixture::malformed(...)
+RuntimeProbeFixture::nonzero_exit(...)
+RuntimeProbeFixture::delayed(...)
+
+Equivalent organization is acceptable.
+
+The fixture owner must remain alive for the entire test.
+
+Do not expose fixture helpers in production APIs.
+
+Audit scope
+
+Audit tests under at least:
+
+lexicon-framework/src/build/runtime_probe.rs
+lexicon-framework/src/build/runtime_verification.rs
+lexicon-framework/src/build/runtime_staging.rs
+lexicon-framework/src/build/runtime_bundle_admission.rs
+lexicon-framework/src/publication/
+
+Search for:
+
+* fixed temporary executable names;
+* shared paths;
+* File::create followed by execution without dropping the handle;
+* fs::write against an executable currently used elsewhere;
+* current-directory mutation;
+* global environment mutation;
+* fixture cleanup while a child may still be alive.
+
+Correct only test infrastructure needed to eliminate races.
+
+Child cleanup verification
+
+Ensure every successfully spawned fixture child is reaped before its fixture TempDir is dropped.
+
+Timeout tests must:
+
+1. kill the child;
+2. wait for it;
+3. join output readers;
+4. then allow fixture cleanup.
+
+Production behavior must remain unchanged
+
+Do not change:
+
+* probe argument;
+* process timeout;
+* output limits;
+* error precedence;
+* hashing rules;
+* admission rules;
+* runtime schemas;
+* staging layout;
+* publication behavior.
+
+If production code is already correct, modify only tests and private test helpers.
+
+If the failure reveals an actual child-reaping defect in production probing, fix only that defect and report it explicitly.
+
+Required tests
+
+Verify:
+
+1. manifest_too_large_is_rejected passes alone.
+2. It passes while other probe tests run in parallel.
+3. Acquisition probe tests use isolated executable paths.
+4. Processing probe tests use isolated executable paths.
+5. Mutation tests do not overwrite executing fixtures.
+6. Timeout children are reaped before fixture cleanup.
+7. No writable fixture handle remains open at spawn.
+8. No test relies on one shared mutable runtime executable.
+9. Existing failure classifications remain unchanged.
+10. Runtime invocation-envelope tests remain unchanged.
+11. All workspace tests pass repeatedly.
+
+Required validation
+
+Run the formerly failing test repeatedly:
+
+for attempt in 1 2 3 4 5; do
+    cargo test -p lexicon-framework \
+        build::runtime_bundle_admission::tests::manifest_too_large_is_rejected \
+        --quiet || exit 1
+done
+
+Run the framework suite repeatedly:
+
+for attempt in 1 2 3; do
+    cargo test -p lexicon-framework --quiet || exit 1
+done
+
+Run the workspace suite repeatedly:
+
+cargo test --workspace --quiet
+cargo test --workspace --quiet
+cargo test --workspace --quiet
+
+Do not serialize the entire test suite behind one global lock unless a truly process-global resource cannot be isolated.
+
+Path isolation is preferred.
 
 Preserve existing behavior
 
 Do not change:
 
-* in-memory envelope construction rules;
-* runtime identity behavior;
+* invocation-envelope APIs or JSON;
 * source descriptors;
 * runtime-information schemas;
-* probe behavior;
-* hashing;
-* verification;
+* probing semantics;
 * manifests;
 * staging;
 * bundle admission;
@@ -61,74 +204,43 @@ Do not change:
 * source scaffolding;
 * source create;
 * source build;
-* Cargo invocation;
 * CLI behavior;
 * MZA;
 * Protocol 1;
 * lexicon-bundle;
-* installer behavior;
-* bundle inputs;
-* installed paths.
-
-lexicon-bundle remains a binary installer built through cargo-bundler-v0.1.0.
-
-Validation
-
-Run:
-
-cargo test -p lexicon-core --quiet
-
-Run:
-
-cargo test --workspace --quiet
-cargo test --workspace --quiet
-
-If the external MZA checkout is available, run:
-
-bash automation/build_bundle_install/build_bundle_install.sh
-
-If unavailable, report the known external blocker separately. Do not modify MZA or installer code.
+* installer behavior.
 
 Explicit exclusions
 
 Do not implement:
 
-* invocation command-line syntax;
-* base64 or other argv encoding;
-* envelope files;
-* source-argument splitting;
+* invocation command-line transport;
 * child runtime admission;
-* descriptor compatibility checks against the envelope;
-* resume-handler presence validation;
-* managed runner generation;
-* runner main.rs;
+* managed runners;
 * runner::run;
 * runtime execution;
-* project-path transport;
-* session creation or locking;
-* HTTP execution;
+* HTTP transport;
 * raw recording;
-* processing SQLite behavior;
-* foreground supervision;
-* background supervision;
+* processing;
+* sessions;
+* supervision;
 * __operator-host;
-* source build integration.
+* build integration;
+* MZA dependency recovery.
 
 Completion report
 
 After completion, replace current.md with a report containing:
 
+* confirmed root cause;
 * files changed;
-* exact invocation JSON;
-* use of the invocation protocol version;
-* encoding and decoding APIs;
-* typed encoding and decoding errors;
-* constructor and identifier delegation;
-* successful round trips;
-* every malformed-document rejection result;
-* confirmation that source arguments and paths are absent;
-* proof that no handler was invoked;
-* Core and repeated workspace test results;
-* bundle/install result or the known external-MZA blocker.
+* fixture ownership and isolation model;
+* write/flush/drop ordering;
+* child-reaping confirmation;
+* whether production code required any correction;
+* formerly failing test results across five runs;
+* framework results across three runs;
+* workspace results across three runs;
+* confirmation that production behavior was unchanged.
 
-Then stop. Do not transport or execute the envelope.
+Then stop. Do not add another runtime feature until the repeated workspace validation is green.
