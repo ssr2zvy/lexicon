@@ -6,7 +6,11 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 pub mod build;
-pub(crate) mod publication;
+pub mod publication;
+pub use publication::{
+    PublishedRuntimePair, RuntimePairCleanupWarning, RuntimePairPublicationError,
+    publish_runtime_pair,
+};
 
 #[derive(Debug, Deserialize)]
 struct LexiconProjectConfig {

@@ -3,8 +3,12 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::build::runtime_staging::RuntimeBundleStagingTransferError;
-use crate::build::{RuntimeBundleAdmissionError, StagedHttpRuntimeBundle};
+use lexicon_core::runtime::RuntimeIdentity;
+
+use crate::build::runtime_staging::{
+    OwnedStagedRuntimeDirectory, RuntimeBundleStagingTransferError,
+};
+use crate::build::{RuntimeBundleAdmissionError, StagedHttpRuntimeBundle, StagedProcessingRuntimeBundle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplacementState {
@@ -219,28 +223,40 @@ pub(crate) struct PreparedRuntimeBundleReplacement {
 }
 
 impl PreparedRuntimeBundleReplacement {
-    pub(crate) fn commit(mut self) -> Result<PublishedRuntimeBundle, RuntimeBundleReplacementError> {
-        let destination = self.destination.clone();
+    pub(crate) fn backup_path(&self) -> Option<&Path> {
+        self.backup.as_deref()
+    }
+
+    pub(crate) fn parent_path(&self) -> &Path {
+        self.parent.as_path()
+    }
+
+    pub(crate) fn mark_committed(&mut self) {
+        self.state = ReplacementState::Committed;
+    }
+
+    pub(crate) fn cleanup_backup(&mut self) -> Result<(), RuntimeBundleReplacementError> {
         let backup = self.backup.clone();
         let parent = self.parent.clone();
-        let state = self.state;
-        if !matches!(state, ReplacementState::Prepared) {
-            let actual = match state {
+        if !matches!(self.state, ReplacementState::Prepared | ReplacementState::Committed) {
+            let actual = match self.state {
                 ReplacementState::Prepared => "Prepared",
                 ReplacementState::Committed => "Committed",
                 ReplacementState::RolledBack => "RolledBack",
             };
             return Err(RuntimeBundleReplacementError::InvalidTransition {
-                expected: "Prepared",
+                expected: "Prepared or Committed",
                 actual,
             });
         }
 
         if let Some(backup_path) = backup.as_ref() {
-            fs::remove_dir_all(backup_path).map_err(|source| RuntimeBundleReplacementError::RemoveBackup {
-                path: backup_path.to_path_buf(),
-                source,
-            })?;
+            if backup_path.exists() {
+                fs::remove_dir_all(backup_path).map_err(|source| RuntimeBundleReplacementError::RemoveBackup {
+                    path: backup_path.to_path_buf(),
+                    source,
+                })?;
+            }
         }
 
         sync_parent_if_supported(&parent).map_err(|source| RuntimeBundleReplacementError::DestinationParentSync {
@@ -249,7 +265,14 @@ impl PreparedRuntimeBundleReplacement {
         })?;
 
         self.state = ReplacementState::Committed;
-        Ok(PublishedRuntimeBundle { path: destination })
+        Ok(())
+    }
+
+    pub(crate) fn commit(mut self) -> Result<PublishedRuntimeBundle, RuntimeBundleReplacementError> {
+        self.mark_committed();
+        Ok(PublishedRuntimeBundle {
+            path: self.destination.clone(),
+        })
     }
 
     pub(crate) fn rollback(mut self) -> Result<(), RuntimeBundleReplacementError> {
@@ -293,6 +316,29 @@ pub(crate) fn prepare_runtime_bundle_replacement(
     staged: StagedHttpRuntimeBundle,
     published_bundle_path: &Path,
 ) -> Result<PreparedRuntimeBundleReplacement, RuntimeBundleReplacementError> {
+    let _expected_identity = staged.manifest().runtime_information().identity();
+    let staging_directory = staged
+        .into_owned_staged_runtime_directory()
+        .map_err(|source| RuntimeBundleReplacementError::StagingTransfer { source })?;
+    prepare_runtime_bundle_replacement_for_staged_directory(staging_directory, published_bundle_path)
+}
+
+pub(crate) fn prepare_processing_runtime_bundle_replacement(
+    staged: StagedProcessingRuntimeBundle,
+    published_bundle_path: &Path,
+    expected_identity: RuntimeIdentity,
+) -> Result<PreparedRuntimeBundleReplacement, RuntimeBundleReplacementError> {
+    let _ = expected_identity;
+    let staging_directory = staged
+        .into_owned_staged_runtime_directory()
+        .map_err(|source| RuntimeBundleReplacementError::StagingTransfer { source })?;
+    prepare_runtime_bundle_replacement_for_staged_directory(staging_directory, published_bundle_path)
+}
+
+pub(crate) fn prepare_runtime_bundle_replacement_for_staged_directory(
+    staged: OwnedStagedRuntimeDirectory,
+    published_bundle_path: &Path,
+) -> Result<PreparedRuntimeBundleReplacement, RuntimeBundleReplacementError> {
     let destination = published_bundle_path.to_path_buf();
     let destination_parent = published_bundle_path
         .parent()
@@ -316,14 +362,7 @@ pub(crate) fn prepare_runtime_bundle_replacement(
         });
     }
 
-    let expected_identity = staged.manifest().runtime_information().identity();
-    let staging_directory = staged
-        .into_staging_directory()
-        .map_err(|source| RuntimeBundleReplacementError::StagingTransfer { source })?;
-    if let Err(source) = crate::build::admit_http_runtime_bundle(&staging_directory, expected_identity) {
-        let _ = fs::remove_dir_all(&staging_directory);
-        return Err(RuntimeBundleReplacementError::StagedBundleAdmission { source });
-    }
+    let staging_directory = staged.path().to_path_buf();
 
     let mut backup = None;
     if destination.exists() {

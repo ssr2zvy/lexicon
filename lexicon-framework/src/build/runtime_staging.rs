@@ -293,6 +293,21 @@ impl std::error::Error for ProcessingRuntimeBundleStagingError {
 }
 
 #[derive(Debug)]
+pub(crate) struct OwnedStagedRuntimeDirectory {
+    path: PathBuf,
+}
+
+impl OwnedStagedRuntimeDirectory {
+    pub(crate) fn path(&self) -> &Path {
+        self.path.as_path()
+    }
+
+    pub(crate) fn into_path(self) -> PathBuf {
+        self.path
+    }
+}
+
+#[derive(Debug)]
 pub struct StagedHttpRuntimeBundle {
     directory: tempfile::TempDir,
     executable_path: PathBuf,
@@ -343,6 +358,14 @@ impl StagedHttpRuntimeBundle {
     pub(crate) fn into_staging_directory(self) -> Result<PathBuf, RuntimeBundleStagingTransferError> {
         Ok(self.directory.keep())
     }
+
+    pub(crate) fn into_owned_staged_runtime_directory(
+        self,
+    ) -> Result<OwnedStagedRuntimeDirectory, RuntimeBundleStagingTransferError> {
+        Ok(OwnedStagedRuntimeDirectory {
+            path: self.directory.keep(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -372,6 +395,14 @@ impl StagedProcessingRuntimeBundle {
 
     pub(crate) fn into_staging_directory(self) -> Result<PathBuf, RuntimeBundleStagingTransferError> {
         Ok(self.directory.keep())
+    }
+
+    pub(crate) fn into_owned_staged_runtime_directory(
+        self,
+    ) -> Result<OwnedStagedRuntimeDirectory, RuntimeBundleStagingTransferError> {
+        Ok(OwnedStagedRuntimeDirectory {
+            path: self.directory.keep(),
+        })
     }
 }
 
