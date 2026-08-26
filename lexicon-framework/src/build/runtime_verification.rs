@@ -4,9 +4,13 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+use lexicon_core::processing::ProcessingRuntimeInformationV1;
 use lexicon_core::runtime::{RuntimeIdentity, RuntimeInformationV1};
 
-use super::runtime_probe::{AdmittedRuntimeInformation, RuntimeProbeExecutionError, probe_http_runtime_information};
+use super::runtime_probe::{
+    AdmittedProcessingRuntimeInformation, AdmittedRuntimeInformation, ProcessingRuntimeProbeExecutionError,
+    RuntimeProbeExecutionError, probe_http_runtime_information, probe_processing_runtime_information,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HashedRuntimeArtifact {
@@ -129,6 +133,37 @@ pub enum HttpRuntimeVerificationError {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedProcessingRuntime {
+    artifact: HashedRuntimeArtifact,
+    information: AdmittedProcessingRuntimeInformation,
+}
+
+impl VerifiedProcessingRuntime {
+    pub fn artifact(&self) -> &HashedRuntimeArtifact {
+        &self.artifact
+    }
+
+    pub fn information(&self) -> &ProcessingRuntimeInformationV1 {
+        self.information.information()
+    }
+
+    pub fn admitted_information(&self) -> &AdmittedProcessingRuntimeInformation {
+        &self.information
+    }
+}
+
+#[derive(Debug)]
+pub enum ProcessingRuntimeVerificationError {
+    InitialHash(RuntimeArtifactHashError),
+    Probe(ProcessingRuntimeProbeExecutionError),
+    FinalHash(RuntimeArtifactHashError),
+    ArtifactChangedDuringProbe {
+        before: HashedRuntimeArtifact,
+        after: HashedRuntimeArtifact,
+    },
+}
+
 impl fmt::Display for HttpRuntimeVerificationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -138,6 +173,26 @@ impl fmt::Display for HttpRuntimeVerificationError {
             Self::ArtifactChangedDuringProbe { before, after } => write!(
                 formatter,
                 "runtime candidate changed during verification: before={} size={} sha256={} after={} size={} sha256={}",
+                before.path().display(),
+                before.size(),
+                before.sha256(),
+                after.path().display(),
+                after.size(),
+                after.sha256(),
+            ),
+        }
+    }
+}
+
+impl fmt::Display for ProcessingRuntimeVerificationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InitialHash(error) => write!(formatter, "initial processing runtime hash failed: {error}"),
+            Self::Probe(error) => write!(formatter, "processing runtime information probe failed: {error}"),
+            Self::FinalHash(error) => write!(formatter, "final processing runtime hash failed: {error}"),
+            Self::ArtifactChangedDuringProbe { before, after } => write!(
+                formatter,
+                "processing runtime candidate changed during verification: before={} size={} sha256={} after={} size={} sha256={}",
                 before.path().display(),
                 before.size(),
                 before.sha256(),
@@ -159,6 +214,47 @@ impl std::error::Error for HttpRuntimeVerificationError {
     }
 }
 
+impl std::error::Error for ProcessingRuntimeVerificationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InitialHash(error) | Self::FinalHash(error) => Some(error),
+            Self::Probe(error) => Some(error),
+            Self::ArtifactChangedDuringProbe { .. } => None,
+        }
+    }
+}
+
+fn verify_runtime_candidate_with<FHash, FProbe, TInfo, TResult, TProbeError, TError, FResult, FInitial, FProbeMap, FFinal, FChanged>(
+    executable: &Path,
+    expected_identity: RuntimeIdentity,
+    hash_fn: FHash,
+    probe_fn: FProbe,
+    build_result: FResult,
+    initial_error: FInitial,
+    probe_error: FProbeMap,
+    final_error: FFinal,
+    changed_error: FChanged,
+) -> Result<TResult, TError>
+where
+    FHash: Fn(&Path) -> Result<HashedRuntimeArtifact, RuntimeArtifactHashError>,
+    FProbe: Fn(&Path, RuntimeIdentity) -> Result<TInfo, TProbeError>,
+    FResult: FnOnce(HashedRuntimeArtifact, TInfo) -> TResult,
+    FInitial: Fn(RuntimeArtifactHashError) -> TError,
+    FProbeMap: Fn(TProbeError) -> TError,
+    FFinal: Fn(RuntimeArtifactHashError) -> TError,
+    FChanged: Fn(HashedRuntimeArtifact, HashedRuntimeArtifact) -> TError,
+{
+    let before = hash_fn(executable).map_err(initial_error)?;
+    let information = probe_fn(executable, expected_identity).map_err(probe_error)?;
+    let after = hash_fn(executable).map_err(final_error)?;
+
+    if before.path != after.path || before.size != after.size || before.sha256 != after.sha256 {
+        return Err(changed_error(before, after));
+    }
+
+    Ok(build_result(before, information))
+}
+
 fn verify_http_runtime_candidate_with<FHash, FProbe>(
     executable: &Path,
     expected_identity: RuntimeIdentity,
@@ -169,15 +265,17 @@ where
     FHash: Fn(&Path) -> Result<HashedRuntimeArtifact, RuntimeArtifactHashError>,
     FProbe: Fn(&Path, RuntimeIdentity) -> Result<AdmittedRuntimeInformation, RuntimeProbeExecutionError>,
 {
-    let before = hash_fn(executable).map_err(HttpRuntimeVerificationError::InitialHash)?;
-    let information = probe_fn(executable, expected_identity).map_err(HttpRuntimeVerificationError::Probe)?;
-    let after = hash_fn(executable).map_err(HttpRuntimeVerificationError::FinalHash)?;
-
-    if before.path != after.path || before.size != after.size || before.sha256 != after.sha256 {
-        return Err(HttpRuntimeVerificationError::ArtifactChangedDuringProbe { before, after });
-    }
-
-    Ok(VerifiedHttpRuntime { artifact: before, information })
+    verify_runtime_candidate_with(
+        executable,
+        expected_identity,
+        hash_fn,
+        probe_fn,
+        |artifact, information| VerifiedHttpRuntime { artifact, information },
+        HttpRuntimeVerificationError::InitialHash,
+        HttpRuntimeVerificationError::Probe,
+        HttpRuntimeVerificationError::FinalHash,
+        |before, after| HttpRuntimeVerificationError::ArtifactChangedDuringProbe { before, after },
+    )
 }
 
 pub fn verify_http_runtime_candidate(
@@ -192,6 +290,41 @@ pub fn verify_http_runtime_candidate(
     )
 }
 
+pub(crate) fn verify_processing_runtime_candidate_with<FHash, FProbe>(
+    executable: &Path,
+    expected_identity: RuntimeIdentity,
+    hash_fn: FHash,
+    probe_fn: FProbe,
+) -> Result<VerifiedProcessingRuntime, ProcessingRuntimeVerificationError>
+where
+    FHash: Fn(&Path) -> Result<HashedRuntimeArtifact, RuntimeArtifactHashError>,
+    FProbe: Fn(&Path, RuntimeIdentity) -> Result<AdmittedProcessingRuntimeInformation, ProcessingRuntimeProbeExecutionError>,
+{
+    verify_runtime_candidate_with(
+        executable,
+        expected_identity,
+        hash_fn,
+        probe_fn,
+        |artifact, information| VerifiedProcessingRuntime { artifact, information },
+        ProcessingRuntimeVerificationError::InitialHash,
+        ProcessingRuntimeVerificationError::Probe,
+        ProcessingRuntimeVerificationError::FinalHash,
+        |before, after| ProcessingRuntimeVerificationError::ArtifactChangedDuringProbe { before, after },
+    )
+}
+
+pub fn verify_processing_runtime_candidate(
+    executable: &Path,
+    expected_identity: RuntimeIdentity,
+) -> Result<VerifiedProcessingRuntime, ProcessingRuntimeVerificationError> {
+    verify_processing_runtime_candidate_with(
+        executable,
+        expected_identity,
+        hash_runtime_executable,
+        |path, identity| probe_processing_runtime_information(path, identity),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -199,12 +332,15 @@ mod tests {
 
     use sha2::Digest;
 
+    use lexicon_core::processing::{ProcessingRuntimeInformationV1, ProcessingSourceContractV1};
     use lexicon_core::protocols::http::{HttpCapabilitySet, HttpSourceContractV1};
     use lexicon_core::runtime::{RuntimeIdentity, RuntimeInformationV1};
 
     use super::{
-        HashedRuntimeArtifact, HttpRuntimeVerificationError, RuntimeArtifactHashError,
+        HashedRuntimeArtifact, HttpRuntimeVerificationError, ProcessingRuntimeVerificationError,
+        ProcessingRuntimeProbeExecutionError, RuntimeArtifactHashError,
         hash_runtime_executable, verify_http_runtime_candidate, verify_http_runtime_candidate_with,
+        verify_processing_runtime_candidate, verify_processing_runtime_candidate_with,
     };
 
     fn fixture_runtime_info_json(identity: RuntimeIdentity) -> Vec<u8> {
@@ -349,6 +485,162 @@ mod tests {
         assert!(matches!(
             error,
             HttpRuntimeVerificationError::ArtifactChangedDuringProbe { .. }
+        ));
+    }
+
+    fn fixture_processing_runtime_info_json(identity: RuntimeIdentity) -> Vec<u8> {
+        let source = ProcessingSourceContractV1::new(|_, _| Ok(()));
+        ProcessingRuntimeInformationV1::from_processing_source(identity, &source)
+            .unwrap()
+            .to_json()
+            .unwrap()
+            .into_bytes()
+    }
+
+    #[test]
+    fn stable_processing_candidate_produces_verified_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("processing-runtime-probe");
+        let json = fixture_processing_runtime_info_json(RuntimeIdentity::http_processing("example-source", 1));
+        let shell_json = String::from_utf8(json.clone()).unwrap();
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{0}'\n  exit 0\nfi\nexit 1\n",
+            shell_json
+        );
+        make_executable_script(&candidate, &script);
+
+        let verified = verify_processing_runtime_candidate(&candidate, RuntimeIdentity::http_processing("example-source", 1)).unwrap();
+
+        assert_eq!(verified.artifact().path(), candidate);
+        assert_eq!(verified.artifact().size() as usize, fs::read(&candidate).unwrap().len());
+        let bytes = fs::read(&candidate).unwrap();
+        assert_eq!(verified.artifact().sha256(), format!("{:x}", sha2::Sha256::digest(&bytes)));
+        assert_eq!(verified.information().identity(), RuntimeIdentity::http_processing("example-source", 1));
+    }
+
+    #[test]
+    fn processing_initial_hash_failure_prevents_probe_execution() {
+        let missing = std::env::temp_dir().join("lexicon-does-not-exist-processing-verify-runtime");
+        let _ = fs::remove_file(&missing);
+
+        let error = verify_processing_runtime_candidate(&missing, RuntimeIdentity::http_processing("example-source", 1)).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProcessingRuntimeVerificationError::InitialHash(RuntimeArtifactHashError::MissingCandidate { .. })
+        ));
+    }
+
+    #[test]
+    fn processing_probe_failure_returns_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("processing-runtime-probe-failure");
+        let output = fixture_processing_runtime_info_json(RuntimeIdentity::http_processing("example-source", 1));
+        let shell_json = String::from_utf8(output).unwrap();
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{0}'\n  exit 0\nfi\nexit 1\n",
+            shell_json
+        );
+        make_executable_script(&candidate, &script);
+
+        let error = verify_processing_runtime_candidate_with(
+            &candidate,
+            RuntimeIdentity::http_processing("example-source", 1),
+            hash_runtime_executable,
+            |_, _| Err(ProcessingRuntimeProbeExecutionError::Spawn { source: std::io::Error::new(std::io::ErrorKind::Other, "spawn failed") }),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, ProcessingRuntimeVerificationError::Probe(ProcessingRuntimeProbeExecutionError::Spawn { .. })));
+    }
+
+    #[test]
+    fn processing_final_hash_failure_returns_final_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("processing-final-hash");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{\"schema_version\":1,\"identity\":{\"source\":\"example-source\",\"protocol\":\"http\",\"operation\":\"processing\",\"source_contract_version\":1},\"descriptor\":{\"contract_version\":1}}'\n  exit 0\nfi\nexit 1\n";
+        make_executable_script(&candidate, script);
+
+        let before = hash_runtime_executable(&candidate).unwrap();
+        let call_count = std::cell::Cell::new(0usize);
+        let error = verify_processing_runtime_candidate_with(
+            &candidate,
+            RuntimeIdentity::http_processing("example-source", 1),
+            |_| {
+                let count = call_count.get();
+                call_count.set(count + 1);
+                if count == 0 {
+                    Ok(before.clone())
+                } else {
+                    Err(RuntimeArtifactHashError::Read {
+                        path: candidate.clone(),
+                        source: std::io::Error::new(std::io::ErrorKind::Other, "hash failure"),
+                    })
+                }
+            },
+            |_, _| {
+                let source = ProcessingSourceContractV1::new(|_, _| Ok(()));
+                let output = ProcessingRuntimeInformationV1::from_processing_source(
+                    RuntimeIdentity::http_processing("example-source", 1),
+                    &source,
+                )
+                .unwrap()
+                .to_json()
+                .unwrap();
+                let mut bytes = output.into_bytes();
+                bytes.push(b'\n');
+                crate::build::runtime_probe::admit_processing_runtime_information_probe(
+                    RuntimeIdentity::http_processing("example-source", 1),
+                    &bytes,
+                )
+                .map_err(crate::build::runtime_probe::ProcessingRuntimeProbeExecutionError::Admission)
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, ProcessingRuntimeVerificationError::FinalHash(_)));
+    }
+
+    #[test]
+    fn processing_artifact_changed_during_probe_returns_changed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("processing-changed");
+        let script = "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{\"schema_version\":1,\"identity\":{\"source\":\"example-source\",\"protocol\":\"http\",\"operation\":\"processing\",\"source_contract_version\":1},\"descriptor\":{\"contract_version\":1}}'\n  exit 0\nfi\nexit 1\n";
+        make_executable_script(&candidate, script);
+
+        let expected = RuntimeIdentity::http_processing("example-source", 1);
+        let error = verify_processing_runtime_candidate_with(
+            &candidate,
+            expected,
+            |path| {
+                let bytes = fs::read(path).unwrap();
+                let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+                Ok(HashedRuntimeArtifact {
+                    path: path.to_path_buf(),
+                    size: bytes.len() as u64,
+                    sha256: digest,
+                })
+            },
+            |path, identity| {
+                let before = fs::read(path).unwrap();
+                let after = format!("{}-mutated", String::from_utf8(before).unwrap());
+                fs::write(path, after).unwrap();
+                let source = ProcessingSourceContractV1::new(|_, _| Ok(()));
+                let output = ProcessingRuntimeInformationV1::from_processing_source(identity, &source)
+                    .unwrap()
+                    .to_json()
+                    .unwrap();
+                let mut bytes = output.into_bytes();
+                bytes.push(b'\n');
+                crate::build::runtime_probe::admit_processing_runtime_information_probe(identity, &bytes)
+                    .map_err(crate::build::runtime_probe::ProcessingRuntimeProbeExecutionError::Admission)
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProcessingRuntimeVerificationError::ArtifactChangedDuringProbe { .. }
         ));
     }
 }
