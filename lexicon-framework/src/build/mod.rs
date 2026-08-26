@@ -57,7 +57,9 @@ pub use runtime_probe::{
     probe_processing_runtime_information,
 };
 pub use runtime_staging::{
-    RuntimeBundleStagingError, StagedHttpRuntimeBundle, stage_verified_http_runtime_bundle,
+    ProcessingRuntimeBundleStagingError, RuntimeBundleStagingError, StagedHttpRuntimeBundle,
+    StagedProcessingRuntimeBundle, stage_verified_http_runtime_bundle,
+    stage_verified_processing_runtime_bundle,
 };
 pub use runtime_verification::{
     HashedRuntimeArtifact, HttpRuntimeVerificationError, ProcessingRuntimeVerificationError,
