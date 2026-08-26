@@ -16,7 +16,10 @@ impl fmt::Display for RuntimeInvocationEncodingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Serialization(message) => {
-                write!(formatter, "runtime invocation serialization error: {message}")
+                write!(
+                    formatter,
+                    "runtime invocation serialization error: {message}"
+                )
             }
         }
     }
@@ -28,16 +31,10 @@ impl std::error::Error for RuntimeInvocationEncodingError {}
 pub enum RuntimeInvocationDecodingError {
     JsonSyntax(String),
     UnknownSchemaVersion(u32),
-    UnknownIdentifier {
-        field: &'static str,
-        value: String,
-    },
+    UnknownIdentifier { field: &'static str, value: String },
     InvalidProjectIdentity(RuntimeInvocationValueError),
     InvalidSessionIdentity(RuntimeInvocationValueError),
-    InvalidVersion {
-        field: &'static str,
-        value: u32,
-    },
+    InvalidVersion { field: &'static str, value: u32 },
     InvalidConstruction(RuntimeInvocationConstructionError),
     StructuralDocument(String),
 }
@@ -47,19 +44,32 @@ impl fmt::Display for RuntimeInvocationDecodingError {
         match self {
             Self::JsonSyntax(message) => write!(formatter, "invalid JSON: {message}"),
             Self::UnknownSchemaVersion(version) => {
-                write!(formatter, "unknown runtime invocation schema version: {version}")
+                write!(
+                    formatter,
+                    "unknown runtime invocation schema version: {version}"
+                )
             }
             Self::UnknownIdentifier { field, value } => {
                 write!(formatter, "unknown {field} identifier: {value}")
             }
-            Self::InvalidProjectIdentity(error) => write!(formatter, "invalid project identity: {error}"),
-            Self::InvalidSessionIdentity(error) => write!(formatter, "invalid session identity: {error}"),
+            Self::InvalidProjectIdentity(error) => {
+                write!(formatter, "invalid project identity: {error}")
+            }
+            Self::InvalidSessionIdentity(error) => {
+                write!(formatter, "invalid session identity: {error}")
+            }
             Self::InvalidVersion { field, value } => {
                 write!(formatter, "invalid {field} value: {value}")
             }
-            Self::InvalidConstruction(error) => write!(formatter, "invalid runtime invocation construction: {error}"),
+            Self::InvalidConstruction(error) => write!(
+                formatter,
+                "invalid runtime invocation construction: {error}"
+            ),
             Self::StructuralDocument(message) => {
-                write!(formatter, "malformed runtime invocation document: {message}")
+                write!(
+                    formatter,
+                    "malformed runtime invocation document: {message}"
+                )
             }
         }
     }
@@ -107,10 +117,7 @@ struct ExecutionDocumentV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeInvocationIdentifierError {
-    UnknownIdentifier {
-        kind: &'static str,
-        value: String,
-    },
+    UnknownIdentifier { kind: &'static str, value: String },
 }
 
 impl RuntimeInvocationIdentifierError {
@@ -136,10 +143,7 @@ impl std::error::Error for RuntimeInvocationIdentifierError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeInvocationValueError {
-    InvalidValue {
-        field: &'static str,
-        value: String,
-    },
+    InvalidValue { field: &'static str, value: String },
 }
 
 impl RuntimeInvocationValueError {
@@ -165,7 +169,9 @@ impl std::error::Error for RuntimeInvocationValueError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeInvocationConstructionError {
-    InvalidSourceContractVersion { value: u32 },
+    InvalidSourceContractVersion {
+        value: u32,
+    },
     UnsupportedExecutionMode {
         runtime: RuntimeIdentity,
         execution_mode: RuntimeExecutionMode,
@@ -305,16 +311,20 @@ impl RuntimeInvocationEnvelopeV1 {
         supervision_mode: RuntimeSupervisionMode,
     ) -> Result<Self, RuntimeInvocationConstructionError> {
         if runtime.source_contract_version() == 0 {
-            return Err(RuntimeInvocationConstructionError::InvalidSourceContractVersion {
-                value: runtime.source_contract_version(),
-            });
+            return Err(
+                RuntimeInvocationConstructionError::InvalidSourceContractVersion {
+                    value: runtime.source_contract_version(),
+                },
+            );
         }
 
         if !execution_mode.supports_operation(runtime.operation()) {
-            return Err(RuntimeInvocationConstructionError::UnsupportedExecutionMode {
-                runtime,
-                execution_mode,
-            });
+            return Err(
+                RuntimeInvocationConstructionError::UnsupportedExecutionMode {
+                    runtime,
+                    execution_mode,
+                },
+            );
         }
 
         Ok(Self {
@@ -352,14 +362,14 @@ impl RuntimeInvocationEnvelopeV1 {
     }
 
     pub fn from_json(input: &str) -> Result<Self, RuntimeInvocationDecodingError> {
-        let document = serde_json::from_str::<RuntimeInvocationDocumentV1>(input).map_err(|error| {
-            match error.classify() {
+        let document = serde_json::from_str::<RuntimeInvocationDocumentV1>(input).map_err(
+            |error| match error.classify() {
                 serde_json::error::Category::Syntax => {
                     RuntimeInvocationDecodingError::JsonSyntax(error.to_string())
                 }
                 _ => RuntimeInvocationDecodingError::StructuralDocument(error.to_string()),
-            }
-        })?;
+            },
+        )?;
 
         reject_duplicate_object_keys(input)?;
 
@@ -381,27 +391,29 @@ impl RuntimeInvocationEnvelopeV1 {
         let session = SessionInvocationIdentity::new(document.session.id)
             .map_err(RuntimeInvocationDecodingError::InvalidSessionIdentity)?;
 
-        let protocol = RuntimeProtocol::from_identifier(&document.runtime.protocol).map_err(|error| {
-            match error {
-                RuntimeIdentifierError::UnknownIdentifier { value, .. } => {
-                    RuntimeInvocationDecodingError::UnknownIdentifier {
-                        field: "runtime.protocol",
-                        value,
+        let protocol =
+            RuntimeProtocol::from_identifier(&document.runtime.protocol).map_err(|error| {
+                match error {
+                    RuntimeIdentifierError::UnknownIdentifier { value, .. } => {
+                        RuntimeInvocationDecodingError::UnknownIdentifier {
+                            field: "runtime.protocol",
+                            value,
+                        }
                     }
                 }
-            }
-        })?;
+            })?;
 
-        let operation = RuntimeOperation::from_identifier(&document.runtime.operation).map_err(|error| {
-            match error {
-                RuntimeIdentifierError::UnknownIdentifier { value, .. } => {
-                    RuntimeInvocationDecodingError::UnknownIdentifier {
-                        field: "runtime.operation",
-                        value,
+        let operation =
+            RuntimeOperation::from_identifier(&document.runtime.operation).map_err(|error| {
+                match error {
+                    RuntimeIdentifierError::UnknownIdentifier { value, .. } => {
+                        RuntimeInvocationDecodingError::UnknownIdentifier {
+                            field: "runtime.operation",
+                            value,
+                        }
                     }
                 }
-            }
-        })?;
+            })?;
 
         let execution_mode = RuntimeExecutionMode::from_identifier(&document.execution.mode)
             .map_err(|error| match error {
@@ -413,15 +425,17 @@ impl RuntimeInvocationEnvelopeV1 {
                 }
             })?;
 
-        let supervision_mode = RuntimeSupervisionMode::from_identifier(&document.execution.supervision)
-            .map_err(|error| match error {
-                RuntimeInvocationIdentifierError::UnknownIdentifier { value, .. } => {
-                    RuntimeInvocationDecodingError::UnknownIdentifier {
-                        field: "execution.supervision",
-                        value,
-                    }
+        let supervision_mode = RuntimeSupervisionMode::from_identifier(
+            &document.execution.supervision,
+        )
+        .map_err(|error| match error {
+            RuntimeInvocationIdentifierError::UnknownIdentifier { value, .. } => {
+                RuntimeInvocationDecodingError::UnknownIdentifier {
+                    field: "execution.supervision",
+                    value,
                 }
-            })?;
+            }
+        })?;
 
         let source_name = Box::leak(document.runtime.source.into_boxed_str());
         let runtime = RuntimeIdentity::from_parts(
@@ -624,9 +638,11 @@ impl<'a> JsonKeyDetector<'a> {
                                     b'a'..=b'f' => (digit - b'a' + 10) as u32,
                                     b'A'..=b'F' => (digit - b'A' + 10) as u32,
                                     _ => {
-                                        return Err(RuntimeInvocationDecodingError::StructuralDocument(
-                                            "invalid unicode escape in JSON string".to_string(),
-                                        ));
+                                        return Err(
+                                            RuntimeInvocationDecodingError::StructuralDocument(
+                                                "invalid unicode escape in JSON string".to_string(),
+                                            ),
+                                        );
                                     }
                                 };
                                 code = (code << 4) | value_digit;
@@ -732,7 +748,10 @@ impl<'a> JsonKeyDetector<'a> {
     }
 }
 
-fn validate_safe_component(value: &str, field: &'static str) -> Result<(), RuntimeInvocationValueError> {
+fn validate_safe_component(
+    value: &str,
+    field: &'static str,
+) -> Result<(), RuntimeInvocationValueError> {
     if value.is_empty() {
         return Err(RuntimeInvocationValueError::invalid(field, value));
     }
@@ -760,8 +779,8 @@ fn validate_safe_component(value: &str, field: &'static str) -> Result<(), Runti
 mod tests {
     use super::{
         ProjectInvocationIdentity, RuntimeExecutionMode, RuntimeInvocationConstructionError,
-        RuntimeInvocationDecodingError, RuntimeInvocationEnvelopeV1, RuntimeInvocationIdentifierError,
-        RuntimeSupervisionMode, SessionInvocationIdentity,
+        RuntimeInvocationDecodingError, RuntimeInvocationEnvelopeV1,
+        RuntimeInvocationIdentifierError, RuntimeSupervisionMode, SessionInvocationIdentity,
     };
     use crate::runtime::RuntimeIdentity;
 
@@ -769,7 +788,10 @@ mod tests {
     fn runtime_execution_mode_identifiers_are_stable() {
         assert_eq!(RuntimeExecutionMode::Run.identifier(), "run");
         assert_eq!(RuntimeExecutionMode::Resume.identifier(), "resume");
-        assert_eq!(RuntimeExecutionMode::from_identifier("run"), Ok(RuntimeExecutionMode::Run));
+        assert_eq!(
+            RuntimeExecutionMode::from_identifier("run"),
+            Ok(RuntimeExecutionMode::Run)
+        );
         assert_eq!(
             RuntimeExecutionMode::from_identifier("resume"),
             Ok(RuntimeExecutionMode::Resume)
@@ -790,8 +812,14 @@ mod tests {
 
     #[test]
     fn runtime_supervision_mode_identifiers_are_stable() {
-        assert_eq!(RuntimeSupervisionMode::Foreground.identifier(), "foreground");
-        assert_eq!(RuntimeSupervisionMode::Background.identifier(), "background");
+        assert_eq!(
+            RuntimeSupervisionMode::Foreground.identifier(),
+            "foreground"
+        );
+        assert_eq!(
+            RuntimeSupervisionMode::Background.identifier(),
+            "background"
+        );
         assert_eq!(
             RuntimeSupervisionMode::from_identifier("foreground"),
             Ok(RuntimeSupervisionMode::Foreground)
@@ -805,7 +833,9 @@ mod tests {
     #[test]
     fn project_invocation_identity_accepts_safe_names_and_rejects_invalid_values() {
         assert_eq!(
-            ProjectInvocationIdentity::new("example-project").unwrap().name(),
+            ProjectInvocationIdentity::new("example-project")
+                .unwrap()
+                .name(),
             "example-project"
         );
 
@@ -821,7 +851,10 @@ mod tests {
 
     #[test]
     fn session_invocation_identity_uses_same_validation_rules() {
-        assert_eq!(SessionInvocationIdentity::new("session-1").unwrap().id(), "session-1");
+        assert_eq!(
+            SessionInvocationIdentity::new("session-1").unwrap().id(),
+            "session-1"
+        );
         assert!(SessionInvocationIdentity::new("..").is_err());
         assert!(SessionInvocationIdentity::new("session\\1").is_err());
     }
@@ -838,10 +871,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(identity.project().name(), "project-x");
-        assert_eq!(identity.runtime(), RuntimeIdentity::http_acquisition("example-source", 1));
+        assert_eq!(
+            identity.runtime(),
+            RuntimeIdentity::http_acquisition("example-source", 1)
+        );
         assert_eq!(identity.session().id(), "session-1");
         assert_eq!(identity.execution_mode(), RuntimeExecutionMode::Run);
-        assert_eq!(identity.supervision_mode(), RuntimeSupervisionMode::Foreground);
+        assert_eq!(
+            identity.supervision_mode(),
+            RuntimeSupervisionMode::Foreground
+        );
 
         let resume = RuntimeInvocationEnvelopeV1::new(
             ProjectInvocationIdentity::new("project-y").unwrap(),
@@ -861,7 +900,10 @@ mod tests {
             RuntimeSupervisionMode::Foreground,
         )
         .unwrap();
-        assert_eq!(processing.runtime().operation(), crate::runtime::RuntimeOperation::Processing);
+        assert_eq!(
+            processing.runtime().operation(),
+            crate::runtime::RuntimeOperation::Processing
+        );
     }
 
     #[test]
@@ -907,7 +949,10 @@ mod tests {
             acquire_run_json,
             "{\"schema_version\":1,\"project\":{\"name\":\"telugu-lexicon\"},\"runtime\":{\"source\":\"example-source\",\"protocol\":\"http\",\"operation\":\"acquisition\",\"source_contract_version\":1},\"session\":{\"id\":\"session-000001\"},\"execution\":{\"mode\":\"run\",\"supervision\":\"foreground\"}}"
         );
-        assert_eq!(acquire_run_json.parse::<serde_json::Value>().unwrap()["schema_version"], 1);
+        assert_eq!(
+            acquire_run_json.parse::<serde_json::Value>().unwrap()["schema_version"],
+            1
+        );
         assert!(!acquire_run_json.ends_with('\n'));
         assert!(!acquire_run_json.contains("args"));
         assert!(!acquire_run_json.contains("arguments"));
@@ -952,7 +997,8 @@ mod tests {
             RuntimeSupervisionMode::Foreground,
         )
         .unwrap();
-        let parsed = RuntimeInvocationEnvelopeV1::from_json(&acquire_run.to_json().unwrap()).unwrap();
+        let parsed =
+            RuntimeInvocationEnvelopeV1::from_json(&acquire_run.to_json().unwrap()).unwrap();
         assert_eq!(parsed, acquire_run);
 
         let acquire_resume = RuntimeInvocationEnvelopeV1::new(
@@ -963,7 +1009,8 @@ mod tests {
             RuntimeSupervisionMode::Background,
         )
         .unwrap();
-        let parsed_resume = RuntimeInvocationEnvelopeV1::from_json(&acquire_resume.to_json().unwrap()).unwrap();
+        let parsed_resume =
+            RuntimeInvocationEnvelopeV1::from_json(&acquire_resume.to_json().unwrap()).unwrap();
         assert_eq!(parsed_resume, acquire_resume);
 
         let processing_run = RuntimeInvocationEnvelopeV1::new(
@@ -974,7 +1021,8 @@ mod tests {
             RuntimeSupervisionMode::Foreground,
         )
         .unwrap();
-        let parsed_processing = RuntimeInvocationEnvelopeV1::from_json(&processing_run.to_json().unwrap()).unwrap();
+        let parsed_processing =
+            RuntimeInvocationEnvelopeV1::from_json(&processing_run.to_json().unwrap()).unwrap();
         assert_eq!(parsed_processing, processing_run);
     }
 

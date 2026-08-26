@@ -31,13 +31,22 @@ impl fmt::Display for ProcessingRuntimeInformationProbeError {
                 formatter.write_str("unexpected processing runtime information probe arguments")
             }
             Self::Construction(error) => {
-                write!(formatter, "processing runtime information construction error: {error}")
+                write!(
+                    formatter,
+                    "processing runtime information construction error: {error}"
+                )
             }
             Self::Encoding(error) => {
-                write!(formatter, "processing runtime information encoding error: {error}")
+                write!(
+                    formatter,
+                    "processing runtime information encoding error: {error}"
+                )
             }
             Self::Output(error) => {
-                write!(formatter, "processing runtime information probe output error: {error}")
+                write!(
+                    formatter,
+                    "processing runtime information probe output error: {error}"
+                )
             }
         }
     }
@@ -151,7 +160,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(outcome, ProcessingRuntimeInformationProbeOutcome::NotRequested);
+        assert_eq!(
+            outcome,
+            ProcessingRuntimeInformationProbeOutcome::NotRequested
+        );
         assert!(output.is_empty());
     }
 
@@ -166,7 +178,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(outcome, ProcessingRuntimeInformationProbeOutcome::NotRequested);
+        assert_eq!(
+            outcome,
+            ProcessingRuntimeInformationProbeOutcome::NotRequested
+        );
         assert!(output.is_empty());
     }
 
@@ -196,7 +211,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(outcome, ProcessingRuntimeInformationProbeOutcome::NotRequested);
+        assert_eq!(
+            outcome,
+            ProcessingRuntimeInformationProbeOutcome::NotRequested
+        );
         assert!(output.is_empty());
     }
 
@@ -216,10 +234,14 @@ mod tests {
 
         assert_eq!(outcome, ProcessingRuntimeInformationProbeOutcome::Written);
         let text = std::str::from_utf8(&output).unwrap();
-        let parsed = ProcessingRuntimeInformationV1::from_json(text.trim_end_matches('\n')).unwrap();
+        let parsed =
+            ProcessingRuntimeInformationV1::from_json(text.trim_end_matches('\n')).unwrap();
 
         assert_eq!(parsed.identity(), identity);
-        assert_eq!(parsed.descriptor_contract_version(), ProcessingSourceContractV1::CONTRACT_VERSION);
+        assert_eq!(
+            parsed.descriptor_contract_version(),
+            ProcessingSourceContractV1::CONTRACT_VERSION
+        );
     }
 
     #[test]
@@ -296,7 +318,10 @@ mod tests {
             std::str::from_utf8(&output).unwrap().trim_end_matches('\n'),
         )
         .unwrap();
-        assert_eq!(parsed.descriptor_contract_version(), ProcessingSourceContractV1::CONTRACT_VERSION);
+        assert_eq!(
+            parsed.descriptor_contract_version(),
+            ProcessingSourceContractV1::CONTRACT_VERSION
+        );
     }
 
     #[test]
@@ -317,11 +342,17 @@ mod tests {
         let result = try_write_runtime_information_probe(
             RuntimeIdentity::http_processing("example-source", 1),
             &ProcessingSourceContractV1::new(process_handler),
-            &[OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT), OsString::from("extra")],
+            &[
+                OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT),
+                OsString::from("extra"),
+            ],
             &mut Vec::new(),
         );
 
-        assert!(matches!(result, Err(ProcessingRuntimeInformationProbeError::UnexpectedArguments)));
+        assert!(matches!(
+            result,
+            Err(ProcessingRuntimeInformationProbeError::UnexpectedArguments)
+        ));
     }
 
     #[test]
@@ -330,12 +361,18 @@ mod tests {
         let outcome = try_write_runtime_information_probe(
             RuntimeIdentity::http_processing("example-source", 1),
             &ProcessingSourceContractV1::new(process_handler),
-            &[OsString::from("--another-mode"), OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT)],
+            &[
+                OsString::from("--another-mode"),
+                OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT),
+            ],
             &mut output,
         )
         .unwrap();
 
-        assert_eq!(outcome, ProcessingRuntimeInformationProbeOutcome::NotRequested);
+        assert_eq!(
+            outcome,
+            ProcessingRuntimeInformationProbeOutcome::NotRequested
+        );
         assert!(output.is_empty());
     }
 
@@ -349,7 +386,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, ProcessingRuntimeInformationProbeError::Construction(_)));
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInformationProbeError::Construction(_)
+        ));
     }
 
     #[test]
@@ -362,7 +402,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, ProcessingRuntimeInformationProbeError::Construction(_)));
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInformationProbeError::Construction(_)
+        ));
     }
 
     #[test]
@@ -381,7 +424,10 @@ mod tests {
 
     #[test]
     fn writer_failure_returns_output_error() {
-        let mut writer = RecordingWriter { fail_write: true, ..Default::default() };
+        let mut writer = RecordingWriter {
+            fail_write: true,
+            ..Default::default()
+        };
         let result = try_write_runtime_information_probe(
             RuntimeIdentity::http_processing("example-source", 1),
             &ProcessingSourceContractV1::new(process_handler),
@@ -389,12 +435,18 @@ mod tests {
             &mut writer,
         );
 
-        assert!(matches!(result, Err(ProcessingRuntimeInformationProbeError::Output(_))));
+        assert!(matches!(
+            result,
+            Err(ProcessingRuntimeInformationProbeError::Output(_))
+        ));
     }
 
     #[test]
     fn flush_failure_returns_output_error() {
-        let mut writer = RecordingWriter { fail_flush: true, ..Default::default() };
+        let mut writer = RecordingWriter {
+            fail_flush: true,
+            ..Default::default()
+        };
         let result = try_write_runtime_information_probe(
             RuntimeIdentity::http_processing("example-source", 1),
             &ProcessingSourceContractV1::new(process_handler),
@@ -402,7 +454,10 @@ mod tests {
             &mut writer,
         );
 
-        assert!(matches!(result, Err(ProcessingRuntimeInformationProbeError::Output(_))));
+        assert!(matches!(
+            result,
+            Err(ProcessingRuntimeInformationProbeError::Output(_))
+        ));
     }
 
     #[cfg(unix)]
@@ -419,7 +474,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(outcome, ProcessingRuntimeInformationProbeOutcome::NotRequested);
+        assert_eq!(
+            outcome,
+            ProcessingRuntimeInformationProbeOutcome::NotRequested
+        );
         assert!(output.is_empty());
     }
 

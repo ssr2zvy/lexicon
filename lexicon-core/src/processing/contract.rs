@@ -2,7 +2,8 @@ use std::ffi::OsString;
 
 use super::{ProcessingContext, ProcessingResult};
 
-pub type ProcessDataFn = fn(context: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()>;
+pub type ProcessDataFn =
+    fn(context: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()>;
 
 #[derive(Clone, Copy)]
 pub struct ProcessingSourceContractV1 {
@@ -33,10 +34,7 @@ mod tests {
 
     static CONSTRUCTION_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-    fn process(
-        _context: &mut ProcessingContext,
-        _args: &[OsString],
-    ) -> ProcessingResult<()> {
+    fn process(_context: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
         Ok(())
     }
 
@@ -80,10 +78,7 @@ mod tests {
         Ok(())
     }
 
-    fn private_handler(
-        context: &mut ProcessingContext,
-        args: &[OsString],
-    ) -> ProcessingResult<()> {
+    fn private_handler(context: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()> {
         let _ = context;
         let _ = args;
         Ok(())
@@ -140,7 +135,8 @@ mod tests {
     fn retained_function_pointer_is_callable() {
         let mut context = ProcessingContext::new_for_tests();
         let args = [OsString::from("alpha"), OsString::from("beta")];
-        let result = ProcessingSourceContractV1::new(expect_two_args).process_handler()(&mut context, &args);
+        let result =
+            ProcessingSourceContractV1::new(expect_two_args).process_handler()(&mut context, &args);
         assert!(result.is_ok(), "result: {result:?}");
     }
 
@@ -148,7 +144,8 @@ mod tests {
     fn handler_receives_mutable_processing_context() {
         let mut context = ProcessingContext::new_for_tests();
         let args = [OsString::from("alpha"), OsString::from("beta")];
-        let result = ProcessingSourceContractV1::new(expect_two_args).process_handler()(&mut context, &args);
+        let result =
+            ProcessingSourceContractV1::new(expect_two_args).process_handler()(&mut context, &args);
         assert!(result.is_ok(), "result: {result:?}");
     }
 
@@ -156,7 +153,8 @@ mod tests {
     fn handler_receives_osstring_slice() {
         let mut context = ProcessingContext::new_for_tests();
         let args = [OsString::from("alpha"), OsString::from("beta")];
-        let result = ProcessingSourceContractV1::new(expect_two_args).process_handler()(&mut context, &args);
+        let result =
+            ProcessingSourceContractV1::new(expect_two_args).process_handler()(&mut context, &args);
         assert!(result.is_ok(), "result: {result:?}");
     }
 
@@ -168,7 +166,10 @@ mod tests {
             OsString::from("beta"),
             OsString::from("gamma"),
         ];
-        let result = ProcessingSourceContractV1::new(expect_three_args).process_handler()(&mut context, &args);
+        let result = ProcessingSourceContractV1::new(expect_three_args).process_handler()(
+            &mut context,
+            &args,
+        );
         assert!(result.is_ok(), "result: {result:?}");
     }
 
@@ -182,7 +183,10 @@ mod tests {
             OsString::from_vec(vec![b'a', 0x80, b'c']),
             OsString::from_vec(vec![0xFF, 0xFE, 0xFD]),
         ];
-        let result = ProcessingSourceContractV1::new(expect_non_utf8_args).process_handler()(&mut context, &args);
+        let result = ProcessingSourceContractV1::new(expect_non_utf8_args).process_handler()(
+            &mut context,
+            &args,
+        );
         assert!(result.is_ok(), "result: {result:?}");
     }
 

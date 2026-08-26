@@ -37,10 +37,16 @@ impl fmt::Display for ProcessingRuntimeManifestEncodingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RuntimeInformation(error) => {
-                write!(formatter, "processing runtime information encoding failed: {error}")
+                write!(
+                    formatter,
+                    "processing runtime information encoding failed: {error}"
+                )
             }
             Self::Serialization(message) => {
-                write!(formatter, "processing runtime manifest serialization failed: {message}")
+                write!(
+                    formatter,
+                    "processing runtime manifest serialization failed: {message}"
+                )
             }
         }
     }
@@ -68,21 +74,36 @@ pub enum ProcessingRuntimeManifestDecodingError {
 impl fmt::Display for ProcessingRuntimeManifestDecodingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Json(message) => write!(formatter, "invalid processing runtime manifest JSON: {message}"),
+            Self::Json(message) => write!(
+                formatter,
+                "invalid processing runtime manifest JSON: {message}"
+            ),
             Self::UnknownSchemaVersion(version) => {
-                write!(formatter, "unknown processing runtime manifest schema version: {version}")
+                write!(
+                    formatter,
+                    "unknown processing runtime manifest schema version: {version}"
+                )
             }
             Self::InvalidExecutableName => {
                 formatter.write_str("invalid processing runtime manifest executable name")
             }
             Self::InvalidExecutableSize(size) => {
-                write!(formatter, "invalid processing runtime manifest executable size: {size}")
+                write!(
+                    formatter,
+                    "invalid processing runtime manifest executable size: {size}"
+                )
             }
             Self::InvalidSha256(value) => {
-                write!(formatter, "invalid processing runtime manifest SHA-256: {value}")
+                write!(
+                    formatter,
+                    "invalid processing runtime manifest SHA-256: {value}"
+                )
             }
             Self::MalformedRuntimeInformation(error) => {
-                write!(formatter, "malformed nested processing runtime information: {error}")
+                write!(
+                    formatter,
+                    "malformed nested processing runtime information: {error}"
+                )
             }
         }
     }
@@ -92,7 +113,11 @@ impl std::error::Error for ProcessingRuntimeManifestDecodingError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::MalformedRuntimeInformation(error) => Some(error),
-            Self::Json(_) | Self::UnknownSchemaVersion(_) | Self::InvalidExecutableName | Self::InvalidExecutableSize(_) | Self::InvalidSha256(_) => None,
+            Self::Json(_)
+            | Self::UnknownSchemaVersion(_)
+            | Self::InvalidExecutableName
+            | Self::InvalidExecutableSize(_)
+            | Self::InvalidSha256(_) => None,
         }
     }
 }
@@ -146,12 +171,14 @@ impl ProcessingRuntimeManifestV1 {
             .runtime_information
             .to_json()
             .map_err(ProcessingRuntimeManifestEncodingError::RuntimeInformation)?;
-        let runtime_information_value = serde_json::from_str::<serde_json::Value>(&runtime_information_json)
-            .map_err(|error| {
-                ProcessingRuntimeManifestEncodingError::Serialization(format!(
-                    "nested processing runtime information JSON is malformed: {error}"
-                ))
-            })?;
+        let runtime_information_value = serde_json::from_str::<serde_json::Value>(
+            &runtime_information_json,
+        )
+        .map_err(|error| {
+            ProcessingRuntimeManifestEncodingError::Serialization(format!(
+                "nested processing runtime information JSON is malformed: {error}"
+            ))
+        })?;
 
         let document = ProcessingRuntimeManifestDocumentV1 {
             schema_version: super::RUNTIME_MANIFEST_SCHEMA_VERSION,
@@ -163,21 +190,23 @@ impl ProcessingRuntimeManifestV1 {
             runtime_information: runtime_information_value,
         };
 
-        serde_json::to_string(&document)
-            .map_err(|error| ProcessingRuntimeManifestEncodingError::Serialization(error.to_string()))
+        serde_json::to_string(&document).map_err(|error| {
+            ProcessingRuntimeManifestEncodingError::Serialization(error.to_string())
+        })
     }
 
     pub fn from_json(input: &str) -> Result<Self, ProcessingRuntimeManifestDecodingError> {
         reject_duplicate_json_keys(input)?;
 
-        let document = serde_json::from_str::<ProcessingRuntimeManifestDocumentV1>(input).map_err(|error| {
-            ProcessingRuntimeManifestDecodingError::Json(error.to_string())
-        })?;
+        let document = serde_json::from_str::<ProcessingRuntimeManifestDocumentV1>(input)
+            .map_err(|error| ProcessingRuntimeManifestDecodingError::Json(error.to_string()))?;
 
         if document.schema_version != super::RUNTIME_MANIFEST_SCHEMA_VERSION {
-            return Err(ProcessingRuntimeManifestDecodingError::UnknownSchemaVersion(
-                document.schema_version,
-            ));
+            return Err(
+                ProcessingRuntimeManifestDecodingError::UnknownSchemaVersion(
+                    document.schema_version,
+                ),
+            );
         }
 
         if !is_safe_executable_name(&document.artifact.executable) {
@@ -185,9 +214,11 @@ impl ProcessingRuntimeManifestV1 {
         }
 
         if document.artifact.size == 0 {
-            return Err(ProcessingRuntimeManifestDecodingError::InvalidExecutableSize(
-                document.artifact.size,
-            ));
+            return Err(
+                ProcessingRuntimeManifestDecodingError::InvalidExecutableSize(
+                    document.artifact.size,
+                ),
+            );
         }
 
         let sha256 = ExecutableSha256::from_hex(&document.artifact.sha256).map_err(|_| {
@@ -196,8 +227,9 @@ impl ProcessingRuntimeManifestV1 {
 
         let runtime_information_json = serde_json::to_string(&document.runtime_information)
             .map_err(|error| ProcessingRuntimeManifestDecodingError::Json(error.to_string()))?;
-        let runtime_information = ProcessingRuntimeInformationV1::from_json(&runtime_information_json)
-            .map_err(ProcessingRuntimeManifestDecodingError::MalformedRuntimeInformation)?;
+        let runtime_information =
+            ProcessingRuntimeInformationV1::from_json(&runtime_information_json)
+                .map_err(ProcessingRuntimeManifestDecodingError::MalformedRuntimeInformation)?;
 
         Ok(Self {
             executable_name: document.artifact.executable,
@@ -443,7 +475,10 @@ impl<'a> DuplicateKeyJsonParser<'a> {
         }
     }
 
-    fn consume_literal(&mut self, literal: &str) -> Result<(), ProcessingRuntimeManifestDecodingError> {
+    fn consume_literal(
+        &mut self,
+        literal: &str,
+    ) -> Result<(), ProcessingRuntimeManifestDecodingError> {
         if self.source.get(self.index..self.index + literal.len()) != Some(literal.as_bytes()) {
             return Err(ProcessingRuntimeManifestDecodingError::Json(format!(
                 "expected JSON literal '{literal}'"
@@ -552,8 +587,14 @@ mod tests {
 
         assert_eq!(manifest.executable_name(), "example-source-process-data");
         assert_eq!(manifest.executable_size(), verified.artifact().size());
-        assert_eq!(manifest.executable_sha256().to_string(), verified.artifact().sha256());
-        assert_eq!(manifest.runtime_information().identity(), verified.information().identity());
+        assert_eq!(
+            manifest.executable_sha256().to_string(),
+            verified.artifact().sha256()
+        );
+        assert_eq!(
+            manifest.runtime_information().identity(),
+            verified.information().identity()
+        );
     }
 
     #[test]

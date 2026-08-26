@@ -147,22 +147,46 @@ impl fmt::Display for RuntimeBundleAdmissionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BundleMetadata { path, source } => {
-                write!(formatter, "failed to stat bundle '{}': {source}", path.display())
+                write!(
+                    formatter,
+                    "failed to stat bundle '{}': {source}",
+                    path.display()
+                )
             }
             Self::BundleIsSymlink { path } => {
-                write!(formatter, "bundle path '{}' must not be a symlink", path.display())
+                write!(
+                    formatter,
+                    "bundle path '{}' must not be a symlink",
+                    path.display()
+                )
             }
             Self::BundleNotDirectory { path } => {
-                write!(formatter, "bundle path '{}' is not a directory", path.display())
+                write!(
+                    formatter,
+                    "bundle path '{}' is not a directory",
+                    path.display()
+                )
             }
             Self::ManifestMetadata { path, source } => {
-                write!(formatter, "failed to stat manifest '{}': {source}", path.display())
+                write!(
+                    formatter,
+                    "failed to stat manifest '{}': {source}",
+                    path.display()
+                )
             }
             Self::ManifestIsSymlink { path } => {
-                write!(formatter, "manifest '{}' must not be a symlink", path.display())
+                write!(
+                    formatter,
+                    "manifest '{}' must not be a symlink",
+                    path.display()
+                )
             }
             Self::ManifestNotRegularFile { path } => {
-                write!(formatter, "manifest '{}' is not a regular file", path.display())
+                write!(
+                    formatter,
+                    "manifest '{}' is not a regular file",
+                    path.display()
+                )
             }
             Self::ManifestTooLarge { maximum, actual } => {
                 write!(
@@ -172,31 +196,57 @@ impl fmt::Display for RuntimeBundleAdmissionError {
                 )
             }
             Self::ReadManifest { path, source } => {
-                write!(formatter, "failed to read manifest '{}': {source}", path.display())
+                write!(
+                    formatter,
+                    "failed to read manifest '{}': {source}",
+                    path.display()
+                )
             }
-            Self::InvalidManifestBoundary => {
-                formatter.write_str("manifest does not match the required exact final newline boundary")
-            }
+            Self::InvalidManifestBoundary => formatter
+                .write_str("manifest does not match the required exact final newline boundary"),
             Self::DecodeManifest(error) => {
                 write!(formatter, "failed to decode runtime manifest: {error}")
             }
             Self::Incompatible(error) => {
-                write!(formatter, "runtime compatibility validation failed: {error}")
+                write!(
+                    formatter,
+                    "runtime compatibility validation failed: {error}"
+                )
             }
             Self::ReadDirectory { path, source } => {
-                write!(formatter, "failed to read bundle directory '{}': {source}", path.display())
+                write!(
+                    formatter,
+                    "failed to read bundle directory '{}': {source}",
+                    path.display()
+                )
             }
             Self::UnexpectedDirectoryEntry { path } => {
-                write!(formatter, "unexpected entry in bundle directory: {}", path.display())
+                write!(
+                    formatter,
+                    "unexpected entry in bundle directory: {}",
+                    path.display()
+                )
             }
             Self::MissingExecutable { path } => {
-                write!(formatter, "manifest-declared executable is missing: {}", path.display())
+                write!(
+                    formatter,
+                    "manifest-declared executable is missing: {}",
+                    path.display()
+                )
             }
             Self::ExecutableIsSymlink { path } => {
-                write!(formatter, "manifest-declared executable '{}' is a symlink", path.display())
+                write!(
+                    formatter,
+                    "manifest-declared executable '{}' is a symlink",
+                    path.display()
+                )
             }
             Self::ExecutableNotRegularFile { path } => {
-                write!(formatter, "manifest-declared executable '{}' is not a regular file", path.display())
+                write!(
+                    formatter,
+                    "manifest-declared executable '{}' is not a regular file",
+                    path.display()
+                )
             }
             Self::HashExecutable(error) => {
                 write!(formatter, "failed to hash executable: {error}")
@@ -210,10 +260,7 @@ impl fmt::Display for RuntimeBundleAdmissionError {
                 write!(
                     formatter,
                     "runtime executable digest mismatch: expected size={} sha256={} actual size={} sha256={}",
-                    expected_size,
-                    expected_sha256,
-                    actual_size,
-                    actual_sha256
+                    expected_size, expected_sha256, actual_size, actual_sha256
                 )
             }
         }
@@ -307,22 +354,46 @@ impl fmt::Display for ProcessingRuntimeBundleAdmissionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BundleMetadata { path, source } => {
-                write!(formatter, "failed to stat bundle '{}': {source}", path.display())
+                write!(
+                    formatter,
+                    "failed to stat bundle '{}': {source}",
+                    path.display()
+                )
             }
             Self::BundleIsSymlink { path } => {
-                write!(formatter, "bundle path '{}' must not be a symlink", path.display())
+                write!(
+                    formatter,
+                    "bundle path '{}' must not be a symlink",
+                    path.display()
+                )
             }
             Self::BundleNotDirectory { path } => {
-                write!(formatter, "bundle path '{}' is not a directory", path.display())
+                write!(
+                    formatter,
+                    "bundle path '{}' is not a directory",
+                    path.display()
+                )
             }
             Self::ManifestMetadata { path, source } => {
-                write!(formatter, "failed to stat manifest '{}': {source}", path.display())
+                write!(
+                    formatter,
+                    "failed to stat manifest '{}': {source}",
+                    path.display()
+                )
             }
             Self::ManifestIsSymlink { path } => {
-                write!(formatter, "manifest '{}' must not be a symlink", path.display())
+                write!(
+                    formatter,
+                    "manifest '{}' must not be a symlink",
+                    path.display()
+                )
             }
             Self::ManifestNotRegularFile { path } => {
-                write!(formatter, "manifest '{}' is not a regular file", path.display())
+                write!(
+                    formatter,
+                    "manifest '{}' is not a regular file",
+                    path.display()
+                )
             }
             Self::ManifestTooLarge { maximum, actual } => {
                 write!(
@@ -332,31 +403,60 @@ impl fmt::Display for ProcessingRuntimeBundleAdmissionError {
                 )
             }
             Self::ReadManifest { path, source } => {
-                write!(formatter, "failed to read manifest '{}': {source}", path.display())
+                write!(
+                    formatter,
+                    "failed to read manifest '{}': {source}",
+                    path.display()
+                )
             }
-            Self::InvalidManifestBoundary => {
-                formatter.write_str("manifest does not match the required exact final newline boundary")
-            }
+            Self::InvalidManifestBoundary => formatter
+                .write_str("manifest does not match the required exact final newline boundary"),
             Self::DecodeManifest(error) => {
-                write!(formatter, "failed to decode processing runtime manifest: {error}")
+                write!(
+                    formatter,
+                    "failed to decode processing runtime manifest: {error}"
+                )
             }
             Self::Incompatible(error) => {
-                write!(formatter, "processing runtime compatibility validation failed: {error}")
+                write!(
+                    formatter,
+                    "processing runtime compatibility validation failed: {error}"
+                )
             }
             Self::ReadDirectory { path, source } => {
-                write!(formatter, "failed to read bundle directory '{}': {source}", path.display())
+                write!(
+                    formatter,
+                    "failed to read bundle directory '{}': {source}",
+                    path.display()
+                )
             }
             Self::UnexpectedDirectoryEntry { path } => {
-                write!(formatter, "unexpected entry in bundle directory: {}", path.display())
+                write!(
+                    formatter,
+                    "unexpected entry in bundle directory: {}",
+                    path.display()
+                )
             }
             Self::MissingExecutable { path } => {
-                write!(formatter, "manifest-declared executable is missing: {}", path.display())
+                write!(
+                    formatter,
+                    "manifest-declared executable is missing: {}",
+                    path.display()
+                )
             }
             Self::ExecutableIsSymlink { path } => {
-                write!(formatter, "manifest-declared executable '{}' is a symlink", path.display())
+                write!(
+                    formatter,
+                    "manifest-declared executable '{}' is a symlink",
+                    path.display()
+                )
             }
             Self::ExecutableNotRegularFile { path } => {
-                write!(formatter, "manifest-declared executable '{}' is not a regular file", path.display())
+                write!(
+                    formatter,
+                    "manifest-declared executable '{}' is not a regular file",
+                    path.display()
+                )
             }
             Self::HashExecutable(error) => {
                 write!(formatter, "failed to hash executable: {error}")
@@ -370,10 +470,7 @@ impl fmt::Display for ProcessingRuntimeBundleAdmissionError {
                 write!(
                     formatter,
                     "processing runtime executable digest mismatch: expected size={} sha256={} actual size={} sha256={}",
-                    expected_size,
-                    expected_sha256,
-                    actual_size,
-                    actual_sha256
+                    expected_size, expected_sha256, actual_size, actual_sha256
                 )
             }
         }
@@ -450,14 +547,15 @@ pub fn admit_http_runtime_bundle(
         });
     }
 
-    let manifest_bytes = fs::read(&manifest_path).map_err(|source| {
-        RuntimeBundleAdmissionError::ReadManifest {
+    let manifest_bytes =
+        fs::read(&manifest_path).map_err(|source| RuntimeBundleAdmissionError::ReadManifest {
             path: manifest_path.clone(),
             source,
-        }
-    })?;
+        })?;
     let manifest_text = validate_manifest_text(&manifest_bytes).map_err(|error| match error {
-        ManifestBoundaryError::InvalidBoundary => RuntimeBundleAdmissionError::InvalidManifestBoundary,
+        ManifestBoundaryError::InvalidBoundary => {
+            RuntimeBundleAdmissionError::InvalidManifestBoundary
+        }
         ManifestBoundaryError::TooLarge { maximum, actual } => {
             RuntimeBundleAdmissionError::ManifestTooLarge { maximum, actual }
         }
@@ -518,9 +616,7 @@ pub fn admit_http_runtime_bundle(
         if name == "runtime.json" || name == manifest.executable_name() {
             continue;
         }
-        return Err(RuntimeBundleAdmissionError::UnexpectedDirectoryEntry {
-            path: entry.path(),
-        });
+        return Err(RuntimeBundleAdmissionError::UnexpectedDirectoryEntry { path: entry.path() });
     }
 
     let artifact = hash_runtime_executable(&executable_path)
@@ -579,9 +675,11 @@ pub fn admit_processing_runtime_bundle(
         });
     }
     if !manifest_metadata.is_file() {
-        return Err(ProcessingRuntimeBundleAdmissionError::ManifestNotRegularFile {
-            path: manifest_path.clone(),
-        });
+        return Err(
+            ProcessingRuntimeBundleAdmissionError::ManifestNotRegularFile {
+                path: manifest_path.clone(),
+            },
+        );
     }
     if manifest_metadata.len() > MAX_RUNTIME_MANIFEST_BYTES as u64 {
         return Err(ProcessingRuntimeBundleAdmissionError::ManifestTooLarge {
@@ -614,9 +712,11 @@ pub fn admit_processing_runtime_bundle(
 
     let executable_path = bundle_directory.join(manifest.executable_name());
     if executable_path.parent().map(Path::new) != Some(bundle_directory) {
-        return Err(ProcessingRuntimeBundleAdmissionError::UnexpectedDirectoryEntry {
-            path: executable_path.clone(),
-        });
+        return Err(
+            ProcessingRuntimeBundleAdmissionError::UnexpectedDirectoryEntry {
+                path: executable_path.clone(),
+            },
+        );
     }
 
     let executable_metadata = match fs::symlink_metadata(&executable_path) {
@@ -639,9 +739,11 @@ pub fn admit_processing_runtime_bundle(
         });
     }
     if !executable_metadata.is_file() {
-        return Err(ProcessingRuntimeBundleAdmissionError::ExecutableNotRegularFile {
-            path: executable_path.clone(),
-        });
+        return Err(
+            ProcessingRuntimeBundleAdmissionError::ExecutableNotRegularFile {
+                path: executable_path.clone(),
+            },
+        );
     }
 
     let entries = fs::read_dir(bundle_directory).map_err(|source| {
@@ -651,18 +753,21 @@ pub fn admit_processing_runtime_bundle(
         }
     })?;
     for entry in entries {
-        let entry = entry.map_err(|source| ProcessingRuntimeBundleAdmissionError::ReadDirectory {
-            path: bundle_directory.to_path_buf(),
-            source,
-        })?;
+        let entry =
+            entry.map_err(
+                |source| ProcessingRuntimeBundleAdmissionError::ReadDirectory {
+                    path: bundle_directory.to_path_buf(),
+                    source,
+                },
+            )?;
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
         if name == "runtime.json" || name == manifest.executable_name() {
             continue;
         }
-        return Err(ProcessingRuntimeBundleAdmissionError::UnexpectedDirectoryEntry {
-            path: entry.path(),
-        });
+        return Err(
+            ProcessingRuntimeBundleAdmissionError::UnexpectedDirectoryEntry { path: entry.path() },
+        );
     }
 
     let artifact = hash_runtime_executable(&executable_path)
@@ -763,7 +868,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let candidate = dir.path().join("runtime-admission-candidate");
         let source = HttpSourceContractV1::new(|_, _| Ok(()));
-        let info = RuntimeInformationV1::from_http_source(identity, &source, HttpCapabilitySet::empty());
+        let info =
+            RuntimeInformationV1::from_http_source(identity, &source, HttpCapabilitySet::empty());
         let json = info.to_json().unwrap();
         let script = format!(
             "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nexit 1\n",
@@ -774,7 +880,10 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&candidate, permissions).unwrap();
 
-        (verify_http_runtime_candidate(&candidate, identity).unwrap(), dir)
+        (
+            verify_http_runtime_candidate(&candidate, identity).unwrap(),
+            dir,
+        )
     }
 
     fn fixture_verified_processing_runtime(
@@ -783,11 +892,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let candidate = dir.path().join("processing-runtime-admission-candidate");
         let source = lexicon_core::processing::ProcessingSourceContractV1::new(|_, _| Ok(()));
-        let info = lexicon_core::processing::ProcessingRuntimeInformationV1::from_processing_source(
-            identity,
-            &source,
-        )
-        .unwrap();
+        let info =
+            lexicon_core::processing::ProcessingRuntimeInformationV1::from_processing_source(
+                identity, &source,
+            )
+            .unwrap();
         let json = info.to_json().unwrap();
         let script = format!(
             "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nexit 1\n",
@@ -798,7 +907,10 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&candidate, permissions).unwrap();
 
-        (verify_processing_runtime_candidate(&candidate, identity).unwrap(), dir)
+        (
+            verify_processing_runtime_candidate(&candidate, identity).unwrap(),
+            dir,
+        )
     }
 
     #[test]
@@ -813,7 +925,10 @@ mod tests {
         assert_eq!(admitted.directory(), staged.directory());
         assert_eq!(admitted.manifest_path(), staged.manifest_path());
         assert_eq!(admitted.executable_path(), staged.executable_path());
-        assert_eq!(admitted.manifest().executable_name(), staged.manifest().executable_name());
+        assert_eq!(
+            admitted.manifest().executable_name(),
+            staged.manifest().executable_name()
+        );
         assert_eq!(admitted.runtime_information().identity(), identity);
         assert_eq!(admitted.artifact().size(), verified.artifact().size());
         assert_eq!(admitted.artifact().sha256(), verified.artifact().sha256());
@@ -827,7 +942,10 @@ mod tests {
         let identity = RuntimeIdentity::http_acquisition("example-source", 1);
 
         let error = admit_http_runtime_bundle(&missing, identity).unwrap_err();
-        assert!(matches!(error, RuntimeBundleAdmissionError::BundleMetadata { .. }));
+        assert!(matches!(
+            error,
+            RuntimeBundleAdmissionError::BundleMetadata { .. }
+        ));
     }
 
     #[test]
@@ -838,12 +956,17 @@ mod tests {
         let bundle = stage_verified_http_runtime_bundle(dir.path(), "runtime", &verified).unwrap();
 
         let manifest_path = bundle.directory().join("runtime.json");
-        let mut data = std::iter::repeat(b'a').take(MAX_RUNTIME_MANIFEST_BYTES + 1).collect::<Vec<_>>();
+        let mut data = std::iter::repeat(b'a')
+            .take(MAX_RUNTIME_MANIFEST_BYTES + 1)
+            .collect::<Vec<_>>();
         data.extend(b"\n");
         fs::write(&manifest_path, data).unwrap();
 
         let error = admit_http_runtime_bundle(bundle.directory(), identity).unwrap_err();
-        assert!(matches!(error, RuntimeBundleAdmissionError::ManifestTooLarge { .. }));
+        assert!(matches!(
+            error,
+            RuntimeBundleAdmissionError::ManifestTooLarge { .. }
+        ));
     }
 
     #[test]
@@ -857,7 +980,10 @@ mod tests {
         fs::write(&manifest_path, b"{\"schema_version\":1}\n\n").unwrap();
 
         let error = admit_http_runtime_bundle(bundle.directory(), identity).unwrap_err();
-        assert!(matches!(error, RuntimeBundleAdmissionError::InvalidManifestBoundary));
+        assert!(matches!(
+            error,
+            RuntimeBundleAdmissionError::InvalidManifestBoundary
+        ));
     }
 
     #[test]
@@ -874,7 +1000,10 @@ mod tests {
         fs::write(&executable_path, &modified).unwrap();
 
         let error = admit_http_runtime_bundle(bundle.directory(), identity).unwrap_err();
-        assert!(matches!(error, RuntimeBundleAdmissionError::ArtifactMismatch { .. }));
+        assert!(matches!(
+            error,
+            RuntimeBundleAdmissionError::ArtifactMismatch { .. }
+        ));
     }
 
     #[test]
@@ -882,15 +1011,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let identity = RuntimeIdentity::http_processing("example-source", 1);
         let (verified, _fixture_dir) = fixture_verified_processing_runtime(identity);
-        let staged = stage_verified_processing_runtime_bundle(dir.path(), "processing-runtime", &verified)
-            .unwrap();
+        let staged =
+            stage_verified_processing_runtime_bundle(dir.path(), "processing-runtime", &verified)
+                .unwrap();
 
         let admitted = admit_processing_runtime_bundle(staged.directory(), identity).unwrap();
 
         assert_eq!(admitted.directory(), staged.directory());
         assert_eq!(admitted.manifest_path(), staged.manifest_path());
         assert_eq!(admitted.executable_path(), staged.executable_path());
-        assert_eq!(admitted.manifest().executable_name(), staged.manifest().executable_name());
+        assert_eq!(
+            admitted.manifest().executable_name(),
+            staged.manifest().executable_name()
+        );
         assert_eq!(admitted.runtime_information().identity(), identity);
         assert_eq!(admitted.artifact().size(), verified.artifact().size());
         assert_eq!(admitted.artifact().sha256(), verified.artifact().sha256());
@@ -901,13 +1034,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let identity = RuntimeIdentity::http_processing("example-source", 1);
         let (verified, _fixture_dir) = fixture_verified_processing_runtime(identity);
-        let bundle = stage_verified_processing_runtime_bundle(dir.path(), "processing-runtime", &verified)
-            .unwrap();
+        let bundle =
+            stage_verified_processing_runtime_bundle(dir.path(), "processing-runtime", &verified)
+                .unwrap();
 
         let manifest_path = bundle.directory().join("runtime.json");
         fs::write(&manifest_path, b"{\"schema_version\":1}\n\n").unwrap();
 
         let error = admit_processing_runtime_bundle(bundle.directory(), identity).unwrap_err();
-        assert!(matches!(error, ProcessingRuntimeBundleAdmissionError::InvalidManifestBoundary));
+        assert!(matches!(
+            error,
+            ProcessingRuntimeBundleAdmissionError::InvalidManifestBoundary
+        ));
     }
 }

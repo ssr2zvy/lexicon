@@ -16,7 +16,10 @@ impl fmt::Display for ProcessingRuntimeInformationEncodingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Serialization(message) => {
-                write!(formatter, "processing runtime information serialization error: {message}")
+                write!(
+                    formatter,
+                    "processing runtime information serialization error: {message}"
+                )
             }
         }
     }
@@ -28,20 +31,10 @@ impl std::error::Error for ProcessingRuntimeInformationEncodingError {}
 pub enum ProcessingRuntimeInformationDecodingError {
     JsonSyntax(String),
     UnknownSchemaVersion(u32),
-    UnknownIdentifier {
-        field: &'static str,
-        value: String,
-    },
-    WrongProtocol {
-        actual: RuntimeProtocol,
-    },
-    WrongOperation {
-        actual: RuntimeOperation,
-    },
-    InvalidVersion {
-        field: &'static str,
-        value: u32,
-    },
+    UnknownIdentifier { field: &'static str, value: String },
+    WrongProtocol { actual: RuntimeProtocol },
+    WrongOperation { actual: RuntimeOperation },
+    InvalidVersion { field: &'static str, value: u32 },
     StructuralDocument(String),
 }
 
@@ -50,7 +43,10 @@ impl fmt::Display for ProcessingRuntimeInformationDecodingError {
         match self {
             Self::JsonSyntax(message) => write!(formatter, "invalid JSON: {message}"),
             Self::UnknownSchemaVersion(version) => {
-                write!(formatter, "unknown processing runtime schema version: {version}")
+                write!(
+                    formatter,
+                    "unknown processing runtime schema version: {version}"
+                )
             }
             Self::UnknownIdentifier { field, value } => {
                 write!(formatter, "unknown {field} identifier: {value}")
@@ -131,15 +127,19 @@ impl ProcessingRuntimeInformationV1 {
         let _ = source;
 
         if identity.protocol() != RuntimeProtocol::Http {
-            return Err(ProcessingRuntimeInformationConstructionError::WrongProtocol {
-                actual: identity.protocol(),
-            });
+            return Err(
+                ProcessingRuntimeInformationConstructionError::WrongProtocol {
+                    actual: identity.protocol(),
+                },
+            );
         }
 
         if identity.operation() != RuntimeOperation::Processing {
-            return Err(ProcessingRuntimeInformationConstructionError::WrongOperation {
-                actual: identity.operation(),
-            });
+            return Err(
+                ProcessingRuntimeInformationConstructionError::WrongOperation {
+                    actual: identity.operation(),
+                },
+            );
         }
 
         if identity.source_contract_version() != ProcessingSourceContractV1::CONTRACT_VERSION {
@@ -171,39 +171,42 @@ impl ProcessingRuntimeInformationV1 {
             },
         };
 
-        serde_json::to_string(&document)
-            .map_err(|error| ProcessingRuntimeInformationEncodingError::Serialization(error.to_string()))
+        serde_json::to_string(&document).map_err(|error| {
+            ProcessingRuntimeInformationEncodingError::Serialization(error.to_string())
+        })
     }
 
-    pub fn from_json(
-        input: &str,
-    ) -> Result<Self, ProcessingRuntimeInformationDecodingError> {
+    pub fn from_json(input: &str) -> Result<Self, ProcessingRuntimeInformationDecodingError> {
         if let Some(field) = detect_duplicate_object_keys(input) {
-            return Err(ProcessingRuntimeInformationDecodingError::StructuralDocument(format!(
-                "duplicate field '{field}'"
-            )));
+            return Err(
+                ProcessingRuntimeInformationDecodingError::StructuralDocument(format!(
+                    "duplicate field '{field}'"
+                )),
+            );
         }
 
         let document = match serde_json::from_str::<ProcessingRuntimeInformationDocumentV1>(input) {
             Ok(document) => document,
             Err(error) => {
                 return match error.classify() {
-                    serde_json::error::Category::Syntax => {
-                        Err(ProcessingRuntimeInformationDecodingError::JsonSyntax(
+                    serde_json::error::Category::Syntax => Err(
+                        ProcessingRuntimeInformationDecodingError::JsonSyntax(error.to_string()),
+                    ),
+                    _ => Err(
+                        ProcessingRuntimeInformationDecodingError::StructuralDocument(
                             error.to_string(),
-                        ))
-                    }
-                    _ => Err(ProcessingRuntimeInformationDecodingError::StructuralDocument(
-                        error.to_string(),
-                    )),
+                        ),
+                    ),
                 };
             }
         };
 
         if document.schema_version != PROCESSING_RUNTIME_INFORMATION_SCHEMA_VERSION {
-            return Err(ProcessingRuntimeInformationDecodingError::UnknownSchemaVersion(
-                document.schema_version,
-            ));
+            return Err(
+                ProcessingRuntimeInformationDecodingError::UnknownSchemaVersion(
+                    document.schema_version,
+                ),
+            );
         }
 
         if document.identity.source_contract_version == 0 {
@@ -220,30 +223,34 @@ impl ProcessingRuntimeInformationV1 {
             });
         }
 
-        let protocol = RuntimeProtocol::from_identifier(&document.identity.protocol).map_err(|error| {
-            match error {
-                RuntimeIdentifierError::UnknownIdentifier { value, .. } => {
-                    ProcessingRuntimeInformationDecodingError::UnknownIdentifier {
-                        field: "identity.protocol",
-                        value,
+        let protocol =
+            RuntimeProtocol::from_identifier(&document.identity.protocol).map_err(|error| {
+                match error {
+                    RuntimeIdentifierError::UnknownIdentifier { value, .. } => {
+                        ProcessingRuntimeInformationDecodingError::UnknownIdentifier {
+                            field: "identity.protocol",
+                            value,
+                        }
                     }
                 }
-            }
-        })?;
+            })?;
 
-        let operation = RuntimeOperation::from_identifier(&document.identity.operation).map_err(|error| {
-            match error {
-                RuntimeIdentifierError::UnknownIdentifier { value, .. } => {
-                    ProcessingRuntimeInformationDecodingError::UnknownIdentifier {
-                        field: "identity.operation",
-                        value,
+        let operation =
+            RuntimeOperation::from_identifier(&document.identity.operation).map_err(|error| {
+                match error {
+                    RuntimeIdentifierError::UnknownIdentifier { value, .. } => {
+                        ProcessingRuntimeInformationDecodingError::UnknownIdentifier {
+                            field: "identity.operation",
+                            value,
+                        }
                     }
                 }
-            }
-        })?;
+            })?;
 
         if protocol != RuntimeProtocol::Http {
-            return Err(ProcessingRuntimeInformationDecodingError::WrongProtocol { actual: protocol });
+            return Err(ProcessingRuntimeInformationDecodingError::WrongProtocol {
+                actual: protocol,
+            });
         }
 
         if operation != RuntimeOperation::Processing {
@@ -260,7 +267,10 @@ impl ProcessingRuntimeInformationV1 {
             document.identity.source_contract_version,
         );
 
-        Ok(Self::from_parts_unchecked(identity, document.descriptor.contract_version))
+        Ok(Self::from_parts_unchecked(
+            identity,
+            document.descriptor.contract_version,
+        ))
     }
 
     pub fn validate_compatibility(
@@ -394,10 +404,16 @@ impl fmt::Display for ProcessingRuntimeInformationConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WrongProtocol { actual } => {
-                write!(formatter, "processing runtime information requires HTTP protocol, actual: {actual:?}")
+                write!(
+                    formatter,
+                    "processing runtime information requires HTTP protocol, actual: {actual:?}"
+                )
             }
             Self::WrongOperation { actual } => {
-                write!(formatter, "processing runtime information requires processing operation, actual: {actual:?}")
+                write!(
+                    formatter,
+                    "processing runtime information requires processing operation, actual: {actual:?}"
+                )
             }
             Self::IdentityContractVersionMismatch {
                 identity_version,
@@ -450,9 +466,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        ProcessingRuntimeCompatibilityError, ProcessingRuntimeInformationConstructionError,
-        ProcessingRuntimeInformationDecodingError, ProcessingRuntimeInformationV1,
-        PROCESSING_RUNTIME_INFORMATION_SCHEMA_VERSION,
+        PROCESSING_RUNTIME_INFORMATION_SCHEMA_VERSION, ProcessingRuntimeCompatibilityError,
+        ProcessingRuntimeInformationConstructionError, ProcessingRuntimeInformationDecodingError,
+        ProcessingRuntimeInformationV1,
     };
     use crate::processing::{ProcessingContext, ProcessingResult, ProcessingSourceContractV1};
     use crate::runtime::{RuntimeIdentity, RuntimeOperation, RuntimeProtocol};
@@ -485,7 +501,8 @@ mod tests {
     #[test]
     fn valid_processing_identity_and_descriptor_construct_successfully() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let result = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source);
+        let result =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source);
 
         assert!(result.is_ok(), "result: {result:?}");
     }
@@ -494,7 +511,8 @@ mod tests {
     fn information_preserves_source_identity() {
         let source = ProcessingSourceContractV1::new(process_handler);
         let identity = processing_identity(1);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(identity, &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(identity, &source).unwrap();
 
         assert_eq!(info.identity(), identity);
     }
@@ -502,7 +520,9 @@ mod tests {
     #[test]
     fn information_reports_http_protocol() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
 
         assert_eq!(info.identity().protocol(), RuntimeProtocol::Http);
     }
@@ -510,7 +530,9 @@ mod tests {
     #[test]
     fn information_reports_processing_operation() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
 
         assert_eq!(info.identity().operation(), RuntimeOperation::Processing);
     }
@@ -518,16 +540,23 @@ mod tests {
     #[test]
     fn descriptor_contract_version_is_one() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
 
-        assert_eq!(info.descriptor_contract_version(), ProcessingSourceContractV1::CONTRACT_VERSION);
+        assert_eq!(
+            info.descriptor_contract_version(),
+            ProcessingSourceContractV1::CONTRACT_VERSION
+        );
         assert_eq!(info.descriptor_contract_version(), 1);
     }
 
     #[test]
     fn processing_runtime_information_is_copy() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
         let duplicate = info;
         let _ = (info, duplicate);
     }
@@ -536,7 +565,8 @@ mod tests {
     fn construction_does_not_invoke_process_handler() {
         CONSTRUCTION_CALL_COUNT.store(0, Ordering::Relaxed);
         let source = ProcessingSourceContractV1::new(process_handler);
-        let _ = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source);
+        let _ =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source);
 
         assert_eq!(CONSTRUCTION_CALL_COUNT.load(Ordering::Relaxed), 0);
     }
@@ -544,20 +574,24 @@ mod tests {
     #[test]
     fn acquisition_identity_returns_wrong_operation() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let result = ProcessingRuntimeInformationV1::from_processing_source(acquisition_identity(), &source);
+        let result =
+            ProcessingRuntimeInformationV1::from_processing_source(acquisition_identity(), &source);
 
         assert_eq!(
             result,
-            Err(ProcessingRuntimeInformationConstructionError::WrongOperation {
-                actual: RuntimeOperation::Acquisition,
-            })
+            Err(
+                ProcessingRuntimeInformationConstructionError::WrongOperation {
+                    actual: RuntimeOperation::Acquisition,
+                }
+            )
         );
     }
 
     #[test]
     fn non_matching_identity_contract_version_returns_identity_contract_version_mismatch() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let result = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(2), &source);
+        let result =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(2), &source);
 
         assert_eq!(
             result,
@@ -573,7 +607,9 @@ mod tests {
     #[test]
     fn validation_against_same_processing_identity_succeeds() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
 
         assert!(info.validate_compatibility(processing_identity(1)).is_ok());
     }
@@ -581,7 +617,9 @@ mod tests {
     #[test]
     fn validation_against_another_source_returns_identity_mismatch() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
 
         assert!(matches!(
             info.validate_compatibility(RuntimeIdentity::http_processing("other-source", 1)),
@@ -592,7 +630,9 @@ mod tests {
     #[test]
     fn validation_against_acquisition_identity_returns_identity_mismatch() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
 
         assert!(matches!(
             info.validate_compatibility(acquisition_identity()),
@@ -603,7 +643,9 @@ mod tests {
     #[test]
     fn descriptor_version_disagreement_returns_descriptor_contract_version_mismatch() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
         let mutated = ProcessingRuntimeInformationV1 {
             identity: info.identity(),
             descriptor_contract_version: 2,
@@ -619,7 +661,9 @@ mod tests {
     fn construction_and_validation_do_not_mutate_descriptor() {
         let source = ProcessingSourceContractV1::new(process_handler);
         let original_ptr = source.process_handler() as *const ();
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
         let validated = info.validate_compatibility(processing_identity(1));
 
         assert!(validated.is_ok());
@@ -630,7 +674,9 @@ mod tests {
     fn construction_and_validation_do_not_invoke_process_handler() {
         CONSTRUCTION_CALL_COUNT.store(0, Ordering::Relaxed);
         let source = ProcessingSourceContractV1::new(process_handler);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
         let _ = info.validate_compatibility(processing_identity(1));
 
         assert_eq!(CONSTRUCTION_CALL_COUNT.load(Ordering::Relaxed), 0);
@@ -652,20 +698,30 @@ mod tests {
     fn native_source_arguments_are_not_involved_in_information_construction() {
         let source = ProcessingSourceContractV1::new(process_handler);
         let _ = source.process_handler();
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
 
         assert_eq!(info.identity().source_contract_version(), 1);
     }
 
     #[test]
     fn valid_processing_information_serializes_successfully() {
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &ProcessingSourceContractV1::new(process_handler)).unwrap();
+        let info = ProcessingRuntimeInformationV1::from_processing_source(
+            processing_identity(1),
+            &ProcessingSourceContractV1::new(process_handler),
+        )
+        .unwrap();
         assert!(info.to_json().is_ok());
     }
 
     #[test]
     fn processing_schema_version_is_one() {
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &ProcessingSourceContractV1::new(process_handler)).unwrap();
+        let info = ProcessingRuntimeInformationV1::from_processing_source(
+            processing_identity(1),
+            &ProcessingSourceContractV1::new(process_handler),
+        )
+        .unwrap();
         let json = info.to_json().unwrap();
         assert!(json.contains("\"schema_version\":1"));
         assert_eq!(PROCESSING_RUNTIME_INFORMATION_SCHEMA_VERSION, 1);
@@ -673,7 +729,11 @@ mod tests {
 
     #[test]
     fn processing_protocol_and_operation_are_stable() {
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &ProcessingSourceContractV1::new(process_handler)).unwrap();
+        let info = ProcessingRuntimeInformationV1::from_processing_source(
+            processing_identity(1),
+            &ProcessingSourceContractV1::new(process_handler),
+        )
+        .unwrap();
         let json = info.to_json().unwrap();
         assert!(json.contains("\"protocol\":\"http\""));
         assert!(json.contains("\"operation\":\"processing\""));
@@ -683,7 +743,8 @@ mod tests {
     fn source_identity_is_preserved_in_json_round_trip() {
         let source = ProcessingSourceContractV1::new(process_handler);
         let identity = processing_identity(1);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(identity, &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(identity, &source).unwrap();
         let json = info.to_json().unwrap();
         let parsed = ProcessingRuntimeInformationV1::from_json(&json).unwrap();
         assert_eq!(parsed.identity(), info.identity());
@@ -692,7 +753,11 @@ mod tests {
 
     #[test]
     fn source_contract_version_is_preserved() {
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &ProcessingSourceContractV1::new(process_handler)).unwrap();
+        let info = ProcessingRuntimeInformationV1::from_processing_source(
+            processing_identity(1),
+            &ProcessingSourceContractV1::new(process_handler),
+        )
+        .unwrap();
         let json = info.to_json().unwrap();
         let parsed = ProcessingRuntimeInformationV1::from_json(&json).unwrap();
         assert_eq!(parsed.identity().source_contract_version(), 1);
@@ -700,15 +765,26 @@ mod tests {
 
     #[test]
     fn descriptor_contract_version_is_preserved() {
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &ProcessingSourceContractV1::new(process_handler)).unwrap();
+        let info = ProcessingRuntimeInformationV1::from_processing_source(
+            processing_identity(1),
+            &ProcessingSourceContractV1::new(process_handler),
+        )
+        .unwrap();
         let json = info.to_json().unwrap();
         let parsed = ProcessingRuntimeInformationV1::from_json(&json).unwrap();
-        assert_eq!(parsed.descriptor_contract_version(), info.descriptor_contract_version());
+        assert_eq!(
+            parsed.descriptor_contract_version(),
+            info.descriptor_contract_version()
+        );
     }
 
     #[test]
     fn encoding_does_not_add_a_newline() {
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &ProcessingSourceContractV1::new(process_handler)).unwrap();
+        let info = ProcessingRuntimeInformationV1::from_processing_source(
+            processing_identity(1),
+            &ProcessingSourceContractV1::new(process_handler),
+        )
+        .unwrap();
         let json = info.to_json().unwrap();
         assert!(!json.ends_with('\n'));
         assert!(!json.contains("\n"));
@@ -718,43 +794,62 @@ mod tests {
     fn encoding_does_not_invoke_process_handler() {
         CONSTRUCTION_CALL_COUNT.store(0, Ordering::Relaxed);
         let source = ProcessingSourceContractV1::new(process_handler);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
         let _ = info.to_json();
         assert_eq!(CONSTRUCTION_CALL_COUNT.load(Ordering::Relaxed), 0);
     }
 
     #[test]
     fn json_round_trip_preserves_equality() {
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &ProcessingSourceContractV1::new(process_handler)).unwrap();
-        let round_trip = ProcessingRuntimeInformationV1::from_json(&info.to_json().unwrap()).unwrap();
+        let info = ProcessingRuntimeInformationV1::from_processing_source(
+            processing_identity(1),
+            &ProcessingSourceContractV1::new(process_handler),
+        )
+        .unwrap();
+        let round_trip =
+            ProcessingRuntimeInformationV1::from_json(&info.to_json().unwrap()).unwrap();
         assert_eq!(round_trip, info);
     }
 
     #[test]
     fn invalid_json_is_rejected() {
         let result = ProcessingRuntimeInformationV1::from_json("{not valid}");
-        assert!(matches!(result, Err(ProcessingRuntimeInformationDecodingError::JsonSyntax(_))));
+        assert!(matches!(
+            result,
+            Err(ProcessingRuntimeInformationDecodingError::JsonSyntax(_))
+        ));
     }
 
     #[test]
     fn duplicate_fields_are_rejected() {
         let json = r#"{"schema_version":1,"schema_version":2,"identity":{"source":"example-source","protocol":"http","operation":"processing","source_contract_version":1},"descriptor":{"contract_version":1}}"#;
         let result = ProcessingRuntimeInformationV1::from_json(json);
-        assert!(matches!(result, Err(ProcessingRuntimeInformationDecodingError::StructuralDocument(_))));
+        assert!(matches!(
+            result,
+            Err(ProcessingRuntimeInformationDecodingError::StructuralDocument(_))
+        ));
     }
 
     #[test]
     fn unknown_fields_are_rejected() {
         let json = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"processing","source_contract_version":1},"descriptor":{"contract_version":1},"extra":true}"#;
         let result = ProcessingRuntimeInformationV1::from_json(json);
-        assert!(matches!(result, Err(ProcessingRuntimeInformationDecodingError::StructuralDocument(_))));
+        assert!(matches!(
+            result,
+            Err(ProcessingRuntimeInformationDecodingError::StructuralDocument(_))
+        ));
     }
 
     #[test]
     fn missing_fields_are_rejected() {
         let json = r#"{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"processing"}}"#;
         let result = ProcessingRuntimeInformationV1::from_json(json);
-        assert!(matches!(result, Err(ProcessingRuntimeInformationDecodingError::StructuralDocument(_))));
+        assert!(matches!(
+            result,
+            Err(ProcessingRuntimeInformationDecodingError::StructuralDocument(_))
+        ));
     }
 
     #[test]
@@ -773,7 +868,12 @@ mod tests {
         let result = ProcessingRuntimeInformationV1::from_json(json);
         assert!(matches!(
             result,
-            Err(ProcessingRuntimeInformationDecodingError::UnknownIdentifier { field: "identity.protocol", .. })
+            Err(
+                ProcessingRuntimeInformationDecodingError::UnknownIdentifier {
+                    field: "identity.protocol",
+                    ..
+                }
+            )
         ));
     }
 
@@ -783,7 +883,12 @@ mod tests {
         let result = ProcessingRuntimeInformationV1::from_json(json);
         assert!(matches!(
             result,
-            Err(ProcessingRuntimeInformationDecodingError::UnknownIdentifier { field: "identity.operation", .. })
+            Err(
+                ProcessingRuntimeInformationDecodingError::UnknownIdentifier {
+                    field: "identity.operation",
+                    ..
+                }
+            )
         ));
     }
 
@@ -793,7 +898,9 @@ mod tests {
         let result = ProcessingRuntimeInformationV1::from_json(json);
         assert!(matches!(
             result,
-            Err(ProcessingRuntimeInformationDecodingError::WrongOperation { actual: RuntimeOperation::Acquisition })
+            Err(ProcessingRuntimeInformationDecodingError::WrongOperation {
+                actual: RuntimeOperation::Acquisition
+            })
         ));
     }
 
@@ -803,7 +910,10 @@ mod tests {
         let result = ProcessingRuntimeInformationV1::from_json(json);
         assert!(matches!(
             result,
-            Err(ProcessingRuntimeInformationDecodingError::InvalidVersion { field: "identity.source_contract_version", .. })
+            Err(ProcessingRuntimeInformationDecodingError::InvalidVersion {
+                field: "identity.source_contract_version",
+                ..
+            })
         ));
     }
 
@@ -813,7 +923,10 @@ mod tests {
         let result = ProcessingRuntimeInformationV1::from_json(json);
         assert!(matches!(
             result,
-            Err(ProcessingRuntimeInformationDecodingError::InvalidVersion { field: "descriptor.contract_version", .. })
+            Err(ProcessingRuntimeInformationDecodingError::InvalidVersion {
+                field: "descriptor.contract_version",
+                ..
+            })
         ));
     }
 
@@ -839,7 +952,9 @@ mod tests {
     #[test]
     fn private_unchecked_constructor_is_not_publicly_accessible() {
         let source = ProcessingSourceContractV1::new(process_handler);
-        let info = ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source).unwrap();
+        let info =
+            ProcessingRuntimeInformationV1::from_processing_source(processing_identity(1), &source)
+                .unwrap();
         assert_eq!(info.identity().source_contract_version(), 1);
     }
 }

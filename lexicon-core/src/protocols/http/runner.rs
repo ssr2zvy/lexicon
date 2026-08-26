@@ -4,7 +4,8 @@ use std::fmt;
 use crate::protocols::http::{HttpCapabilitySet, HttpSourceContractV1};
 use crate::runtime::{RuntimeIdentity, RuntimeInformationEncodingError, RuntimeInformationV1};
 
-pub const RUNTIME_INFORMATION_PROBE_ARGUMENT: &str = crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
+pub const RUNTIME_INFORMATION_PROBE_ARGUMENT: &str =
+    crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeInformationProbeOutcome {
@@ -25,8 +26,12 @@ impl fmt::Display for RuntimeInformationProbeError {
             Self::UnexpectedArguments => {
                 formatter.write_str("unexpected runtime information probe arguments")
             }
-            Self::Encoding(error) => write!(formatter, "runtime information encoding error: {error}"),
-            Self::Output(error) => write!(formatter, "runtime information probe output error: {error}"),
+            Self::Encoding(error) => {
+                write!(formatter, "runtime information encoding error: {error}")
+            }
+            Self::Output(error) => {
+                write!(formatter, "runtime information probe output error: {error}")
+            }
         }
     }
 }
@@ -67,8 +72,7 @@ pub fn try_write_runtime_information_probe<W: std::io::Write>(
     let mut document = json.into_bytes();
     document.push(b'\n');
 
-    std::io::Write::write_all(output, &document)
-        .map_err(RuntimeInformationProbeError::Output)?;
+    std::io::Write::write_all(output, &document).map_err(RuntimeInformationProbeError::Output)?;
     std::io::Write::flush(output).map_err(RuntimeInformationProbeError::Output)?;
 
     Ok(RuntimeInformationProbeOutcome::Written)
@@ -80,8 +84,8 @@ mod tests {
     use std::io::{self, Write};
 
     use super::{
-        RuntimeInformationProbeError, RuntimeInformationProbeOutcome,
-        RUNTIME_INFORMATION_PROBE_ARGUMENT, try_write_runtime_information_probe,
+        RUNTIME_INFORMATION_PROBE_ARGUMENT, RuntimeInformationProbeError,
+        RuntimeInformationProbeOutcome, try_write_runtime_information_probe,
     };
     use crate::http::{HttpCapability, HttpCapabilitySet};
     use crate::protocols::http::{AcquisitionResult, HttpSourceContractV1};
@@ -227,7 +231,10 @@ mod tests {
         let parsed = RuntimeInformationV1::from_json(text.trim_end_matches('\n')).unwrap();
 
         assert_eq!(parsed.identity(), identity);
-        assert_eq!(parsed.required_capabilities(), source.required_capabilities());
+        assert_eq!(
+            parsed.required_capabilities(),
+            source.required_capabilities()
+        );
         assert_eq!(parsed.available_capabilities(), available);
         assert_eq!(parsed.resume_handler_registered(), true);
     }
@@ -288,8 +295,8 @@ mod tests {
         )
         .unwrap();
 
-        let parsed = RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim())
-            .unwrap();
+        let parsed =
+            RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim()).unwrap();
         assert_eq!(parsed.identity(), identity);
     }
 
@@ -307,9 +314,12 @@ mod tests {
         )
         .unwrap();
 
-        let parsed = RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim())
-            .unwrap();
-        assert_eq!(parsed.descriptor_contract_version(), HttpSourceContractV1::CONTRACT_VERSION);
+        let parsed =
+            RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim()).unwrap();
+        assert_eq!(
+            parsed.descriptor_contract_version(),
+            HttpSourceContractV1::CONTRACT_VERSION
+        );
     }
 
     #[test]
@@ -327,9 +337,12 @@ mod tests {
         )
         .unwrap();
 
-        let parsed = RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim())
-            .unwrap();
-        assert_eq!(parsed.required_capabilities(), source.required_capabilities());
+        let parsed =
+            RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim()).unwrap();
+        assert_eq!(
+            parsed.required_capabilities(),
+            source.required_capabilities()
+        );
     }
 
     #[test]
@@ -348,9 +361,12 @@ mod tests {
         )
         .unwrap();
 
-        let parsed = RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim())
-            .unwrap();
-        assert_eq!(parsed.required_capabilities(), source.required_capabilities());
+        let parsed =
+            RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim()).unwrap();
+        assert_eq!(
+            parsed.required_capabilities(),
+            source.required_capabilities()
+        );
         assert_eq!(parsed.available_capabilities(), available);
     }
 
@@ -368,8 +384,8 @@ mod tests {
         )
         .unwrap();
 
-        let parsed = RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim())
-            .unwrap();
+        let parsed =
+            RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim()).unwrap();
         assert!(parsed.resume_handler_registered());
     }
 
@@ -391,8 +407,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome, RuntimeInformationProbeOutcome::Written);
-        let parsed = RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim())
-            .unwrap();
+        let parsed =
+            RuntimeInformationV1::from_json(std::str::from_utf8(&output).unwrap().trim()).unwrap();
         assert!(parsed.validate_capabilities().is_err());
     }
 
@@ -441,12 +457,18 @@ mod tests {
             identity,
             &HttpSourceContractV1::new(acquire_handler),
             HttpCapabilitySet::empty(),
-            &[OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT), OsString::from("extra")],
+            &[
+                OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT),
+                OsString::from("extra"),
+            ],
             &mut output,
         )
         .unwrap_err();
 
-        assert!(matches!(error, RuntimeInformationProbeError::UnexpectedArguments));
+        assert!(matches!(
+            error,
+            RuntimeInformationProbeError::UnexpectedArguments
+        ));
         assert!(output.is_empty());
     }
 
@@ -457,7 +479,10 @@ mod tests {
             RuntimeIdentity::http_acquisition("example-source", 1),
             &HttpSourceContractV1::new(acquire_handler),
             HttpCapabilitySet::empty(),
-            &[OsString::from("--another-mode"), OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT)],
+            &[
+                OsString::from("--another-mode"),
+                OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT),
+            ],
             &mut output,
         )
         .unwrap();
