@@ -384,7 +384,8 @@ mod tests {
 
     #[test]
     fn initial_hash_failure_prevents_probe_execution() {
-        let non_existent = std::env::temp_dir().join("lexicon-does-not-exist-verify-runtime");
+        let temp = tempfile::tempdir().unwrap();
+        let non_existent = temp.path().join("lexicon-does-not-exist-verify-runtime");
         let _ = fs::remove_file(&non_existent);
 
         let error = verify_http_runtime_candidate(
@@ -520,7 +521,8 @@ mod tests {
 
     #[test]
     fn processing_initial_hash_failure_prevents_probe_execution() {
-        let missing = std::env::temp_dir().join("lexicon-does-not-exist-processing-verify-runtime");
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("lexicon-does-not-exist-processing-verify-runtime");
         let _ = fs::remove_file(&missing);
 
         let error = verify_processing_runtime_candidate(&missing, RuntimeIdentity::http_processing("example-source", 1)).unwrap_err();

@@ -821,7 +821,8 @@ mod tests {
 
     #[test]
     fn missing_bundle_path_is_rejected() {
-        let missing = std::env::temp_dir().join("lexicon-missing-bundle-admission");
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("lexicon-missing-bundle-admission");
         let _ = fs::remove_dir_all(&missing);
         let identity = RuntimeIdentity::http_acquisition("example-source", 1);
 
