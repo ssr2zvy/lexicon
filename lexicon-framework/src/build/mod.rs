@@ -26,6 +26,7 @@ pub use runtime_staging::{
     RuntimeBundleStagingError, StagedHttpRuntimeBundle, stage_verified_http_runtime_bundle,
 };
 pub use runtime_verification::{
-    HashedRuntimeArtifact, HttpRuntimeVerificationError, RuntimeArtifactHashError,
-    VerifiedHttpRuntime, hash_runtime_executable, verify_http_runtime_candidate,
+    HashedRuntimeArtifact, HttpRuntimeVerificationError, ProcessingRuntimeVerificationError,
+    RuntimeArtifactHashError, VerifiedHttpRuntime, VerifiedProcessingRuntime,
+    hash_runtime_executable, verify_http_runtime_candidate, verify_processing_runtime_candidate,
 };
