@@ -16,7 +16,10 @@ pub enum RuntimeInvocationTransportEncodingError {
 impl fmt::Display for RuntimeInvocationTransportEncodingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Serialization(message) => write!(formatter, "runtime invocation transport serialization error: {message}"),
+            Self::Serialization(message) => write!(
+                formatter,
+                "runtime invocation transport serialization error: {message}"
+            ),
             Self::EnvelopeTooLarge { actual, maximum } => {
                 write!(
                     formatter,
@@ -53,16 +56,24 @@ impl fmt::Display for RuntimeInvocationTransportDecodingError {
                     argument.to_string_lossy()
                 )
             }
-            Self::ProbeMode => formatter.write_str("runtime information probe mode is not a runtime invocation"),
-            Self::MissingEnvelopeArgument => formatter.write_str("missing runtime invocation envelope argument"),
-            Self::InvalidEnvelopeUtf8 => formatter.write_str("runtime invocation envelope is not valid UTF-8"),
+            Self::ProbeMode => {
+                formatter.write_str("runtime information probe mode is not a runtime invocation")
+            }
+            Self::MissingEnvelopeArgument => {
+                formatter.write_str("missing runtime invocation envelope argument")
+            }
+            Self::InvalidEnvelopeUtf8 => {
+                formatter.write_str("runtime invocation envelope is not valid UTF-8")
+            }
             Self::EnvelopeTooLarge { actual, maximum } => {
                 write!(
                     formatter,
                     "runtime invocation envelope exceeds the maximum size of {maximum} bytes ({actual} bytes)"
                 )
             }
-            Self::MissingDelimiter => formatter.write_str("missing runtime source argument delimiter"),
+            Self::MissingDelimiter => {
+                formatter.write_str("missing runtime source argument delimiter")
+            }
             Self::UnexpectedValueBeforeDelimiter(value) => {
                 write!(
                     formatter,
@@ -71,7 +82,10 @@ impl fmt::Display for RuntimeInvocationTransportDecodingError {
                 )
             }
             Self::InvalidEnvelopeJson(message) => {
-                write!(formatter, "invalid runtime invocation envelope JSON: {message}")
+                write!(
+                    formatter,
+                    "invalid runtime invocation envelope JSON: {message}"
+                )
             }
         }
     }
@@ -118,9 +132,9 @@ pub fn encode_runtime_invocation(
     envelope: &RuntimeInvocationEnvelopeV1,
     source_arguments: &[OsString],
 ) -> Result<EncodedRuntimeInvocation, RuntimeInvocationTransportEncodingError> {
-    let envelope_json = envelope
-        .to_json()
-        .map_err(|error| RuntimeInvocationTransportEncodingError::Serialization(error.to_string()))?;
+    let envelope_json = envelope.to_json().map_err(|error| {
+        RuntimeInvocationTransportEncodingError::Serialization(error.to_string())
+    })?;
     let actual = envelope_json.len();
     if actual > MAX_RUNTIME_INVOCATION_ENVELOPE_JSON_BYTES {
         return Err(RuntimeInvocationTransportEncodingError::EnvelopeTooLarge {
@@ -141,16 +155,19 @@ pub fn encode_runtime_invocation(
 pub fn parse_runtime_invocation(
     arguments: &[OsString],
 ) -> Result<ParsedRuntimeInvocation, RuntimeInvocationTransportDecodingError> {
-    let first_argument = arguments.first().ok_or(RuntimeInvocationTransportDecodingError::EmptyArguments)?;
+    let first_argument = arguments
+        .first()
+        .ok_or(RuntimeInvocationTransportDecodingError::EmptyArguments)?;
 
-    if first_argument.as_os_str() == OsStr::new(crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT) {
+    if first_argument.as_os_str() == OsStr::new(crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT)
+    {
         return Err(RuntimeInvocationTransportDecodingError::ProbeMode);
     }
 
     if first_argument.as_os_str() != OsStr::new(RUNTIME_INVOCATION_ARGUMENT) {
-        return Err(RuntimeInvocationTransportDecodingError::InvalidFirstArgument(
-            first_argument.clone(),
-        ));
+        return Err(
+            RuntimeInvocationTransportDecodingError::InvalidFirstArgument(first_argument.clone()),
+        );
     }
 
     let envelope_argument = arguments
@@ -167,13 +184,16 @@ pub fn parse_runtime_invocation(
         });
     }
 
-    let delimiter_argument = arguments.get(2).ok_or(RuntimeInvocationTransportDecodingError::MissingDelimiter)?;
+    let delimiter_argument = arguments
+        .get(2)
+        .ok_or(RuntimeInvocationTransportDecodingError::MissingDelimiter)?;
     if delimiter_argument.as_os_str() != OsStr::new(RUNTIME_SOURCE_ARGUMENT_DELIMITER) {
         return Err(RuntimeInvocationTransportDecodingError::MissingDelimiter);
     }
 
-    let envelope = RuntimeInvocationEnvelopeV1::from_json(envelope_json)
-        .map_err(|error| RuntimeInvocationTransportDecodingError::InvalidEnvelopeJson(error.to_string()))?;
+    let envelope = RuntimeInvocationEnvelopeV1::from_json(envelope_json).map_err(|error| {
+        RuntimeInvocationTransportDecodingError::InvalidEnvelopeJson(error.to_string())
+    })?;
 
     let source_arguments = if arguments.len() > 3 {
         arguments[3..].to_vec()
@@ -196,8 +216,8 @@ mod tests {
         RUNTIME_SOURCE_ARGUMENT_DELIMITER,
     };
     use crate::runtime::{
-        ProjectInvocationIdentity, RuntimeExecutionMode, RuntimeIdentity, RuntimeInvocationEnvelopeV1,
-        RuntimeSupervisionMode, SessionInvocationIdentity,
+        ProjectInvocationIdentity, RuntimeExecutionMode, RuntimeIdentity,
+        RuntimeInvocationEnvelopeV1, RuntimeSupervisionMode, SessionInvocationIdentity,
     };
 
     fn example_envelope() -> RuntimeInvocationEnvelopeV1 {
@@ -252,16 +272,28 @@ mod tests {
 
     #[test]
     fn parse_runtime_invocation_rejects_probe_mode() {
-        let args = [OsString::from(crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT)];
+        let args = [OsString::from(
+            crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT,
+        )];
         let error = super::parse_runtime_invocation(&args).unwrap_err();
-        assert!(matches!(error, super::RuntimeInvocationTransportDecodingError::ProbeMode));
+        assert!(matches!(
+            error,
+            super::RuntimeInvocationTransportDecodingError::ProbeMode
+        ));
     }
 
     #[test]
     fn parse_runtime_invocation_rejects_invalid_first_argument() {
-        let args = [OsString::from("--missing"), OsString::from("{}"), OsString::from("--")];
+        let args = [
+            OsString::from("--missing"),
+            OsString::from("{}"),
+            OsString::from("--"),
+        ];
         let error = super::parse_runtime_invocation(&args).unwrap_err();
-        assert!(matches!(error, super::RuntimeInvocationTransportDecodingError::InvalidFirstArgument(_)));
+        assert!(matches!(
+            error,
+            super::RuntimeInvocationTransportDecodingError::InvalidFirstArgument(_)
+        ));
     }
 
     #[test]

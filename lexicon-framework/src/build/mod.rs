@@ -14,7 +14,10 @@ fn is_safe_executable_name(name: &str) -> bool {
     }
 
     let mut components = Path::new(name).components();
-    if matches!(components.next(), Some(Component::CurDir | Component::ParentDir)) {
+    if matches!(
+        components.next(),
+        Some(Component::CurDir | Component::ParentDir)
+    ) {
         return false;
     }
 
@@ -39,9 +42,9 @@ pub use processing_runtime_manifest::{
     ProcessingRuntimeManifestEncodingError, ProcessingRuntimeManifestV1,
 };
 pub use runtime_bundle_admission::{
-    MAX_RUNTIME_MANIFEST_BYTES, AdmittedHttpRuntimeBundle, AdmittedProcessingRuntimeBundle,
-    ProcessingRuntimeBundleAdmissionError, RuntimeBundleAdmissionError,
-    admit_http_runtime_bundle, admit_processing_runtime_bundle,
+    AdmittedHttpRuntimeBundle, AdmittedProcessingRuntimeBundle, MAX_RUNTIME_MANIFEST_BYTES,
+    ProcessingRuntimeBundleAdmissionError, RuntimeBundleAdmissionError, admit_http_runtime_bundle,
+    admit_processing_runtime_bundle,
 };
 pub use runtime_manifest::{
     ExecutableSha256, ExecutableSha256ParseError, RUNTIME_MANIFEST_SCHEMA_VERSION,
@@ -49,13 +52,12 @@ pub use runtime_manifest::{
     RuntimeManifestV1,
 };
 pub use runtime_probe::{
+    AdmittedProcessingRuntimeInformation, AdmittedRuntimeInformation,
     MAX_RUNTIME_INFORMATION_PROBE_BYTES, MAX_RUNTIME_INFORMATION_PROBE_STDERR_BYTES,
-    RUNTIME_INFORMATION_PROBE_TIMEOUT, AdmittedProcessingRuntimeInformation,
-    AdmittedRuntimeInformation, ProcessingRuntimeProbeAdmissionError,
-    ProcessingRuntimeProbeExecutionError, RuntimeProbeAdmissionError,
-    RuntimeProbeExecutionError, admit_http_runtime_information_probe,
-    admit_processing_runtime_information_probe, probe_http_runtime_information,
-    probe_processing_runtime_information,
+    ProcessingRuntimeProbeAdmissionError, ProcessingRuntimeProbeExecutionError,
+    RUNTIME_INFORMATION_PROBE_TIMEOUT, RuntimeProbeAdmissionError, RuntimeProbeExecutionError,
+    admit_http_runtime_information_probe, admit_processing_runtime_information_probe,
+    probe_http_runtime_information, probe_processing_runtime_information,
 };
 pub use runtime_staging::{
     ProcessingRuntimeBundleStagingError, RuntimeBundleStagingError, StagedHttpRuntimeBundle,

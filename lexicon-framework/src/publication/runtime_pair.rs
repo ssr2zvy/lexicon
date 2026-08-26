@@ -228,32 +228,39 @@ pub fn publish_runtime_pair(
     let acquisition_staged = acquisition;
     let processing_staged = processing;
 
-    admit_http_runtime_bundle(acquisition_staged.directory(), expected_acquisition_identity).map_err(|source| {
-        RuntimePairPublicationError::AcquisitionStagedAdmission {
+    admit_http_runtime_bundle(
+        acquisition_staged.directory(),
+        expected_acquisition_identity,
+    )
+    .map_err(
+        |source| RuntimePairPublicationError::AcquisitionStagedAdmission {
             source,
             destination: acquisition_destination.to_path_buf(),
             expected_identity: expected_acquisition_identity,
-        }
-    })?;
-    admit_processing_runtime_bundle(processing_staged.directory(), expected_processing_identity).map_err(|source| {
-        RuntimePairPublicationError::ProcessingStagedAdmission {
-            source,
-            destination: processing_destination.to_path_buf(),
-            expected_identity: expected_processing_identity,
-        }
-    })?;
+        },
+    )?;
+    admit_processing_runtime_bundle(processing_staged.directory(), expected_processing_identity)
+        .map_err(
+            |source| RuntimePairPublicationError::ProcessingStagedAdmission {
+                source,
+                destination: processing_destination.to_path_buf(),
+                expected_identity: expected_processing_identity,
+            },
+        )?;
 
     let mut acquisition_prepared = prepare_runtime_bundle_replacement_for_staged_directory(
         acquisition_staged
             .into_owned_staged_runtime_directory()
-            .map_err(|source| RuntimePairPublicationError::AcquisitionStagedAdmission {
-                source: RuntimeBundleAdmissionError::BundleMetadata {
-                    path: acquisition_destination.to_path_buf(),
-                    source: std::io::Error::new(std::io::ErrorKind::Other, source.to_string()),
+            .map_err(
+                |source| RuntimePairPublicationError::AcquisitionStagedAdmission {
+                    source: RuntimeBundleAdmissionError::BundleMetadata {
+                        path: acquisition_destination.to_path_buf(),
+                        source: std::io::Error::new(std::io::ErrorKind::Other, source.to_string()),
+                    },
+                    destination: acquisition_destination.to_path_buf(),
+                    expected_identity: expected_acquisition_identity,
                 },
-                destination: acquisition_destination.to_path_buf(),
-                expected_identity: expected_acquisition_identity,
-            })?,
+            )?,
         acquisition_destination,
     )
     .map_err(|source| RuntimePairPublicationError::PrepareAcquisition {
@@ -264,14 +271,16 @@ pub fn publish_runtime_pair(
     let mut processing_prepared = match prepare_runtime_bundle_replacement_for_staged_directory(
         processing_staged
             .into_owned_staged_runtime_directory()
-            .map_err(|source| RuntimePairPublicationError::ProcessingStagedAdmission {
-                source: ProcessingRuntimeBundleAdmissionError::BundleMetadata {
-                    path: processing_destination.to_path_buf(),
-                    source: std::io::Error::new(std::io::ErrorKind::Other, source.to_string()),
+            .map_err(
+                |source| RuntimePairPublicationError::ProcessingStagedAdmission {
+                    source: ProcessingRuntimeBundleAdmissionError::BundleMetadata {
+                        path: processing_destination.to_path_buf(),
+                        source: std::io::Error::new(std::io::ErrorKind::Other, source.to_string()),
+                    },
+                    destination: processing_destination.to_path_buf(),
+                    expected_identity: expected_processing_identity,
                 },
-                destination: processing_destination.to_path_buf(),
-                expected_identity: expected_processing_identity,
-            })?,
+            )?,
         processing_destination,
     ) {
         Ok(prepared) => prepared,
@@ -284,7 +293,9 @@ pub fn publish_runtime_pair(
         }
     };
 
-    if let Err(_) = admit_http_runtime_bundle(acquisition_destination, expected_acquisition_identity) {
+    if let Err(_) =
+        admit_http_runtime_bundle(acquisition_destination, expected_acquisition_identity)
+    {
         let processing_rollback = processing_prepared
             .rollback()
             .err()
@@ -301,7 +312,9 @@ pub fn publish_runtime_pair(
         });
     }
 
-    if let Err(_) = admit_processing_runtime_bundle(processing_destination, expected_processing_identity) {
+    if let Err(_) =
+        admit_processing_runtime_bundle(processing_destination, expected_processing_identity)
+    {
         let processing_rollback = processing_prepared
             .rollback()
             .err()

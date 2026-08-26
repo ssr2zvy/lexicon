@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use lexicon_core::runtime::{RuntimeInformationDecodingError, RuntimeInformationEncodingError, RuntimeInformationV1};
+use lexicon_core::runtime::{
+    RuntimeInformationDecodingError, RuntimeInformationEncodingError, RuntimeInformationV1,
+};
 
 use super::is_safe_executable_name;
 use super::runtime_verification::VerifiedHttpRuntime;
@@ -77,7 +79,10 @@ impl fmt::Display for ExecutableSha256ParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidLength(length) => {
-                write!(formatter, "invalid SHA-256 length: expected 64 chars, found {length}")
+                write!(
+                    formatter,
+                    "invalid SHA-256 length: expected 64 chars, found {length}"
+                )
             }
             Self::InvalidCharacter { index, value } => {
                 write!(
@@ -99,7 +104,9 @@ pub enum RuntimeManifestConstructionError {
 impl fmt::Display for RuntimeManifestConstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidExecutableName => formatter.write_str("invalid runtime manifest executable name"),
+            Self::InvalidExecutableName => {
+                formatter.write_str("invalid runtime manifest executable name")
+            }
         }
     }
 }
@@ -115,8 +122,13 @@ pub enum RuntimeManifestEncodingError {
 impl fmt::Display for RuntimeManifestEncodingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RuntimeInformation(error) => write!(formatter, "runtime information encoding failed: {error}"),
-            Self::Serialization(message) => write!(formatter, "runtime manifest serialization failed: {message}"),
+            Self::RuntimeInformation(error) => {
+                write!(formatter, "runtime information encoding failed: {error}")
+            }
+            Self::Serialization(message) => write!(
+                formatter,
+                "runtime manifest serialization failed: {message}"
+            ),
         }
     }
 }
@@ -145,11 +157,19 @@ impl fmt::Display for RuntimeManifestDecodingError {
         match self {
             Self::Json(message) => write!(formatter, "invalid runtime manifest JSON: {message}"),
             Self::UnknownSchemaVersion(version) => {
-                write!(formatter, "unknown runtime manifest schema version: {version}")
+                write!(
+                    formatter,
+                    "unknown runtime manifest schema version: {version}"
+                )
             }
-            Self::InvalidExecutableName => formatter.write_str("invalid runtime manifest executable name"),
+            Self::InvalidExecutableName => {
+                formatter.write_str("invalid runtime manifest executable name")
+            }
             Self::InvalidExecutableSize(size) => {
-                write!(formatter, "invalid runtime manifest executable size: {size}")
+                write!(
+                    formatter,
+                    "invalid runtime manifest executable size: {size}"
+                )
             }
             Self::InvalidSha256(value) => {
                 write!(formatter, "invalid runtime manifest SHA-256: {value}")
@@ -165,7 +185,11 @@ impl std::error::Error for RuntimeManifestDecodingError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::MalformedRuntimeInformation(error) => Some(error),
-            Self::Json(_) | Self::UnknownSchemaVersion(_) | Self::InvalidExecutableName | Self::InvalidExecutableSize(_) | Self::InvalidSha256(_) => None,
+            Self::Json(_)
+            | Self::UnknownSchemaVersion(_)
+            | Self::InvalidExecutableName
+            | Self::InvalidExecutableSize(_)
+            | Self::InvalidSha256(_) => None,
         }
     }
 }
@@ -219,12 +243,14 @@ impl RuntimeManifestV1 {
             .runtime_information
             .to_json()
             .map_err(RuntimeManifestEncodingError::RuntimeInformation)?;
-        let runtime_information_value = serde_json::from_str::<serde_json::Value>(&runtime_information_json)
-            .map_err(|error| {
-                RuntimeManifestEncodingError::Serialization(format!(
-                    "nested runtime information JSON is malformed: {error}"
-                ))
-            })?;
+        let runtime_information_value = serde_json::from_str::<serde_json::Value>(
+            &runtime_information_json,
+        )
+        .map_err(|error| {
+            RuntimeManifestEncodingError::Serialization(format!(
+                "nested runtime information JSON is malformed: {error}"
+            ))
+        })?;
 
         let document = RuntimeManifestDocumentV1 {
             schema_version: RUNTIME_MANIFEST_SCHEMA_VERSION,
@@ -243,9 +269,8 @@ impl RuntimeManifestV1 {
     pub fn from_json(input: &str) -> Result<Self, RuntimeManifestDecodingError> {
         reject_duplicate_json_keys(input)?;
 
-        let document = serde_json::from_str::<RuntimeManifestDocumentV1>(input).map_err(|error| {
-            RuntimeManifestDecodingError::Json(error.to_string())
-        })?;
+        let document = serde_json::from_str::<RuntimeManifestDocumentV1>(input)
+            .map_err(|error| RuntimeManifestDecodingError::Json(error.to_string()))?;
 
         if document.schema_version != RUNTIME_MANIFEST_SCHEMA_VERSION {
             return Err(RuntimeManifestDecodingError::UnknownSchemaVersion(
@@ -263,8 +288,9 @@ impl RuntimeManifestV1 {
             ));
         }
 
-        let sha256 = ExecutableSha256::from_hex(&document.artifact.sha256)
-            .map_err(|_| RuntimeManifestDecodingError::InvalidSha256(document.artifact.sha256.clone()))?;
+        let sha256 = ExecutableSha256::from_hex(&document.artifact.sha256).map_err(|_| {
+            RuntimeManifestDecodingError::InvalidSha256(document.artifact.sha256.clone())
+        })?;
 
         let runtime_information_json = serde_json::to_string(&document.runtime_information)
             .map_err(|error| RuntimeManifestDecodingError::Json(error.to_string()))?;
@@ -572,8 +598,8 @@ mod tests {
     use lexicon_core::runtime::{RuntimeIdentity, RuntimeInformationV1};
 
     use super::{
-        ExecutableSha256, RuntimeManifestConstructionError, RuntimeManifestDecodingError,
-        RuntimeManifestV1, RUNTIME_MANIFEST_SCHEMA_VERSION, is_safe_executable_name,
+        ExecutableSha256, RUNTIME_MANIFEST_SCHEMA_VERSION, RuntimeManifestConstructionError,
+        RuntimeManifestDecodingError, RuntimeManifestV1, is_safe_executable_name,
     };
     use crate::build::runtime_verification::verify_http_runtime_candidate;
 
@@ -596,18 +622,30 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&candidate, permissions).unwrap();
 
-        verify_http_runtime_candidate(&candidate, RuntimeIdentity::http_acquisition("example-source", 1)).unwrap()
+        verify_http_runtime_candidate(
+            &candidate,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        )
+        .unwrap()
     }
 
     #[test]
     fn verified_runtime_constructs_manifest() {
         let verified = fixture_verified_runtime();
-        let manifest = RuntimeManifestV1::from_verified_http_runtime("example-source-get-raw-data", &verified).unwrap();
+        let manifest =
+            RuntimeManifestV1::from_verified_http_runtime("example-source-get-raw-data", &verified)
+                .unwrap();
 
         assert_eq!(manifest.executable_name(), "example-source-get-raw-data");
         assert_eq!(manifest.executable_size(), verified.artifact().size());
-        assert_eq!(manifest.executable_sha256().to_string(), verified.artifact().sha256());
-        assert_eq!(manifest.runtime_information().identity(), verified.information().identity());
+        assert_eq!(
+            manifest.executable_sha256().to_string(),
+            verified.artifact().sha256()
+        );
+        assert_eq!(
+            manifest.runtime_information().identity(),
+            verified.information().identity()
+        );
     }
 
     #[test]
@@ -616,7 +654,10 @@ mod tests {
         let manifest = RuntimeManifestV1::from_verified_http_runtime("rv", &verified).unwrap();
 
         assert_eq!(manifest.executable_size(), verified.artifact().size());
-        assert_eq!(manifest.executable_sha256().to_string(), verified.artifact().sha256());
+        assert_eq!(
+            manifest.executable_sha256().to_string(),
+            verified.artifact().sha256()
+        );
     }
 
     #[test]
@@ -624,7 +665,10 @@ mod tests {
         let verified = fixture_verified_runtime();
         let manifest = RuntimeManifestV1::from_verified_http_runtime("runtime", &verified).unwrap();
 
-        assert_eq!(manifest.runtime_information().to_json().unwrap(), verified.information().to_json().unwrap());
+        assert_eq!(
+            manifest.runtime_information().to_json().unwrap(),
+            verified.information().to_json().unwrap()
+        );
     }
 
     #[test]
@@ -634,7 +678,10 @@ mod tests {
         let other = ExecutableSha256::from_hex(&"0".repeat(64)).unwrap();
 
         assert_ne!(manifest.executable_sha256(), other);
-        assert_eq!(manifest.executable_sha256().to_string(), verified.artifact().sha256());
+        assert_eq!(
+            manifest.executable_sha256().to_string(),
+            verified.artifact().sha256()
+        );
     }
 
     #[test]
@@ -678,20 +725,30 @@ mod tests {
     #[test]
     fn manifest_json_has_no_temp_path_and_lowercase_digest() {
         let verified = fixture_verified_runtime();
-        let manifest = RuntimeManifestV1::from_verified_http_runtime("example-source-get-raw-data", &verified).unwrap();
+        let manifest =
+            RuntimeManifestV1::from_verified_http_runtime("example-source-get-raw-data", &verified)
+                .unwrap();
         let json = manifest.to_json().unwrap();
 
         assert!(!json.contains(verified.artifact().path().to_string_lossy().as_ref()));
         assert!(json.contains(&format!("\"sha256\":\"{}\"", manifest.executable_sha256())));
         assert_eq!(json.matches("\"sha256\":\"").count(), 1);
-        assert!(manifest.executable_sha256().to_string().chars().all(|ch| ch.is_ascii_hexdigit() && ch.is_ascii_lowercase() || ch.is_ascii_digit()));
+        assert!(
+            manifest
+                .executable_sha256()
+                .to_string()
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit() && ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        );
         assert_eq!(manifest.executable_sha256().to_string().len(), 64);
     }
 
     #[test]
     fn manifest_json_round_trip_preserves_equality() {
         let verified = fixture_verified_runtime();
-        let original = RuntimeManifestV1::from_verified_http_runtime("example-source-get-raw-data", &verified).unwrap();
+        let original =
+            RuntimeManifestV1::from_verified_http_runtime("example-source-get-raw-data", &verified)
+                .unwrap();
         let json = original.to_json().unwrap();
         let decoded = RuntimeManifestV1::from_json(&json).unwrap();
 
@@ -718,7 +775,9 @@ mod tests {
     #[test]
     fn missing_fields_are_rejected() {
         assert!(matches!(
-            RuntimeManifestV1::from_json(r#"{"schema_version":1,"artifact":{"executable":"x","size":1}}"#),
+            RuntimeManifestV1::from_json(
+                r#"{"schema_version":1,"artifact":{"executable":"x","size":1}}"#
+            ),
             Err(RuntimeManifestDecodingError::Json(_))
         ));
     }
@@ -772,8 +831,7 @@ mod tests {
 
         let short = format!(
             "{{\"schema_version\":1,\"artifact\":{{\"executable\":\"x\",\"size\":1,\"sha256\":\"{}\"}},\"runtime_information\":{}}}",
-            "abc",
-            valid_runtime
+            "abc", valid_runtime
         );
         assert!(matches!(
             RuntimeManifestV1::from_json(&short),
@@ -825,7 +883,10 @@ mod tests {
         let json = format!(
             "{{\"schema_version\":1,\"artifact\":{{\"executable\":\"x\",\"size\":1,\"sha256\":\"{}\"}},\"runtime_information\":{}}}",
             "0".repeat(64),
-            valid_runtime.replace("\"source\":\"example-source\"", "\"source\":\"different-source\"")
+            valid_runtime.replace(
+                "\"source\":\"example-source\"",
+                "\"source\":\"different-source\""
+            )
         );
         assert!(RuntimeManifestV1::from_json(&json).is_ok());
     }

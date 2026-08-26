@@ -1245,10 +1245,7 @@ mod tests {
     static TEST_CWD_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_test_dir(prefix: &str) -> tempfile::TempDir {
-        tempfile::Builder::new()
-            .prefix(prefix)
-            .tempdir()
-            .unwrap()
+        tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
     }
 
     fn with_test_cwd<T>(project_root: &std::path::Path, func: impl FnOnce() -> T) -> T {

@@ -8,7 +8,9 @@ use lexicon_core::runtime::RuntimeIdentity;
 use crate::build::runtime_staging::{
     OwnedStagedRuntimeDirectory, RuntimeBundleStagingTransferError,
 };
-use crate::build::{RuntimeBundleAdmissionError, StagedHttpRuntimeBundle, StagedProcessingRuntimeBundle};
+use crate::build::{
+    RuntimeBundleAdmissionError, StagedHttpRuntimeBundle, StagedProcessingRuntimeBundle,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplacementState {
@@ -19,15 +21,34 @@ pub(crate) enum ReplacementState {
 
 #[derive(Debug)]
 pub(crate) enum RuntimeBundleReplacementError {
-    DestinationParentMissing { path: PathBuf },
-    DestinationParentNotDirectory { path: PathBuf },
-    DestinationParentIsSymlink { path: PathBuf },
-    DestinationIsSymlink { path: PathBuf },
-    DestinationNotDirectory { path: PathBuf },
-    BackupPathExists { path: PathBuf },
-    StagingTransfer { source: RuntimeBundleStagingTransferError },
-    StagedBundleAdmission { source: RuntimeBundleAdmissionError },
-    CreateBackupPath { path: PathBuf, source: io::Error },
+    DestinationParentMissing {
+        path: PathBuf,
+    },
+    DestinationParentNotDirectory {
+        path: PathBuf,
+    },
+    DestinationParentIsSymlink {
+        path: PathBuf,
+    },
+    DestinationIsSymlink {
+        path: PathBuf,
+    },
+    DestinationNotDirectory {
+        path: PathBuf,
+    },
+    BackupPathExists {
+        path: PathBuf,
+    },
+    StagingTransfer {
+        source: RuntimeBundleStagingTransferError,
+    },
+    StagedBundleAdmission {
+        source: RuntimeBundleAdmissionError,
+    },
+    CreateBackupPath {
+        path: PathBuf,
+        source: io::Error,
+    },
     MoveDestinationToBackup {
         destination: PathBuf,
         backup: PathBuf,
@@ -53,43 +74,90 @@ pub(crate) enum RuntimeBundleReplacementError {
         path: PathBuf,
         source: io::Error,
     },
-    RemoveBackup { path: PathBuf, source: io::Error },
-    RemoveDestination { path: PathBuf, source: io::Error },
-    RestoreBackup { destination: PathBuf, backup: PathBuf, source: io::Error },
-    InvalidTransition { expected: &'static str, actual: &'static str },
+    RemoveBackup {
+        path: PathBuf,
+        source: io::Error,
+    },
+    RemoveDestination {
+        path: PathBuf,
+        source: io::Error,
+    },
+    RestoreBackup {
+        destination: PathBuf,
+        backup: PathBuf,
+        source: io::Error,
+    },
+    InvalidTransition {
+        expected: &'static str,
+        actual: &'static str,
+    },
 }
 
 impl fmt::Display for RuntimeBundleReplacementError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DestinationParentMissing { path } => {
-                write!(formatter, "destination parent '{}' does not exist", path.display())
+                write!(
+                    formatter,
+                    "destination parent '{}' does not exist",
+                    path.display()
+                )
             }
             Self::DestinationParentNotDirectory { path } => {
-                write!(formatter, "destination parent '{}' is not a directory", path.display())
+                write!(
+                    formatter,
+                    "destination parent '{}' is not a directory",
+                    path.display()
+                )
             }
             Self::DestinationParentIsSymlink { path } => {
-                write!(formatter, "destination parent '{}' must not be a symlink", path.display())
+                write!(
+                    formatter,
+                    "destination parent '{}' must not be a symlink",
+                    path.display()
+                )
             }
             Self::DestinationIsSymlink { path } => {
-                write!(formatter, "destination bundle '{}' must not be a symlink", path.display())
+                write!(
+                    formatter,
+                    "destination bundle '{}' must not be a symlink",
+                    path.display()
+                )
             }
             Self::DestinationNotDirectory { path } => {
-                write!(formatter, "destination bundle '{}' is not a directory", path.display())
+                write!(
+                    formatter,
+                    "destination bundle '{}' is not a directory",
+                    path.display()
+                )
             }
             Self::BackupPathExists { path } => {
                 write!(formatter, "backup path '{}' already exists", path.display())
             }
             Self::StagingTransfer { source } => {
-                write!(formatter, "failed to transfer staged bundle into publication ownership: {source}")
+                write!(
+                    formatter,
+                    "failed to transfer staged bundle into publication ownership: {source}"
+                )
             }
             Self::StagedBundleAdmission { source } => {
-                write!(formatter, "staged bundle admission failed before publication: {source}")
+                write!(
+                    formatter,
+                    "staged bundle admission failed before publication: {source}"
+                )
             }
             Self::CreateBackupPath { path, source } => {
-                write!(formatter, "failed to construct a backup path under '{}': {source}", path.display())
+                write!(
+                    formatter,
+                    "failed to construct a backup path under '{}': {source}",
+                    path.display()
+                )
             }
-            Self::MoveDestinationToBackup { destination, backup, source } => {
+            Self::MoveDestinationToBackup {
+                destination,
+                backup,
+                source,
+            } => {
                 write!(
                     formatter,
                     "failed to move existing destination '{}' to backup '{}': {source}",
@@ -97,7 +165,11 @@ impl fmt::Display for RuntimeBundleReplacementError {
                     backup.display()
                 )
             }
-            Self::MoveStagedBundleToDestination { staged, destination, source } => {
+            Self::MoveStagedBundleToDestination {
+                staged,
+                destination,
+                source,
+            } => {
                 write!(
                     formatter,
                     "failed to move staged bundle '{}' into destination '{}': {source}",
@@ -105,7 +177,11 @@ impl fmt::Display for RuntimeBundleReplacementError {
                     destination.display()
                 )
             }
-            Self::RestoreDestinationFromBackup { destination, backup, source } => {
+            Self::RestoreDestinationFromBackup {
+                destination,
+                backup,
+                source,
+            } => {
                 write!(
                     formatter,
                     "failed to restore backup '{}' back to destination '{}': {source}",
@@ -131,7 +207,11 @@ impl fmt::Display for RuntimeBundleReplacementError {
                         }
                     )?;
                     if let Some(restore_error) = restore {
-                        write!(formatter, " Backup path: {}. Restore error: {restore_error}", backup_path.display())?;
+                        write!(
+                            formatter,
+                            " Backup path: {}. Restore error: {restore_error}",
+                            backup_path.display()
+                        )?;
                     }
                     Ok(())
                 } else {
@@ -151,10 +231,18 @@ impl fmt::Display for RuntimeBundleReplacementError {
                 )
             }
             Self::RemoveBackup { path, source } => {
-                write!(formatter, "failed to remove backup '{}': {source}", path.display())
+                write!(
+                    formatter,
+                    "failed to remove backup '{}': {source}",
+                    path.display()
+                )
             }
             Self::RemoveDestination { path, source } => {
-                write!(formatter, "failed to remove destination '{}': {source}", path.display())
+                write!(
+                    formatter,
+                    "failed to remove destination '{}': {source}",
+                    path.display()
+                )
             }
             Self::RestoreBackup {
                 destination,
@@ -238,7 +326,10 @@ impl PreparedRuntimeBundleReplacement {
     pub(crate) fn cleanup_backup(&mut self) -> Result<(), RuntimeBundleReplacementError> {
         let backup = self.backup.clone();
         let parent = self.parent.clone();
-        if !matches!(self.state, ReplacementState::Prepared | ReplacementState::Committed) {
+        if !matches!(
+            self.state,
+            ReplacementState::Prepared | ReplacementState::Committed
+        ) {
             let actual = match self.state {
                 ReplacementState::Prepared => "Prepared",
                 ReplacementState::Committed => "Committed",
@@ -252,23 +343,29 @@ impl PreparedRuntimeBundleReplacement {
 
         if let Some(backup_path) = backup.as_ref() {
             if backup_path.exists() {
-                fs::remove_dir_all(backup_path).map_err(|source| RuntimeBundleReplacementError::RemoveBackup {
-                    path: backup_path.to_path_buf(),
-                    source,
+                fs::remove_dir_all(backup_path).map_err(|source| {
+                    RuntimeBundleReplacementError::RemoveBackup {
+                        path: backup_path.to_path_buf(),
+                        source,
+                    }
                 })?;
             }
         }
 
-        sync_parent_if_supported(&parent).map_err(|source| RuntimeBundleReplacementError::DestinationParentSync {
-            path: parent.clone(),
-            source,
+        sync_parent_if_supported(&parent).map_err(|source| {
+            RuntimeBundleReplacementError::DestinationParentSync {
+                path: parent.clone(),
+                source,
+            }
         })?;
 
         self.state = ReplacementState::Committed;
         Ok(())
     }
 
-    pub(crate) fn commit(mut self) -> Result<PublishedRuntimeBundle, RuntimeBundleReplacementError> {
+    pub(crate) fn commit(
+        mut self,
+    ) -> Result<PublishedRuntimeBundle, RuntimeBundleReplacementError> {
         self.mark_committed();
         Ok(PublishedRuntimeBundle {
             path: self.destination.clone(),
@@ -320,7 +417,10 @@ pub(crate) fn prepare_runtime_bundle_replacement(
     let staging_directory = staged
         .into_owned_staged_runtime_directory()
         .map_err(|source| RuntimeBundleReplacementError::StagingTransfer { source })?;
-    prepare_runtime_bundle_replacement_for_staged_directory(staging_directory, published_bundle_path)
+    prepare_runtime_bundle_replacement_for_staged_directory(
+        staging_directory,
+        published_bundle_path,
+    )
 }
 
 pub(crate) fn prepare_processing_runtime_bundle_replacement(
@@ -332,7 +432,10 @@ pub(crate) fn prepare_processing_runtime_bundle_replacement(
     let staging_directory = staged
         .into_owned_staged_runtime_directory()
         .map_err(|source| RuntimeBundleReplacementError::StagingTransfer { source })?;
-    prepare_runtime_bundle_replacement_for_staged_directory(staging_directory, published_bundle_path)
+    prepare_runtime_bundle_replacement_for_staged_directory(
+        staging_directory,
+        published_bundle_path,
+    )
 }
 
 pub(crate) fn prepare_runtime_bundle_replacement_for_staged_directory(
@@ -340,11 +443,11 @@ pub(crate) fn prepare_runtime_bundle_replacement_for_staged_directory(
     published_bundle_path: &Path,
 ) -> Result<PreparedRuntimeBundleReplacement, RuntimeBundleReplacementError> {
     let destination = published_bundle_path.to_path_buf();
-    let destination_parent = published_bundle_path
-        .parent()
-        .ok_or_else(|| RuntimeBundleReplacementError::DestinationParentMissing {
+    let destination_parent = published_bundle_path.parent().ok_or_else(|| {
+        RuntimeBundleReplacementError::DestinationParentMissing {
             path: destination.clone(),
-        })?;
+        }
+    })?;
 
     let destination_parent_metadata = fs::symlink_metadata(destination_parent).map_err(|_| {
         RuntimeBundleReplacementError::DestinationParentMissing {
@@ -357,19 +460,23 @@ pub(crate) fn prepare_runtime_bundle_replacement_for_staged_directory(
         });
     }
     if !destination_parent_metadata.is_dir() {
-        return Err(RuntimeBundleReplacementError::DestinationParentNotDirectory {
-            path: destination_parent.to_path_buf(),
-        });
+        return Err(
+            RuntimeBundleReplacementError::DestinationParentNotDirectory {
+                path: destination_parent.to_path_buf(),
+            },
+        );
     }
 
     let staging_directory = staged.path().to_path_buf();
 
     let mut backup = None;
     if destination.exists() {
-        let backup_path = backup_path_for_destination(destination_parent, &destination)
-            .map_err(|source| RuntimeBundleReplacementError::CreateBackupPath {
-                path: destination_parent.to_path_buf(),
-                source,
+        let backup_path =
+            backup_path_for_destination(destination_parent, &destination).map_err(|source| {
+                RuntimeBundleReplacementError::CreateBackupPath {
+                    path: destination_parent.to_path_buf(),
+                    source,
+                }
             })?;
         if backup_path.exists() {
             return Err(RuntimeBundleReplacementError::BackupPathExists {
@@ -395,10 +502,12 @@ pub(crate) fn prepare_runtime_bundle_replacement_for_staged_directory(
             });
         }
 
-        fs::rename(&destination, &backup_path).map_err(|source| RuntimeBundleReplacementError::MoveDestinationToBackup {
-            destination: destination.clone(),
-            backup: backup_path.clone(),
-            source,
+        fs::rename(&destination, &backup_path).map_err(|source| {
+            RuntimeBundleReplacementError::MoveDestinationToBackup {
+                destination: destination.clone(),
+                backup: backup_path.clone(),
+                source,
+            }
         })?;
         backup = Some(backup_path);
     }
@@ -467,7 +576,9 @@ fn backup_path_for_destination(parent: &Path, destination: &Path) -> Result<Path
         .as_nanos();
     let mut candidate = parent.join(format!(
         ".{}.lexicon-backup-{}-{}",
-        destination_name, std::process::id(), now_nanos,
+        destination_name,
+        std::process::id(),
+        now_nanos,
     ));
     let mut index = 1;
     while candidate.exists() {
@@ -492,7 +603,10 @@ fn sync_parent_if_supported(path: &Path) -> Result<(), io::Error> {
     match file.sync_all() {
         Ok(()) => Ok(()),
         Err(source)
-            if matches!(source.kind(), io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput) =>
+            if matches!(
+                source.kind(),
+                io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput
+            ) =>
         {
             Ok(())
         }
@@ -507,15 +621,19 @@ fn rollback_published_bundle(
 ) -> Result<(), RuntimeBundleReplacementError> {
     let _ = fs::remove_dir_all(destination);
     if let Some(backup_path) = backup {
-        fs::rename(backup_path, destination).map_err(|source| RuntimeBundleReplacementError::RestoreBackup {
-            destination: destination.to_path_buf(),
-            backup: backup_path.to_path_buf(),
-            source,
+        fs::rename(backup_path, destination).map_err(|source| {
+            RuntimeBundleReplacementError::RestoreBackup {
+                destination: destination.to_path_buf(),
+                backup: backup_path.to_path_buf(),
+                source,
+            }
         })?;
     }
-    sync_parent_if_supported(parent).map_err(|source| RuntimeBundleReplacementError::DestinationParentSync {
-        path: parent.to_path_buf(),
-        source,
+    sync_parent_if_supported(parent).map_err(|source| {
+        RuntimeBundleReplacementError::DestinationParentSync {
+            path: parent.to_path_buf(),
+            source,
+        }
     })?;
     Ok(())
 }
