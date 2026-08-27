@@ -548,10 +548,8 @@ pub fn run_processing_runtime_invocation(
     let (_, source_arguments, handler) = admitted.into_parts();
 
     match handler {
-        AdmittedProcessingHandler::Process(f) => {
-            f(context, &source_arguments)
-                .map_err(ProcessingRuntimeInvocationExecutionError::Handler)
-        }
+        AdmittedProcessingHandler::Process(f) => f(context, &source_arguments)
+            .map_err(ProcessingRuntimeInvocationExecutionError::Handler),
     }
 }
 
@@ -1253,8 +1251,14 @@ mod execution_tests {
         )
         .unwrap_err();
         let msg = format!("{err}");
-        assert!(!msg.contains("secret-arg"), "message exposed source args: {msg}");
-        assert!(!msg.contains("another-secret"), "message exposed source args: {msg}");
+        assert!(
+            !msg.contains("secret-arg"),
+            "message exposed source args: {msg}"
+        );
+        assert!(
+            !msg.contains("another-secret"),
+            "message exposed source args: {msg}"
+        );
     }
 
     // Test 29: error formatting does not expose envelope JSON

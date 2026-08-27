@@ -18,6 +18,6 @@ pub use invocation::{
 };
 pub use runner::{
     HttpRuntimeInvocationExecutionError, RUNTIME_INFORMATION_PROBE_ARGUMENT,
-    RuntimeInformationProbeError, RuntimeInformationProbeOutcome,
-    run_http_runtime_invocation, try_write_runtime_information_probe,
+    RuntimeInformationProbeError, RuntimeInformationProbeOutcome, run_http_runtime_invocation,
+    try_write_runtime_information_probe,
 };

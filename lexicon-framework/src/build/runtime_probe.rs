@@ -13,8 +13,8 @@ use lexicon_core::processing::{
 };
 use lexicon_core::protocols::http::runner::RUNTIME_INFORMATION_PROBE_ARGUMENT;
 use lexicon_core::runtime::{
-    OwnedRuntimeIdentity, RuntimeCompatibilityError, RuntimeIdentity, RuntimeInformationDecodingError,
-    RuntimeInformationV1,
+    OwnedRuntimeIdentity, RuntimeCompatibilityError, RuntimeIdentity,
+    RuntimeInformationDecodingError, RuntimeInformationV1,
 };
 
 pub const MAX_RUNTIME_INFORMATION_PROBE_BYTES: usize = 64 * 1024;
@@ -100,10 +100,9 @@ impl fmt::Display for RuntimeProbeAdmissionError {
                 formatter,
                 "runtime information probe compatibility validation failed: {error}"
             ),
-            Self::IncompatibleOwned(description) => write!(
-                formatter,
-                "runtime identity incompatible: {description}"
-            ),
+            Self::IncompatibleOwned(description) => {
+                write!(formatter, "runtime identity incompatible: {description}")
+            }
         }
     }
 }
@@ -233,7 +232,9 @@ pub enum RuntimeProbeExecutionError {
         stderr: Vec<u8>,
         stderr_truncated: bool,
     },
-    UnexpectedStderr { stderr: Vec<u8> },
+    UnexpectedStderr {
+        stderr: Vec<u8>,
+    },
     Admission(RuntimeProbeAdmissionError),
 }
 
@@ -266,7 +267,9 @@ pub enum ProcessingRuntimeProbeExecutionError {
         stderr: Vec<u8>,
         stderr_truncated: bool,
     },
-    UnexpectedStderr { stderr: Vec<u8> },
+    UnexpectedStderr {
+        stderr: Vec<u8>,
+    },
     Admission(ProcessingRuntimeProbeAdmissionError),
 }
 

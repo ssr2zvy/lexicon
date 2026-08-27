@@ -4,7 +4,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::protocols::http::{HttpCapability, HttpCapabilitySet, HttpSourceContractV1};
-use crate::runtime::{OwnedRuntimeIdentity, RuntimeIdentifierError, RuntimeIdentity, RuntimeOperation, RuntimeProtocol};
+use crate::runtime::{
+    OwnedRuntimeIdentity, RuntimeIdentifierError, RuntimeIdentity, RuntimeOperation,
+    RuntimeProtocol,
+};
 
 pub const RUNTIME_INFORMATION_SCHEMA_VERSION: u32 = 1;
 
@@ -256,7 +259,10 @@ impl RuntimeInformationV1 {
         }
     }
 
-    pub fn validate_compatibility_owned(&self, expected: &OwnedRuntimeIdentity) -> Result<(), String> {
+    pub fn validate_compatibility_owned(
+        &self,
+        expected: &OwnedRuntimeIdentity,
+    ) -> Result<(), String> {
         let actual = self.identity();
         if actual.source_name() != expected.source_name()
             || actual.protocol() != expected.protocol()

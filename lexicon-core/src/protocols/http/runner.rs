@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 
+use crate::HttpAcquisitionContext;
 use crate::protocols::http::error::AcquisitionError;
 use crate::protocols::http::invocation::{
     AdmittedHttpHandler, HttpRuntimeInvocationAdmissionError, admit_http_runtime_invocation,
@@ -10,7 +11,6 @@ use crate::runtime::{
     RuntimeIdentity, RuntimeInformationEncodingError, RuntimeInformationV1,
     RuntimeInvocationTransportDecodingError, parse_runtime_invocation,
 };
-use crate::HttpAcquisitionContext;
 
 pub const RUNTIME_INFORMATION_PROBE_ARGUMENT: &str =
     crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
@@ -602,13 +602,9 @@ pub fn run_http_runtime_invocation(
     let parsed = parse_runtime_invocation(arguments)
         .map_err(HttpRuntimeInvocationExecutionError::Transport)?;
 
-    let admitted = admit_http_runtime_invocation(
-        parsed,
-        compiled_identity,
-        source,
-        available_capabilities,
-    )
-    .map_err(HttpRuntimeInvocationExecutionError::Admission)?;
+    let admitted =
+        admit_http_runtime_invocation(parsed, compiled_identity, source, available_capabilities)
+            .map_err(HttpRuntimeInvocationExecutionError::Admission)?;
 
     let (_, source_arguments, handler, _) = admitted.into_parts();
 
@@ -628,6 +624,7 @@ mod execution_tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
 
+    use crate::HttpAcquisitionContext;
     use crate::protocols::http::{
         AcquisitionError, AcquisitionResult, HttpCapability, HttpCapabilitySet,
         HttpSourceContractV1,
@@ -636,7 +633,6 @@ mod execution_tests {
         ProjectInvocationIdentity, RuntimeExecutionMode, RuntimeIdentity,
         RuntimeInvocationEnvelopeV1, RuntimeSupervisionMode, SessionInvocationIdentity,
     };
-    use crate::HttpAcquisitionContext;
 
     use super::{HttpRuntimeInvocationExecutionError, run_http_runtime_invocation};
 
@@ -685,10 +681,7 @@ mod execution_tests {
         thread_local! {
             static ACQUIRE_CALLED: RefCell<bool> = RefCell::new(false);
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             ACQUIRE_CALLED.with(|c| *c.borrow_mut() = true);
             Ok(())
         }
@@ -711,10 +704,7 @@ mod execution_tests {
         thread_local! {
             static COUNT: RefCell<u32> = RefCell::new(0);
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             COUNT.with(|c| *c.borrow_mut() += 1);
             Ok(())
         }
@@ -734,10 +724,7 @@ mod execution_tests {
     // Test 3: acquire/run does not call resume
     #[test]
     fn acquire_run_does_not_call_resume() {
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
         fn resume_must_not_be_called(
@@ -764,16 +751,10 @@ mod execution_tests {
         thread_local! {
             static RESUME_CALLED: RefCell<bool> = RefCell::new(false);
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
-        fn resume(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn resume(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             RESUME_CALLED.with(|c| *c.borrow_mut() = true);
             Ok(())
         }
@@ -796,16 +777,10 @@ mod execution_tests {
         thread_local! {
             static COUNT: RefCell<u32> = RefCell::new(0);
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
-        fn resume(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn resume(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             COUNT.with(|c| *c.borrow_mut() += 1);
             Ok(())
         }
@@ -831,10 +806,7 @@ mod execution_tests {
         ) -> AcquisitionResult<()> {
             panic!("acquire must not be called for acquire/resume");
         }
-        fn resume(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn resume(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
 
@@ -885,10 +857,7 @@ mod execution_tests {
         thread_local! {
             static CAPTURED: RefCell<Option<PathBuf>> = RefCell::new(None);
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
         fn resume(ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
@@ -942,10 +911,7 @@ mod execution_tests {
         thread_local! {
             static FG_CALLED: RefCell<bool> = RefCell::new(false);
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             FG_CALLED.with(|c| *c.borrow_mut() = true);
             Ok(())
         }
@@ -976,10 +942,7 @@ mod execution_tests {
         thread_local! {
             static BG_CALLED: RefCell<bool> = RefCell::new(false);
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             BG_CALLED.with(|c| *c.borrow_mut() = true);
             Ok(())
         }
@@ -1010,10 +973,7 @@ mod execution_tests {
         thread_local! {
             static CALLED: RefCell<bool> = RefCell::new(false);
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             CALLED.with(|c| *c.borrow_mut() = true);
             Ok(())
         }
@@ -1044,10 +1004,7 @@ mod execution_tests {
         thread_local! {
             static CALLED: RefCell<bool> = RefCell::new(false);
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             CALLED.with(|c| *c.borrow_mut() = true);
             Ok(())
         }
@@ -1078,10 +1035,7 @@ mod execution_tests {
         thread_local! {
             static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
             ARGS.with(|a| *a.borrow_mut() = args.to_vec());
             Ok(())
         }
@@ -1109,16 +1063,10 @@ mod execution_tests {
         thread_local! {
             static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
-        fn resume(
-            _ctx: &mut HttpAcquisitionContext,
-            args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn resume(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
             ARGS.with(|a| *a.borrow_mut() = args.to_vec());
             Ok(())
         }
@@ -1146,10 +1094,7 @@ mod execution_tests {
         thread_local! {
             static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
             ARGS.with(|a| *a.borrow_mut() = args.to_vec());
             Ok(())
         }
@@ -1177,10 +1122,7 @@ mod execution_tests {
         thread_local! {
             static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
             ARGS.with(|a| *a.borrow_mut() = args.to_vec());
             Ok(())
         }
@@ -1208,10 +1150,7 @@ mod execution_tests {
         thread_local! {
             static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
             ARGS.with(|a| *a.borrow_mut() = args.to_vec());
             Ok(())
         }
@@ -1235,10 +1174,7 @@ mod execution_tests {
         thread_local! {
             static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
             ARGS.with(|a| *a.borrow_mut() = args.to_vec());
             Ok(())
         }
@@ -1262,10 +1198,7 @@ mod execution_tests {
         thread_local! {
             static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
             ARGS.with(|a| *a.borrow_mut() = args.to_vec());
             Ok(())
         }
@@ -1290,10 +1223,7 @@ mod execution_tests {
         thread_local! {
             static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
             ARGS.with(|a| *a.borrow_mut() = args.to_vec());
             Ok(())
         }
@@ -1324,10 +1254,7 @@ mod execution_tests {
         thread_local! {
             static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
             ARGS.with(|a| *a.borrow_mut() = args.to_vec());
             Ok(())
         }
@@ -1357,16 +1284,10 @@ mod execution_tests {
         thread_local! {
             static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
-        fn resume(
-            _ctx: &mut HttpAcquisitionContext,
-            args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn resume(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
             ARGS.with(|a| *a.borrow_mut() = args.to_vec());
             Ok(())
         }
@@ -1390,10 +1311,7 @@ mod execution_tests {
     // Test 24: acquire success returns Ok(())
     #[test]
     fn acquire_success_returns_ok() {
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
         let args = encode(&run_envelope(), &[]);
@@ -1410,16 +1328,10 @@ mod execution_tests {
     // Test 25: resume success returns Ok(())
     #[test]
     fn resume_success_returns_ok() {
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
-        fn resume(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn resume(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
         let args = encode(&resume_envelope(), &[]);
@@ -1436,10 +1348,7 @@ mod execution_tests {
     // Test 26: acquire failure returns Handler variant
     #[test]
     fn acquire_failure_returns_handler_error() {
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Err(AcquisitionError::source_message("acquire failed"))
         }
         let args = encode(&run_envelope(), &[]);
@@ -1451,22 +1360,19 @@ mod execution_tests {
             &mut make_context(),
         )
         .unwrap_err();
-        assert!(matches!(err, HttpRuntimeInvocationExecutionError::Handler(_)));
+        assert!(matches!(
+            err,
+            HttpRuntimeInvocationExecutionError::Handler(_)
+        ));
     }
 
     // Test 27: resume failure returns Handler variant
     #[test]
     fn resume_failure_returns_handler_error() {
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
-        fn resume(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn resume(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Err(AcquisitionError::source_message("resume failed"))
         }
         let args = encode(&resume_envelope(), &[]);
@@ -1478,7 +1384,10 @@ mod execution_tests {
             &mut make_context(),
         )
         .unwrap_err();
-        assert!(matches!(err, HttpRuntimeInvocationExecutionError::Handler(_)));
+        assert!(matches!(
+            err,
+            HttpRuntimeInvocationExecutionError::Handler(_)
+        ));
     }
 
     // Test 28: handler failures do not cause reinvocation
@@ -1487,10 +1396,7 @@ mod execution_tests {
         thread_local! {
             static COUNT: RefCell<u32> = RefCell::new(0);
         }
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             COUNT.with(|c| *c.borrow_mut() += 1);
             Err(AcquisitionError::source_message("failed"))
         }
@@ -1545,10 +1451,7 @@ mod execution_tests {
     // Test 31: identity mismatch returns Admission error
     #[test]
     fn identity_mismatch_returns_admission_error() {
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
         let args = encode(&run_envelope(), &[]);
@@ -1569,10 +1472,7 @@ mod execution_tests {
     // Test 32: missing capabilities return Admission error
     #[test]
     fn missing_capabilities_return_admission_error() {
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
         let args = encode(&run_envelope(), &[]);
@@ -1593,10 +1493,7 @@ mod execution_tests {
     // Test 33: missing resume returns Admission error
     #[test]
     fn missing_resume_handler_returns_admission_error() {
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
         let args = encode(&resume_envelope(), &[]);
@@ -1617,10 +1514,7 @@ mod execution_tests {
     // Test 34: wrong compiled operation returns Admission error
     #[test]
     fn wrong_compiled_operation_returns_admission_error() {
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
         let args = encode(&run_envelope(), &[]);
@@ -1708,10 +1602,7 @@ mod execution_tests {
     // Test 37: error formatting does not expose source arguments
     #[test]
     fn error_formatting_does_not_expose_source_arguments() {
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
         let source_args = vec![
@@ -1728,17 +1619,20 @@ mod execution_tests {
         )
         .unwrap_err();
         let msg = format!("{err}");
-        assert!(!msg.contains("secret-arg"), "message exposed source args: {msg}");
-        assert!(!msg.contains("another-secret"), "message exposed source args: {msg}");
+        assert!(
+            !msg.contains("secret-arg"),
+            "message exposed source args: {msg}"
+        );
+        assert!(
+            !msg.contains("another-secret"),
+            "message exposed source args: {msg}"
+        );
     }
 
     // Test 38: error formatting does not expose envelope JSON
     #[test]
     fn error_formatting_does_not_expose_envelope_json() {
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
         let args = encode(&run_envelope(), &[]);
@@ -1766,10 +1660,7 @@ mod execution_tests {
     fn execution_function_does_not_call_from_env() {
         // Construct context directly with non-existent paths; from_env() would fail.
         // The execution function must work without reading env or checking paths.
-        fn acquire(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
         }
         let mut ctx = HttpAcquisitionContext {
