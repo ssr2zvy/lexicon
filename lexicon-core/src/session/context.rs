@@ -210,6 +210,42 @@ pub fn encode_runtime_context(
 }
 
 // ---------------------------------------------------------------------------
+// SessionDataPaths
+// ---------------------------------------------------------------------------
+
+/// Typed path bundle for one session, derived from validated roots and identities.
+///
+/// Constructed only from a validated `RuntimeContextPaths`; no raw path arithmetic
+/// is exposed to callers. Fields are private; use the provided accessors.
+#[derive(Debug, Clone)]
+pub struct SessionDataPaths {
+    protocol_root: std::path::PathBuf,
+    raw_data_directory: std::path::PathBuf,
+    processed_data_directory: std::path::PathBuf,
+    operation_root: std::path::PathBuf,
+    session_directory: std::path::PathBuf,
+}
+
+impl SessionDataPaths {
+    /// Derive paths from an already-validated `RuntimeContextPaths`.
+    pub fn from_context_paths(paths: &RuntimeContextPaths) -> Self {
+        Self {
+            protocol_root: paths.protocol_root().to_path_buf(),
+            raw_data_directory: paths.raw_data_directory().to_path_buf(),
+            processed_data_directory: paths.processed_data_directory().to_path_buf(),
+            operation_root: paths.operation_root().to_path_buf(),
+            session_directory: paths.session_directory().to_path_buf(),
+        }
+    }
+
+    pub fn protocol_root(&self) -> &std::path::Path { &self.protocol_root }
+    pub fn raw_data_directory(&self) -> &std::path::Path { &self.raw_data_directory }
+    pub fn processed_data_directory(&self) -> &std::path::Path { &self.processed_data_directory }
+    pub fn operation_root(&self) -> &std::path::Path { &self.operation_root }
+    pub fn session_directory(&self) -> &std::path::Path { &self.session_directory }
+}
+
+// ---------------------------------------------------------------------------
 // Decoded runtime context
 // ---------------------------------------------------------------------------
 
