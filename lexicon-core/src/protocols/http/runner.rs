@@ -11,6 +11,11 @@ use crate::runtime::{
     RuntimeIdentity, RuntimeInformationEncodingError, RuntimeInformationV1,
     RuntimeInvocationTransportDecodingError, parse_runtime_invocation,
 };
+use crate::session::{
+    CoreRunnerSessionError, RuntimeContextPaths, SessionFailureKind, SessionOperationRoot,
+    SessionState, SessionStore, SessionTransition, decode_runtime_context_from_env,
+};
+use crate::session::store::RunningSession;
 
 pub const RUNTIME_INFORMATION_PROBE_ARGUMENT: &str =
     crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
@@ -567,7 +572,12 @@ mod tests {
 pub enum HttpRuntimeInvocationExecutionError {
     Transport(RuntimeInvocationTransportDecodingError),
     Admission(HttpRuntimeInvocationAdmissionError),
+    Session(CoreRunnerSessionError),
     Handler(AcquisitionError),
+    TerminalPersistence {
+        handler_error: Option<AcquisitionError>,
+        session_error: crate::session::SessionStoreError,
+    },
 }
 
 impl fmt::Display for HttpRuntimeInvocationExecutionError {
@@ -577,7 +587,14 @@ impl fmt::Display for HttpRuntimeInvocationExecutionError {
                 formatter.write_str("HTTP runtime invocation transport decoding error")
             }
             Self::Admission(_) => formatter.write_str("HTTP runtime invocation admission error"),
+            Self::Session(_) => formatter.write_str("HTTP runtime session initialization error"),
             Self::Handler(_) => formatter.write_str("acquisition handler error"),
+            Self::TerminalPersistence { handler_error: Some(_), .. } => {
+                formatter.write_str("acquisition handler error; terminal session state persistence also failed")
+            }
+            Self::TerminalPersistence { handler_error: None, .. } => {
+                formatter.write_str("terminal session state persistence failed after successful handler")
+            }
         }
     }
 }
@@ -587,17 +604,32 @@ impl std::error::Error for HttpRuntimeInvocationExecutionError {
         match self {
             Self::Transport(e) => Some(e),
             Self::Admission(e) => Some(e),
+            Self::Session(e) => Some(e),
             Self::Handler(e) => Some(e),
+            Self::TerminalPersistence { session_error, .. } => Some(session_error),
         }
     }
 }
 
+/// Run an HTTP runtime invocation with full session lifecycle.
+///
+/// Supported order:
+/// 1. Parse invocation argv.
+/// 2. Admit invocation.
+/// 3. Decode runtime context configuration from the environment.
+/// 4. Compare context identities with admitted envelope.
+/// 5. Open session store.
+/// 6. Acquire/confirm session lease.
+/// 7. Transition Prepared → Running.
+/// 8. Construct bound operation context.
+/// 9. Invoke the selected handler.
+/// 10. Persist Succeeded or ordinary Failed.
+/// 11. Return typed result.
 pub fn run_http_runtime_invocation(
     arguments: &[OsString],
     compiled_identity: RuntimeIdentity,
     source: &HttpSourceContractV1,
     available_capabilities: HttpCapabilitySet,
-    context: &mut HttpAcquisitionContext,
 ) -> Result<(), HttpRuntimeInvocationExecutionError> {
     let parsed = parse_runtime_invocation(arguments)
         .map_err(HttpRuntimeInvocationExecutionError::Transport)?;
@@ -606,14 +638,99 @@ pub fn run_http_runtime_invocation(
         admit_http_runtime_invocation(parsed, compiled_identity, source, available_capabilities)
             .map_err(HttpRuntimeInvocationExecutionError::Admission)?;
 
-    let (_, source_arguments, handler, _) = admitted.into_parts();
+    let (envelope, source_arguments, handler, _) = admitted.into_parts();
 
-    match handler {
-        AdmittedHttpHandler::Acquire(f) => {
-            f(context, &source_arguments).map_err(HttpRuntimeInvocationExecutionError::Handler)
+    // Decode runtime context and compare identities against admitted envelope.
+    let context_document = decode_runtime_context_from_env(
+        envelope.project(),
+        &envelope.runtime().into_owned_identity(),
+        envelope.session(),
+    )
+    .map_err(|e| {
+        HttpRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::ContextDecode(e))
+    })?;
+
+    let operation_root = SessionOperationRoot::new(
+        context_document.paths.operation_root().to_path_buf(),
+    )
+    .map_err(|e| {
+        HttpRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
+    })?;
+
+    let store = SessionStore::open(operation_root).map_err(|e| {
+        HttpRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
+    })?;
+
+    let session_id = envelope.session().clone();
+
+    // Load the prepared session record.
+    let prepared_record = store.load(&session_id).map_err(|e| {
+        HttpRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
+    })?;
+
+    if prepared_record.state() != SessionState::Prepared {
+        return Err(HttpRuntimeInvocationExecutionError::Session(
+            CoreRunnerSessionError::StoreOpen(crate::session::SessionStoreError::InvalidTransition(
+                crate::session::SessionTransitionError::InvalidTransition {
+                    from: prepared_record.state(),
+                    to: SessionState::Running,
+                },
+            )),
+        ));
+    }
+
+    // Acquire exclusive session lease.
+    let lease = store.acquire_lease(&session_id).map_err(|e| {
+        HttpRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::LeaseAcquisition(e))
+    })?;
+
+    // Transition Prepared → Running.
+    let revision = prepared_record.revision();
+    let running_record = store
+        .transition(&session_id, revision, SessionTransition::ToRunning)
+        .map_err(|e| {
+            HttpRuntimeInvocationExecutionError::Session(
+                CoreRunnerSessionError::TransitionToRunning(e),
+            )
+        })?;
+
+    let running = RunningSession::from_parts(running_record, lease);
+
+    // Construct bound acquisition context.
+    let mut context = HttpAcquisitionContext::from_context_paths(&context_document.paths, running);
+
+    // Invoke the selected handler.
+    let handler_result = match handler {
+        AdmittedHttpHandler::Acquire(f) => f(&mut context, &source_arguments),
+        AdmittedHttpHandler::Resume(f) => f(&mut context, &source_arguments),
+    };
+
+    // Retrieve the running session from the context.
+    let running = context.take_running_session().expect("running session must be present");
+
+    match handler_result {
+        Ok(()) => {
+            store.complete_succeeded(running).map_err(|e| {
+                HttpRuntimeInvocationExecutionError::TerminalPersistence {
+                    handler_error: None,
+                    session_error: e,
+                }
+            })?;
+            Ok(())
         }
-        AdmittedHttpHandler::Resume(f) => {
-            f(context, &source_arguments).map_err(HttpRuntimeInvocationExecutionError::Handler)
+        Err(acquisition_error) => {
+            let summary = acquisition_error.message().to_string();
+            if let Err(persist_error) = store.complete_failed(
+                running,
+                SessionFailureKind::Source,
+                Some(summary),
+            ) {
+                return Err(HttpRuntimeInvocationExecutionError::TerminalPersistence {
+                    handler_error: Some(acquisition_error),
+                    session_error: persist_error,
+                });
+            }
+            Err(HttpRuntimeInvocationExecutionError::Handler(acquisition_error))
         }
     }
 }
