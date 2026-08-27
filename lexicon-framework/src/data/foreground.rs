@@ -525,10 +525,10 @@ fn reconcile_termination_with_lease(
             )
         }
         ObservedChildTermination::Signaled { signal } => {
-            reconcile_signal(signal, running, prepared_record, operation_root, operation, source_name)
+            reconcile_signal(ObservedChildTermination::Signaled { signal }, running, prepared_record, operation_root, operation, source_name)
         }
         ObservedChildTermination::UnknownAbnormalTermination => {
-            reconcile_signal(None, running, prepared_record, operation_root, operation, source_name)
+            reconcile_signal(ObservedChildTermination::UnknownAbnormalTermination, running, prepared_record, operation_root, operation, source_name)
         }
     }
 }
@@ -728,7 +728,7 @@ fn reconcile_nonzero_exit(
 }
 
 fn reconcile_signal(
-    signal: Option<i32>,
+    termination: ObservedChildTermination,
     running: RunningForegroundExecution,
     prepared_record: &SessionRecordV1,
     operation_root: &std::path::Path,
@@ -736,21 +736,43 @@ fn reconcile_signal(
     source_name: &str,
 ) -> Result<ForegroundDataOutcome, ForegroundDataExecutionError> {
     let session_id = prepared_record.session().clone();
+    // Extract optional signal number for error construction.
+    let signal = match &termination {
+        ObservedChildTermination::Signaled { signal } => *signal,
+        _ => None,
+    };
 
     if let Ok(record) = load_terminal_session(operation_root, &session_id) {
         match record.state() {
             SessionState::Succeeded | SessionState::Failed => {
-                // Preserve the existing terminal record.
+                // Preserve the existing terminal record; validate/rebuild root summary.
+                let _ = validate_or_rebuild_summary_if_needed(operation_root, &session_id, &record);
             }
-            SessionState::Prepared | SessionState::Running | SessionState::Abandoned => {
+            SessionState::Abandoned => {
+                // Do not mutate an Abandoned record; return a typed state disagreement.
+                drop(running);
+                return Err(ForegroundDataExecutionError::ExitSessionDisagreement {
+                    termination,
+                    durable_state: SessionState::Abandoned,
+                });
+            }
+            SessionState::Prepared | SessionState::Running => {
                 let revision = record.revision();
-                let _ = persist_abnormal_termination(
+                if let Err(persist_err) = persist_abnormal_termination(
                     operation_root,
                     &session_id,
                     revision,
                     SessionFailureCode::AbnormalTermination,
                     signal.map(|s| format!("terminated by signal {s}")),
-                );
+                ) {
+                    drop(running);
+                    return Err(ForegroundDataExecutionError::AbnormalTerminationPersistence {
+                        termination,
+                        persistence_failure: persist_err,
+                    });
+                }
+                // Validate root summary after successful transition.
+                let _ = validate_or_rebuild_summary_if_needed(operation_root, &session_id, &record);
             }
         }
     }
