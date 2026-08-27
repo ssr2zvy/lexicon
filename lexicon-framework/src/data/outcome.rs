@@ -5,10 +5,17 @@ use crate::data::request::DataOperation;
 
 /// A successful foreground data execution outcome.
 ///
-/// Represents:
-/// - Child exited successfully (exit code 0).
-/// - The detailed session record transitioned to `Succeeded`.
-/// - The root session summary agrees.
+/// This value may be returned only when **all** of the following are true:
+///
+/// 1. The exact admitted executable was launched (no substitution after bundle admission).
+/// 2. The child process exited with code zero.
+/// 3. The detailed session record is in `Succeeded` state.
+/// 4. The detailed record's identity fields (project, runtime, session, operation,
+///    execution mode, supervision mode) match the prepared invocation.
+/// 5. The root `session_status.json` identifies the same current session.
+/// 6. The root summary state and revision agree with the detailed record.
+/// 7. No reconciliation error remains unresolved.
+/// 8. The supervisor retained its session lease throughout steps 1–7.
 #[derive(Debug)]
 pub struct ForegroundDataOutcome {
     pub project: String,
