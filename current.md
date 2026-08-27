@@ -1,511 +1,896 @@
-Current implementation milestone: managed runner integration closure
+Current implementation milestone: durable session storage and runtime-context foundation
 
 Objective
 
-Correct and complete the managed-runner workspace and source build integration currently pushed to main.
+Implement the durable session model shared by acquisition and processing operations.
 
-Do not begin sessions, data commands, HTTP transport, or processing behavior.
+The repository currently has:
 
-The previous milestone changed the generated layout, but the resulting pipeline is not yet proven operational and contains defects that prevent a generated runtime from completing the existing build/probe/verification path.
+* managed acquisition and processing runners;
+* runtime-information probing;
+* invocation-envelope JSON and native argv transport;
+* HTTP acquisition admission and execution;
+* processing admission and execution;
+* generated operation workspaces containing sessions/ and session_status.json;
+* parsed CLI flags for foreground/background operation and abandoning a previous failure.
 
-This milestone closes those defects and proves this real sequence:
+It does not yet have:
 
-lexicon init
-→ lexicon source create
-→ generated locked acquisition workspace
-→ generated locked processing workspace
-→ exact managed runner builds
-→ acquisition probe on stdout
-→ processing probe on stdout
-→ verification
-→ staging
-→ paired publication
+* a durable session record;
+* legal session-state transitions;
+* operation-level session status;
+* cross-process session ownership;
+* stale-owner reconciliation;
+* trusted filesystem paths bound to a runtime invocation;
+* functional acquisition or processing contexts backed by the selected session.
 
-This is a corrective milestone, not a new architectural feature.
+This milestone implements those foundations in Core and Framework.
 
-Repository-grounded defects to correct
+Do not implement CLI data-command execution, child process launching, HTTP transport, raw transaction recording, SQLite processing, or background supervision yet.
 
-The current main implementation has the following concrete problems.
+Repository-grounded execution boundary
 
-1. Probe output uses the wrong stream
+The contract assigns responsibilities as follows:
 
-Both generated managed runner templates currently create only:
+supervising Lexicon process
+├── select, create, or resume a session
+├── acquire session ownership
+├── apply abandon-past-failure policy
+├── launch the source runtime
+├── observe process termination
+└── reconcile abnormal termination
+linked Core inside the source runtime
+├── validate the invocation
+├── enter running state
+├── maintain durable session state
+├── record ordinary source failure
+└── record normal completion
 
-let mut stderr = io::stderr().lock();
+This milestone implements the reusable session and context APIs required by those two sides.
 
-and pass stderr to:
+It does not launch the runtime or wire lexicon data into them.
 
-try_write_runtime_information_probe(...)
+Existing behavior to preserve
 
-The framework probe machinery reads runtime-information JSON from the child’s stdout and treats stderr as diagnostic output.
+Preserve the existing:
 
-Therefore, generated runners must instead use:
+* RuntimeInvocationEnvelopeV1 JSON representation;
+* invocation argv layout;
+* ProjectIdentity;
+* SessionIdentity;
+* RuntimeExecutionMode;
+* RuntimeSupervisionMode;
+* HTTP and processing admission order;
+* source descriptor signatures;
+* HTTP and processing handler invocation;
+* runtime-information formats;
+* managed runner identity constants;
+* bundle verification, staging, admission, and publication;
+* source workspace layout;
+* CLI argument syntax.
 
-let stdout = io::stdout();
-let mut stdout = stdout.lock();
-let stderr = io::stderr();
-let mut stderr = stderr.lock();
+Do not add project paths, source paths, or session paths to the invocation envelope.
 
-Pass &mut stdout to the probe writer.
+Filesystem paths are local execution configuration, not portable invocation identity.
 
-Use stderr only for diagnostics.
+Core session module
 
-Successful probe behavior must be:
+Add:
 
-stdout: exactly one JSON document followed by one newline
-stderr: empty
-exit: success
+lexicon-core/src/session/
+├── mod.rs
+├── model.rs
+├── store.rs
+├── lease.rs
+├── transition.rs
+├── context.rs
+└── error.rs
 
-Do not change the established framework probe protocol to accommodate the incorrect generated runner.
+Equivalent internal organization is acceptable.
 
-2. Built executable lifetime is invalid
+Export the stable public API through:
 
-The current:
+lexicon_core::session
 
-fn build_managed_runner(...) -> Result<PathBuf, String>
+Do not place framework command policy inside Core.
 
-creates a local tempfile::TempDir, builds below it, returns only the executable path, and then drops the temporary directory when the function returns.
+Session schema version
 
-That makes the returned executable path invalid before verification.
+Define an independent session format version:
 
-Replace the return type with an owning value equivalent to:
+pub const SESSION_SCHEMA_VERSION: u32 = 1;
 
-pub struct BuiltManagedRunner {
-    executable: PathBuf,
-    target_directory: tempfile::TempDir,
+This version is separate from:
+
+* project schema version;
+* source-manifest schema version;
+* source contract versions;
+* invocation protocol version;
+* runner template version;
+* raw-transaction schema version.
+
+Operation identity
+
+A session must unambiguously belong to one operation.
+
+Define a typed operation scope equivalent to:
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SessionOperation {
+    Acquisition,
+    Processing,
 }
 
-Provide accessors such as:
+Provide a stable identifier representation:
 
-impl BuiltManagedRunner {
-    pub fn executable(&self) -> &Path;
+acquisition
+processing
+
+It may convert to and from RuntimeOperation, but session code must not accept an arbitrary protocol/operation combination where only HTTP acquisition or HTTP processing is supported.
+
+Session state model
+
+Define:
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionState {
+    Prepared,
+    Running,
+    Succeeded,
+    Failed,
+    Abandoned,
 }
 
-Keep the temporary directory alive through:
+State meanings:
 
-* probing;
-* verification;
-* staging.
+* Prepared: the parent created the durable session but the child has not entered normal execution.
+* Running: the admitted child owns the session and handler execution has begun.
+* Succeeded: the handler completed successfully.
+* Failed: ordinary source failure, runtime failure, or supervisor-reconciled abnormal termination.
+* Abandoned: a prior non-successful session was explicitly abandoned before a replacement run.
 
-It may be dropped only after the verified executable has been copied into a staged runtime bundle or after failure cleanup completes.
+Succeeded, Failed, and Abandoned are terminal.
 
-Do not leak or persist temporary build directories.
+Failure classification
 
-3. Artifact selection is not exact
+Define a bounded typed failure classification without storing arbitrary error output:
 
-The current build path eventually calls:
-
-select_executable_from_cargo_json(
-    &cargo_json,
-    operation_name,
-)
-
-The existing selector accepts artifacts when the target or package identifier merely contains strings such as get-raw-data.
-
-This does not satisfy exact managed-runner selection.
-
-Implement a dedicated exact selector for managed runners.
-
-Representative API:
-
-pub fn select_managed_runner_executable(
-    cargo_output: &str,
-    expected_package_id: &str,
-    expected_binary_name: &str,
-) -> Result<
-    PathBuf,
-    ManagedRunnerArtifactSelectionError,
->;
-
-Resolve the expected package ID from:
-
-cargo metadata
---manifest-path <workspace/Cargo.toml>
---locked
---no-deps
-
-Match Cargo build JSON using:
-
-* exact Cargo package ID;
-* target kind containing bin;
-* exact target name;
-* non-null executable path.
-
-Do not determine package identity using substring matching.
-
-Reject:
-
-* no exact artifact;
-* multiple exact artifacts;
-* a matching target from the wrong package;
-* a matching package with the wrong binary target;
-* a compiler artifact with no executable;
-* malformed relevant Cargo JSON.
-
-Unrelated compiler messages and artifacts may be ignored.
-
-Preserve the old selector only if another still-supported legacy API genuinely uses it. It must not be used by managed runner builds.
-
-4. Dynamic source identity currently leaks memory
-
-build_source currently does:
-
-Box::leak(source_name.to_string().into_boxed_str())
-
-twice to satisfy RuntimeIdentity’s static source-name representation.
-
-Remove these leaks.
-
-Do not replace them with another leaked allocation or a global cache.
-
-Use one of these bounded approaches:
-
-1. Add a framework-side expected-identity representation that borrows or owns the dynamic source name and update verification/staging/publication comparison boundaries accordingly; or
-2. Add a narrowly scoped owned runtime-identity representation in Core while preserving the existing const-compatible RuntimeIdentity used by compiled managed runners.
-
-Prefer the smallest design that preserves:
-
-const IDENTITY: RuntimeIdentity =
-    RuntimeIdentity::http_acquisition("example-source", 1);
-
-inside generated runners.
-
-Do not remove const compiled identities merely to accommodate framework-side dynamic values.
-
-All identity comparisons must still cover:
-
-* source;
-* protocol;
-* operation;
-* source contract version.
-
-The completion report must explain the chosen owned/borrowed expected-identity boundary.
-
-5. Typed build errors are missing
-
-The current managed pipeline returns Result<_, String> and converts verification, staging, and publication errors with format!.
-
-Introduce a typed internal managed-source-build error.
-
-Representative structure:
-
-#[derive(Debug)]
-pub enum ManagedSourceBuildError {
-    WorkspaceValidation(
-        ManagedWorkspaceValidationError,
-    ),
-    Metadata(
-        ManagedWorkspaceMetadataError,
-    ),
-    CargoBuild(
-        ManagedRunnerBuildError,
-    ),
-    AcquisitionVerification(
-        HttpRuntimeVerificationError,
-    ),
-    ProcessingVerification(
-        ProcessingRuntimeVerificationError,
-    ),
-    AcquisitionStaging(
-        RuntimeBundleStagingError,
-    ),
-    ProcessingStaging(
-        ProcessingRuntimeBundleStagingError,
-    ),
-    Publication(
-        RuntimePairPublicationError,
-    ),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionFailureKind {
+    Source,
+    Runtime,
+    AbnormalTermination,
+    StaleOwnership,
 }
 
-Equivalent organization is acceptable.
+The durable record may include a concise sanitized failure summary.
 
-Implement:
+It must not store:
 
-std::fmt::Display
-std::error::Error
+* source arguments;
+* invocation-envelope JSON;
+* environment variables;
+* request or response bodies;
+* authorization values;
+* cookies;
+* arbitrary panic payloads;
+* unbounded stderr.
 
-and preserve nested errors through source().
+Bound any persisted failure summary with an explicit constant.
 
-The existing public command boundary may still return Result<SourceBuildResult, String> if changing CLI error handling is outside scope, but it must convert the typed error only once at that outer boundary.
+Durable session record
 
-Do not stringify errors inside the managed build pipeline.
+Define a strict versioned representation equivalent to:
 
-6. Managed workspace validation is incomplete
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRecordV1 {
+    schema_version: u32,
+    project: ProjectIdentity,
+    runtime: OwnedRuntimeIdentity,
+    session: SessionIdentity,
+    operation: SessionOperation,
+    execution_mode: RuntimeExecutionMode,
+    supervision_mode: RuntimeSupervisionMode,
+    state: SessionState,
+    revision: u64,
+    created_at: SessionTimestamp,
+    updated_at: SessionTimestamp,
+    started_at: Option<SessionTimestamp>,
+    finished_at: Option<SessionTimestamp>,
+    failure: Option<SessionFailureV1>,
+}
 
-The current validation reads manifests and checks some names, but it does not fully prove the selected Cargo graph.
+Equivalent field organization is acceptable.
 
-Validate using parsed Cargo metadata and manifests.
+Required invariants:
 
-Require:
+* schema_version is exactly SESSION_SCHEMA_VERSION;
+* runtime operation agrees with operation;
+* project, source, protocol, operation, contract version, and session identity are immutable after construction;
+* revision starts at zero and increases on every committed transition;
+* started_at exists only after entering Running;
+* terminal states have finished_at;
+* non-failed states do not contain failure information;
+* Failed contains a typed failure classification;
+* Succeeded and Abandoned do not contain failure information;
+* timestamps never move backward within one record.
 
-* exact two workspace members;
-* exact implementation package;
-* exact runner package;
-* exact runner binary target;
-* implementation package exposes a library target;
-* implementation package exposes no binary target used by the supported build;
-* runner package exposes the expected binary target;
-* runner depends on the exact implementation package by the expected relative path;
-* both members resolve the same workspace lexicon_core dependency;
-* a real root Cargo.lock exists;
-* src/lib.rs exists for the implementation;
-* managed runner src/main.rs exists;
-* obsolete implementation src/main.rs is rejected as a legacy layout when no managed workspace exists;
-* unexpected extra workspace members are rejected.
+Use OwnedRuntimeIdentity for durable/framework-side identities. Do not use Box::leak.
 
-Do not treat textual substring checks of runner source as the primary Cargo-graph validation.
+Session timestamp
 
-The generated runner source remains managed, so validate its exact generated contents through a deterministic template/version mechanism.
+Define a serializable UTC timestamp representation with deterministic parsing and formatting.
 
-Managed runner template version
+Do not use locale-dependent output.
 
-Define a distinct managed runner template version.
+The timestamp abstraction must support injecting the current time through an internal clock boundary so callers are not forced to access wall-clock time throughout transition logic.
 
-Representative value:
+Do not introduce sleeps.
 
-const MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1;
+Operation-level status summary
 
-Include an unambiguous generated marker in each managed runner source, for example:
+The operation-root file remains:
 
-const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1;
+session_status.json
 
-Validation must reject:
+Define a strict versioned summary equivalent to:
 
-* a missing marker;
-* an unsupported version;
-* a runner whose managed template content differs from the canonical template for its source and operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionStatusV1 {
+    schema_version: u32,
+    project: ProjectIdentity,
+    runtime: OwnedRuntimeIdentity,
+    operation: SessionOperation,
+    current_session: Option<SessionIdentity>,
+    current_state: Option<SessionState>,
+    revision: u64,
+    updated_at: SessionTimestamp,
+}
 
-Do not use only loose contains(...) checks for source identity and SOURCE.
+The summary is an index of current operation state.
 
-The source implementation library remains user-owned.
+Detailed durable history belongs in:
 
-The runner remains Lexicon-owned.
+sessions/<session-id>/session.json
 
-Generated runner stream behavior
+The summary must never be treated as the only durable session record.
 
-Acquisition runner
+Filesystem layout
 
-The generated acquisition runner must follow:
+Support the existing operation directories:
 
-collect argv excluding argv[0]
-→ lock stdout and stderr separately
-→ try HTTP runtime-information probe using stdout
-→ Written: return ExitCode::SUCCESS
-→ NotRequested: construct temporary HTTP context
-→ run_http_runtime_invocation(...)
-→ success/failure ExitCode
+sources/<source>/http/get-raw-data/
+├── sessions/
+│   └── <session-id>/
+│       ├── session.json
+│       └── session.lock
+└── session_status.json
 
-Probe JSON goes to stdout.
+and:
 
-Errors go to stderr.
+sources/<source>/http/process-data/
+├── sessions/
+│   └── <session-id>/
+│       ├── session.json
+│       └── session.lock
+└── session_status.json
 
-Normal successful execution must not emit probe JSON.
+Define a validated SessionOperationRoot or equivalent type.
 
-Continue using:
+It must derive:
 
-HttpCapabilitySet::empty()
+* the sessions directory;
+* a particular session directory;
+* the session record path;
+* the lease path;
+* the root status path.
 
-until real HTTP capabilities exist.
+Do not accept a session identity as an unchecked path component.
 
-Do not infer available capabilities from source requirements.
+Use the already validated SessionIdentity.
 
-Processing runner
+Do not canonicalize paths by requiring every target file to exist before session creation.
 
-The generated processing runner follows the same stream separation:
+Serialization behavior
 
-collect argv excluding argv[0]
-→ lock stdout and stderr separately
-→ try processing runtime-information probe using stdout
-→ Written: return ExitCode::SUCCESS
-→ NotRequested: ProcessingContext::default()
-→ run_processing_runtime_invocation(...)
-→ success/failure ExitCode
+Provide typed encoding and decoding APIs for:
 
-Probe JSON goes to stdout.
+* SessionRecordV1;
+* SessionStatusV1.
 
-Errors go to stderr.
+Use strict decoding:
 
-Temporary HTTP context behavior
+* reject unknown schema versions;
+* reject unknown fields;
+* reject unknown identifiers;
+* reject invalid state-dependent field combinations;
+* reject runtime/operation disagreement;
+* reject identity disagreement;
+* reject invalid timestamps;
+* reject invalid revisions;
+* reject malformed structural documents.
 
-Preserve the current temporary normal-execution boundary:
+Do not return plain String errors internally.
 
-HttpAcquisitionContext::from_env()
+Implement Display and Error, preserving nested errors through source().
 
-Do not expand it in this corrective milestone.
+Error formatting must not expose source arguments, environment values, envelope JSON, or sensitive filesystem contents.
 
-Do not introduce project-path transport, sessions, or new environment variables.
+Legal transitions
 
-The generated acquisition runtime merely remains compilable and capable of reaching the completed normal-invocation execution path when the existing source-directory environment value is supplied.
+Centralize transition validation.
 
-Its replacement belongs to the session/context milestone.
+Allow:
 
-Lockfile behavior
+Prepared → Running
+Prepared → Failed
+Prepared → Abandoned
+Running  → Succeeded
+Running  → Failed
+Running  → Abandoned
+Failed   → Abandoned
 
-Preserve:
+Reject all other transitions, including:
 
-* real Cargo-generated lockfiles during source create;
-* cargo build --locked during source build;
-* no lockfile mutation during ordinary builds.
+* transition to Prepared;
+* Succeeded to any other state;
+* Abandoned to any other state;
+* Failed directly back to Running;
+* repeated terminal transitions;
+* revision rollback;
+* mutation of immutable identity fields.
 
-Add tests proving that source build leaves both Cargo.lock files byte-for-byte unchanged.
+Resume does not reopen the previous record.
 
-A missing or stale lockfile must produce a typed managed-build failure.
+A resume invocation creates a new session record whose execution mode is Resume. The source-specific resume handler decides how to continue from previously committed source checkpoints in a later milestone.
 
-Remove or quarantine the legacy build path
+This keeps individual session history immutable after terminal completion.
 
-The current file still contains the obsolete functions:
+Atomic persistence
 
-build_single_crate(...)
-ensure_lockfile_for_manifest(...)
-select_executable_from_cargo_json(...)
-stage_runtime_file(...)
-publish_runtime_transaction(...)
-format_impl_cargo_toml(...)
-format_get_raw_data_main(...)
-format_process_data_main(...)
-format_cargo_lockfile(...)
+All writes to session.json and session_status.json must use atomic replacement or an equivalent transactional mechanism.
 
-and tests for the old source-owned executable scaffold.
+Required behavior:
 
-Remove obsolete private functions and their obsolete tests when they have no remaining supported caller.
+1. Serialize the complete next document.
+2. Write it to a unique temporary file in the same directory.
+3. Flush the file contents.
+4. Atomically replace the destination.
+5. Flush the containing directory where supported.
+6. Remove the temporary file after a failed pre-publication write when possible.
 
-If a function remains necessary for an unrelated supported path, rename or isolate it so the managed build cannot accidentally call it.
+Do not:
 
-New scaffolds and source build must have only one supported build route.
+* truncate the live JSON file before the replacement is ready;
+* write through a shared fixed temporary filename;
+* silently ignore partial writes;
+* treat a corrupted existing record as an empty session;
+* hold source arguments in persisted state.
 
-Do not retain dead legacy production code solely because old unit tests reference it.
+Platform-specific directory-sync limitations may be represented through a narrow internal abstraction, but durability errors must remain typed.
 
-Legacy projects themselves are not automatically rewritten. They receive the established migration-required error.
+Revision guard
 
-Eliminate direct production eprintln! from build helpers
+Every update must use optimistic revision validation in addition to session ownership.
 
-The current managed Cargo build helper writes Cargo stderr directly with:
+A transition API must require the expected current revision.
 
-eprintln!(...)
+If the durable record has another revision, return a typed conflict error rather than overwriting it.
 
-Return captured diagnostic information through the typed error instead.
+Updating the detailed record and root summary must follow a deterministic sequence that cannot make an older revision replace a newer revision.
 
-The CLI boundary decides how to display it.
+If the first update succeeds and the second fails, return a typed partial-commit/reconciliation-required error. Do not pretend the combined operation succeeded.
 
-Bound retained Cargo stderr to a reasonable constant to prevent unbounded error capture.
+A later supervisor call must be able to reconstruct the root summary from the authoritative detailed record.
 
-The error’s Display must not dump arbitrary unbounded compiler output.
+Cross-process session lease
 
-Tests may inspect structured retained diagnostic bytes or text through accessors.
+Implement a cross-process exclusive lease represented by:
 
-End-to-end generated-project proof
+sessions/<session-id>/session.lock
 
-Add at least one test that exercises the real generated project rather than testing template strings alone.
+The lease must be owned by an RAII value equivalent to:
 
-The test must:
+pub struct SessionLease {
+    // private ownership state
+}
 
-1. Create a temporary Lexicon project.
-2. Run the framework’s real source-creation path for example-source.
-3. Confirm both real lockfiles exist.
-4. Replace the generated placeholder acquisition handler with a successful minimal handler if normal execution is tested.
-5. Replace the generated placeholder processing handler with a successful minimal handler if normal execution is tested.
-6. Run the real managed source-build path.
-7. Build both exact runner packages with --locked.
-8. Probe both produced runners.
-9. Verify both candidates.
-10. Stage both bundles.
-11. Publish the pair.
-12. Admit both published bundles.
-13. Confirm the published acquisition identity.
-14. Confirm the published processing identity.
-15. Confirm neither implementation crate was published as an executable.
+Required properties:
 
-The test may use a local dependency override or fixture specifically to avoid depending on a mutable remote Git state.
+* acquisition is exclusive across processes;
+* acquisition does not block indefinitely;
+* contention returns a typed AlreadyOwned result;
+* dropping the value releases the active operating-system lock;
+* ordinary errors do not call process::exit;
+* the lock file’s mere existence is not treated as proof of active ownership;
+* stale lock-file presence does not permanently block future execution.
 
-Production-generated manifests must retain the immutable repository revision pin.
+Use an established operating-system file-locking facility available to the workspace rather than inventing a PID-file-only lock.
 
-Do not fake the probe results in this end-to-end test.
+A PID may be recorded for diagnostics, but PID reuse must not be the ownership primitive.
 
-Focused regression tests
+Do not delete another live process’s lease.
 
-Add tests proving:
+Session store
 
-1. Acquisition probe JSON is written to stdout.
-2. Acquisition probe stderr is empty.
-3. Processing probe JSON is written to stdout.
-4. Processing probe stderr is empty.
-5. Probe exits successfully.
-6. Probe does not invoke acquisition.
-7. Probe does not invoke processing.
-8. Normal acquisition failure writes only a sanitized diagnostic to stderr.
-9. Normal processing failure writes only a sanitized diagnostic to stderr.
-10. BuiltManagedRunner keeps the executable alive after the build helper returns.
-11. The executable remains available through verification and staging.
-12. Dropping the owning built-runner value cleans the temporary target directory after staging or failure.
-13. Exact package and binary matching selects the acquisition runner.
-14. Exact package and binary matching selects the processing runner.
-15. A similarly named unrelated package is ignored.
-16. A similarly named unrelated binary is ignored.
-17. No exact artifact returns the typed missing-artifact error.
-18. Multiple exact artifacts return the typed ambiguous-artifact error.
-19. Missing executable fields are typed.
-20. Malformed relevant Cargo JSON is typed.
-21. Dynamic source build validation performs no Box::leak.
-22. Repeated builds do not accumulate leaked source-name allocations.
-23. Verification errors remain available as typed nested sources.
-24. Staging errors remain available as typed nested sources.
-25. Publication errors remain available as typed nested sources.
-26. Missing lockfile is typed.
-27. Stale lockfile is rejected by --locked.
-28. Source build does not modify either lockfile.
-29. Modified runner template is rejected.
-30. Unsupported runner template version is rejected.
-31. Extra workspace member is rejected.
-32. Implementation binary substitution is rejected.
-33. Legacy source-owned executable layout returns migration-required.
-34. Existing verification tests remain unchanged.
-35. Existing staging tests remain unchanged.
-36. Existing bundle-admission tests remain unchanged.
-37. Existing paired-publication tests remain unchanged.
+Provide a Core-owned store equivalent to:
 
-Validation
+pub struct SessionStore {
+    operation_root: SessionOperationRoot,
+}
 
-Run the framework suite twice:
+Representative public API:
 
-cargo test -p lexicon-framework --quiet
-cargo test -p lexicon-framework --quiet
+impl SessionStore {
+    pub fn open(
+        operation_root: SessionOperationRoot,
+    ) -> Result<Self, SessionStoreError>;
+    pub fn create_prepared(
+        &self,
+        record: NewSessionRecord,
+    ) -> Result<PreparedSession, SessionStoreError>;
+    pub fn load(
+        &self,
+        session: &SessionIdentity,
+    ) -> Result<SessionRecordV1, SessionStoreError>;
+    pub fn load_status(
+        &self,
+    ) -> Result<Option<SessionStatusV1>, SessionStoreError>;
+    pub fn acquire_lease(
+        &self,
+        session: &SessionIdentity,
+    ) -> Result<SessionLease, SessionLeaseError>;
+    pub fn transition(
+        &self,
+        session: &SessionIdentity,
+        expected_revision: u64,
+        transition: SessionTransition,
+    ) -> Result<SessionRecordV1, SessionStoreError>;
+    pub fn rebuild_status_from_record(
+        &self,
+        session: &SessionIdentity,
+    ) -> Result<SessionStatusV1, SessionStoreError>;
+}
 
-Run the Core suite once if the identity representation changes:
+Equivalent typed organization is acceptable.
 
-cargo test -p lexicon-core --quiet
+Do not expose a method that writes an arbitrary caller-constructed session document without invariant validation.
 
-Run the CLI package tests once because source create and source build are public CLI-backed commands:
+Type-state lifecycle values
 
-cargo test -p lexicon-cli --quiet
+Use private fields and type-state wrappers to prevent ordinary callers from constructing invalid lifecycle states.
+
+Provide representations equivalent to:
+
+pub struct PreparedSession {
+    record: SessionRecordV1,
+}
+pub struct RunningSession {
+    record: SessionRecordV1,
+    lease: SessionLease,
+}
+
+A successful transition into Running consumes the prepared/bound state and retains the lease.
+
+Completion consumes RunningSession.
+
+Ordinary source failure consumes RunningSession.
+
+Do not implement Clone for lease-owning or running-session values.
+
+Do not provide public unchecked constructors.
+
+Parent-side session coordinator
+
+Add a Framework-owned coordinator in a focused module, not in the existing monolithic command body.
+
+Representative location:
+
+lexicon-framework/src/session/
+├── mod.rs
+├── coordinator.rs
+├── selection.rs
+└── error.rs
+
+Export only the API needed by later command execution.
+
+The coordinator must operate on already validated project, source, protocol, operation, runtime, and filesystem identities.
+
+Representative operations:
+
+pub struct SessionCoordinator {
+    // validated operation paths and expected identities
+}
+impl SessionCoordinator {
+    pub fn prepare_run(
+        &self,
+        supervision: RuntimeSupervisionMode,
+    ) -> Result<PreparedSessionLaunch, SessionCoordinationError>;
+    pub fn prepare_resume(
+        &self,
+        supervision: RuntimeSupervisionMode,
+    ) -> Result<PreparedSessionLaunch, SessionCoordinationError>;
+    pub fn abandon_current_failure(
+        &self,
+    ) -> Result<SessionRecordV1, SessionCoordinationError>;
+    pub fn reconcile_stale_current_session(
+        &self,
+    ) -> Result<Option<SessionRecordV1>, SessionCoordinationError>;
+}
+
+These operations prepare durable state only.
+
+They must not launch a process.
+
+Run selection
+
+For a new run:
+
+* reject an actively owned Prepared or Running current session;
+* reject an unresolved Failed current session unless abandonment policy was applied;
+* allow a new run after Succeeded or Abandoned;
+* generate a new valid session identity;
+* create its session directory;
+* create session.json in Prepared;
+* update session_status.json;
+* acquire and retain the lease in the returned preparation value.
+
+Do not overwrite or reuse a previous session directory.
+
+Resume selection
+
+For resume:
+
+* require acquisition operation;
+* reject processing resume;
+* require a prior resumable failed or reconciled acquisition session;
+* reject a currently live owned session;
+* create a new session identity;
+* preserve the previous session record;
+* create a new Prepared record with execution mode Resume;
+* retain an explicit predecessor-session identity in a typed resume linkage if needed by the durable format.
+
+Do not infer resumption merely because a resume handler exists.
+
+The source handler remains responsible for interpreting source-specific checkpoints later.
+
+Abandon-past-failure behavior
+
+The coordinator must provide the policy operation needed by the existing CLI flag:
+
+--abandon-past-fail
+
+It may abandon only a non-live Prepared, Running, or Failed current session after ownership has been checked.
+
+It must not abandon:
+
+* a live leased session;
+* a succeeded session;
+* an already abandoned session;
+* a session belonging to another project, source, protocol, or operation.
+
+Abandonment is durable and updates both the detailed record and the operation summary.
+
+Do not wire the CLI flag to this API yet.
+
+Stale ownership reconciliation
+
+A durable Running state does not by itself prove a live runtime.
+
+Reconciliation must:
+
+1. load the current detailed record;
+2. attempt non-blocking lease acquisition;
+3. treat lease contention as live ownership;
+4. treat successful acquisition of a record still marked Prepared or Running as stale durable state;
+5. transition that record to Failed with StaleOwnership;
+6. update the root summary;
+7. release the temporary reconciliation lease.
+
+Do not use only a stored PID to decide liveness.
+
+Do not reconcile a live owner.
+
+Do not silently delete stale history.
+
+Trusted runtime-context paths
+
+Replace the unstructured context-construction boundary with typed path data.
+
+Define a value equivalent to:
+
+pub struct RuntimeContextPaths {
+    project_root: PathBuf,
+    protocol_root: PathBuf,
+    operation_root: PathBuf,
+    session_directory: PathBuf,
+    raw_data_directory: PathBuf,
+    processed_data_directory: PathBuf,
+}
+
+Its constructor must validate the relationship among these paths instead of accepting unrelated arbitrary locations.
+
+Required relationships for HTTP acquisition:
+
+protocol_root          = sources/<source>/http
+operation_root         = protocol_root/get-raw-data
+session_directory      = operation_root/sessions/<session-id>
+raw_data_directory     = protocol_root/data/raw
+processed_data_directory = protocol_root/data/processed
+
+Required relationships for processing:
+
+protocol_root          = sources/<source>/http
+operation_root         = protocol_root/process-data
+session_directory      = operation_root/sessions/<session-id>
+raw_data_directory     = protocol_root/data/raw
+processed_data_directory = protocol_root/data/processed
+
+Do not perform hostile-filesystem sandboxing.
+
+Do reject:
+
+* relative project roots;
+* path traversal;
+* session-directory identity disagreement;
+* operation-root disagreement;
+* protocol-root disagreement;
+* acquisition/processing root substitution.
+
+Runtime context configuration transport
+
+Define one canonical, versioned, private-to-Lexicon environment transport for filesystem context.
+
+Use a single UTF-8 JSON environment value rather than several independently mutable path variables.
+
+Representative constant:
+
+pub const RUNTIME_CONTEXT_ENVIRONMENT_VARIABLE: &str =
+    "LEXICON_RUNTIME_CONTEXT_V1";
+
+Define a strict document containing:
+
+* schema version;
+* project identity;
+* runtime identity;
+* session identity;
+* project root;
+* protocol root;
+* operation root;
+* session directory;
+* raw-data directory;
+* processed-data directory.
+
+The document must not contain source arguments or credentials.
+
+Provide typed encode/decode APIs.
+
+Child-side decoding must compare the configuration identities against the already admitted invocation before constructing a context.
+
+Do not trust path configuration solely because the JSON is structurally valid.
+
+Do not add filesystem paths to RuntimeInvocationEnvelopeV1.
+
+The old LEXICON_SOURCE_DIRECTORY boundary must not remain the supported managed-runner path after this milestone. Remove or clearly quarantine it as unsupported legacy behavior if an unrelated API still requires it.
+
+HTTP acquisition context
+
+Refactor HttpAcquisitionContext so its fields are private and it is constructed from:
+
+* an admitted HTTP invocation;
+* validated RuntimeContextPaths;
+* an owned running session handle.
+
+Provide read-only path accessors required by future HTTP recording work.
+
+Do not expose a public constructor accepting arbitrary independent paths.
+
+The context must retain the running session ownership for the entire handler call.
+
+On successful handler return:
+
+* transition the session to Succeeded.
+
+On ordinary AcquisitionError:
+
+* transition the session to Failed with Source failure classification;
+* preserve the original acquisition error as the primary typed nested cause where possible.
+
+If terminal session persistence fails, return a typed combined runtime/session error. Do not report success.
+
+Do not implement HTTP requests or raw transactions.
+
+Processing context
+
+Replace the empty ProcessingContext::default() production boundary.
+
+Construct ProcessingContext from:
+
+* an admitted processing invocation;
+* validated runtime-context paths;
+* an owned running session handle.
+
+Its fields must be private.
+
+Provide read-only accessors for:
+
+* project root;
+* protocol root;
+* operation root;
+* session directory;
+* raw-data directory;
+* processed-data directory;
+* session record or identity where needed.
+
+Do not add SQLite behavior.
+
+On successful handler return, persist Succeeded.
+
+On ordinary processing failure, persist Failed with Source classification.
+
+Remove Default if it would create an unbound production context. Do not retain an unchecked default merely to keep old generated runner code compiling.
+
+Core runner integration
+
+Update the existing Core HTTP and processing normal-invocation runners so the supported order becomes:
+
+parse invocation argv
+→ admit invocation
+→ decode runtime context configuration
+→ compare context identities with admitted envelope
+→ open session store
+→ acquire/confirm session lease
+→ transition Prepared to Running
+→ construct bound operation context
+→ invoke the selected handler
+→ persist Succeeded or ordinary Failed
+→ return typed result
+
+Probe behavior remains before normal invocation parsing and must not require runtime context configuration or session files.
+
+Information probes must not:
+
+* acquire a lease;
+* construct a session store;
+* transition session state;
+* create directories;
+* invoke a handler.
+
+Do not modify runtime-information JSON.
+
+Lease handoff boundary
+
+Because process launching is excluded, define but do not execute the parent-to-child lease handoff protocol.
+
+The design must make ownership unambiguous:
+
+* the parent preparation path owns the lease before launch;
+* the child must not race another invocation for the same session;
+* ownership transfer must not create an unlocked interval;
+* a failed launch leaves the parent able to mark the prepared session failed;
+* the parent supervisor can reconcile abnormal termination.
+
+Use a typed launch-preparation value that retains the parent lease and produces the runtime-context environment document.
+
+If a truly gapless cross-process lease transfer requires inherited handles or a later platform-specific launcher, keep the parent lease held through child startup and expose an explicit handoff method for that later launcher.
+
+Do not fake transfer by dropping the parent lease before the child starts.
+
+Do not launch a process in this milestone.
+
+Typed errors
+
+Add typed errors covering at least:
+
+* session encoding and decoding;
+* unknown session schema version;
+* invalid session document invariants;
+* invalid transition;
+* immutable identity mismatch;
+* revision conflict;
+* missing session;
+* corrupt session;
+* session directory creation;
+* atomic file persistence;
+* root-summary update failure;
+* partial record/summary commit;
+* lease creation;
+* lease contention;
+* lease I/O;
+* stale ownership reconciliation;
+* invalid runtime-context document;
+* runtime-context identity mismatch;
+* runtime-context path mismatch;
+* session preparation;
+* resume unavailable;
+* abandonment unavailable;
+* Core runner session initialization;
+* terminal-state persistence failure.
+
+Implement Display and Error.
+
+Preserve nested errors through source().
+
+Do not convert errors to String inside Core or Framework session logic.
+
+The eventual CLI boundary may stringify the final framework error later.
+
+Security and diagnostic constraints
+
+Diagnostics must not reveal:
+
+* source arguments;
+* invocation-envelope JSON;
+* complete environment JSON;
+* credentials;
+* cookies;
+* request or response bodies;
+* arbitrary raw filesystem data.
+
+Established non-secret identifiers may appear:
+
+* project identifier;
+* source identifier;
+* protocol identifier;
+* operation identifier;
+* session identifier;
+* state identifier;
+* schema version;
+* revision number.
+
+Paths may appear in direct filesystem diagnostics where necessary, but do not include the full serialized runtime-context document.
+
+Source-code-only execution constraint
+
+This milestone is implementation-only.
 
 Do not run:
 
-cargo test --workspace
+cargo test
+cargo check
+cargo build
+cargo fmt
+cargo clippy
+cargo metadata
+rustc
 
-Workspace-wide validation remains intentionally excluded.
+Do not execute generated runners.
+
+Do not run workspace validation.
 
 Do not run the bundle/install pipeline.
+
+Do not add or modify tests during this milestone. Comprehensive test creation and execution will be handled in the final validation phase.
+
+Use static source inspection only.
 
 Preserve existing behavior
 
 Do not change:
 
-* CLI command names or arguments;
+* CLI command names or argument syntax;
 * lexicon init;
-* source.toml schema;
+* lexicon source create;
+* lexicon source build;
+* source.toml;
+* managed workspace manifests;
+* lockfile generation or immutability;
+* managed runner package or binary names;
 * invocation-envelope JSON;
-* invocation argv transport;
-* acquisition admission;
-* processing admission;
-* normal invocation execution;
+* argv transport;
+* source arguments;
 * runtime-information JSON;
-* probe limits and timeout;
-* executable hashing;
-* runtime manifest formats;
-* bundle directory formats;
+* probe output streams;
+* probe limits or timeout;
+* HTTP capability identifiers;
+* handler signatures;
+* runtime hashing;
+* runtime manifests;
+* bundle formats;
+* verification;
+* staging;
 * bundle admission;
-* paired-publication rollback;
-* source implementation handler signatures;
+* paired publication;
 * MZA;
 * Protocol 1;
 * installer behavior.
@@ -514,51 +899,65 @@ Explicit exclusions
 
 Do not implement:
 
-* sessions;
-* project-path invocation transport;
-* data-command process launching;
-* HTTP transport;
-* retries;
+* CLI data --get execution;
+* CLI data --process execution;
+* lexicon build;
+* child process launching;
+* signal forwarding;
+* foreground process supervision;
+* background process supervision;
+* __operator-host;
+* HTTP client transport;
 * redirects;
+* retries;
+* rate limiting;
+* request construction;
+* response decoding;
 * redaction;
 * raw transaction recording;
-* checkpoints;
-* processing SQLite behavior;
-* foreground supervision;
-* background supervision;
-* __operator-host;
-* data --get;
-* data --process;
-* lexicon build;
-* automatic source-code migration;
+* checkpoint storage;
+* source checkpoint APIs;
+* SQLite creation or mutation;
+* raw-transaction processing;
+* automatic legacy-project migration;
 * cross-compilation;
 * MZA or installer changes.
 
 Completion report
 
-After completion, replace current.md with a report containing:
+After implementation, replace current.md with a report containing:
 
-* files changed;
-* each repository defect corrected;
-* final probe stdout/stderr behavior;
-* built-runner ownership and cleanup behavior;
-* exact Cargo metadata resolution;
-* exact artifact-selection behavior;
-* dynamic expected-identity solution;
-* confirmation that Box::leak was removed from source build;
-* typed managed-build error hierarchy;
-* managed runner template-version validation;
-* legacy code removed or intentionally retained;
-* lockfile immutability result;
-* real generated-project end-to-end result;
-* acquisition build/probe/verification/staging/publication result;
-* processing build/probe/verification/staging/publication result;
-* first framework test result;
-* second framework test result;
-* Core test result if applicable;
-* CLI test result;
-* confirmation that workspace and bundle/install tests were not run.
+* files created and changed;
+* Core session module structure;
+* session schema version;
+* durable session record representation;
+* operation-level status representation;
+* exact state-transition table;
+* failure classifications;
+* revision-conflict behavior;
+* atomic persistence behavior;
+* detailed-record and root-summary consistency behavior;
+* cross-process lease implementation;
+* lease contention behavior;
+* stale-ownership reconciliation;
+* run-session preparation behavior;
+* resume-session preparation behavior;
+* abandonment behavior;
+* owned identity behavior and confirmation that no new Box::leak was introduced;
+* runtime-context path representation;
+* runtime-context environment transport;
+* identity checks between context configuration and admitted invocation;
+* HTTP acquisition context changes;
+* processing context changes;
+* Core HTTP runner integration;
+* Core processing runner integration;
+* probe/session separation;
+* lease-handoff boundary left for process launching;
+* typed error hierarchy;
+* legacy LEXICON_SOURCE_DIRECTORY behavior removed or intentionally quarantined;
+* confirmation that no HTTP, raw recording, SQLite, process launching, or CLI data execution was implemented;
+* confirmation that no tests, checks, builds, formatting, linting, metadata commands, workspace validation, or bundle/install pipeline were run.
 
 Then stop.
 
-Do not begin sessions or HTTP execution until this integration closure is green.
+Do not begin foreground data-command execution or HTTP transport.
