@@ -70,6 +70,15 @@ impl SessionLease {
     }
 }
 
+/// Inspect the state of a session lease without permanently acquiring it.
+///
+/// Returns `Ok(SessionLeaseState::Available)` if the lock can be acquired
+/// (no other process holds it), or `Ok(SessionLeaseState::Owned)` if another
+/// process currently holds the lock.
+pub fn inspect_session_lease(path: &Path) -> Result<SessionLeaseState, SessionLeaseError> {
+    SessionLease::inspect_session_lease(path)
+}
+
 impl Drop for SessionLease {
     fn drop(&mut self) {
         // The OS lock is released when the file descriptor is closed,

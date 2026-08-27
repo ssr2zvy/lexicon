@@ -44,7 +44,8 @@ pub use processing_runtime_manifest::{
 pub use runtime_bundle_admission::{
     AdmittedHttpRuntimeBundle, AdmittedProcessingRuntimeBundle, MAX_RUNTIME_MANIFEST_BYTES,
     ProcessingRuntimeBundleAdmissionError, RuntimeBundleAdmissionError, admit_http_runtime_bundle,
-    admit_processing_runtime_bundle,
+    admit_http_runtime_bundle_owned, admit_processing_runtime_bundle,
+    admit_processing_runtime_bundle_owned,
 };
 pub use runtime_manifest::{
     ExecutableSha256, ExecutableSha256ParseError, RUNTIME_MANIFEST_SCHEMA_VERSION,

@@ -118,6 +118,8 @@ pub enum RuntimeBundleAdmissionError {
     InvalidManifestBoundary,
     DecodeManifest(super::RuntimeManifestDecodingError),
     Incompatible(RuntimeCompatibilityError),
+    /// Compatibility check failed using an owned identity (dynamic source name).
+    IncompatibleOwned(String),
     ReadDirectory {
         path: PathBuf,
         source: std::io::Error,
@@ -213,6 +215,9 @@ impl fmt::Display for RuntimeBundleAdmissionError {
                     "runtime compatibility validation failed: {error}"
                 )
             }
+            Self::IncompatibleOwned(msg) => {
+                write!(formatter, "runtime compatibility validation failed: {msg}")
+            }
             Self::ReadDirectory { path, source } => {
                 write!(
                     formatter,
@@ -287,7 +292,8 @@ impl std::error::Error for RuntimeBundleAdmissionError {
             | Self::MissingExecutable { .. }
             | Self::ExecutableIsSymlink { .. }
             | Self::ExecutableNotRegularFile { .. }
-            | Self::ArtifactMismatch { .. } => None,
+            | Self::ArtifactMismatch { .. }
+            | Self::IncompatibleOwned(..) => None,
         }
     }
 }
@@ -325,6 +331,8 @@ pub enum ProcessingRuntimeBundleAdmissionError {
     InvalidManifestBoundary,
     DecodeManifest(ProcessingRuntimeManifestDecodingError),
     Incompatible(ProcessingRuntimeCompatibilityError),
+    /// Compatibility check failed using an owned identity (dynamic source name).
+    IncompatibleOwned(String),
     ReadDirectory {
         path: PathBuf,
         source: std::io::Error,
@@ -423,6 +431,12 @@ impl fmt::Display for ProcessingRuntimeBundleAdmissionError {
                     "processing runtime compatibility validation failed: {error}"
                 )
             }
+            Self::IncompatibleOwned(msg) => {
+                write!(
+                    formatter,
+                    "processing runtime compatibility validation failed: {msg}"
+                )
+            }
             Self::ReadDirectory { path, source } => {
                 write!(
                     formatter,
@@ -493,6 +507,7 @@ impl std::error::Error for ProcessingRuntimeBundleAdmissionError {
             | Self::ManifestNotRegularFile { .. }
             | Self::ManifestTooLarge { .. }
             | Self::InvalidManifestBoundary
+            | Self::IncompatibleOwned(_)
             | Self::UnexpectedDirectoryEntry { .. }
             | Self::MissingExecutable { .. }
             | Self::ExecutableIsSymlink { .. }
@@ -768,6 +783,295 @@ pub fn admit_processing_runtime_bundle(
         return Err(
             ProcessingRuntimeBundleAdmissionError::UnexpectedDirectoryEntry { path: entry.path() },
         );
+    }
+
+    let artifact = hash_runtime_executable(&executable_path)
+        .map_err(ProcessingRuntimeBundleAdmissionError::HashExecutable)?;
+    let expected_sha256 = manifest.executable_sha256();
+    let actual_sha256 = ExecutableSha256::from_hex(artifact.sha256()).unwrap();
+    if manifest.executable_size() != artifact.size() || expected_sha256 != actual_sha256 {
+        return Err(ProcessingRuntimeBundleAdmissionError::ArtifactMismatch {
+            expected_size: manifest.executable_size(),
+            actual_size: artifact.size(),
+            expected_sha256,
+            actual_sha256,
+        });
+    }
+
+    Ok(AdmittedProcessingRuntimeBundle {
+        directory: bundle_directory.to_path_buf(),
+        executable_path: executable_path.clone(),
+        manifest_path: manifest_path.clone(),
+        manifest,
+        artifact,
+    })
+}
+
+/// Variant of [`admit_http_runtime_bundle`] that accepts an `OwnedRuntimeIdentity`.
+///
+/// Reads, validates, and hashes the bundle using the same logic as the static-identity
+/// variant, but performs the compatibility check against an owned identity so that
+/// dynamic source names can be used without `Box::leak`.
+pub fn admit_http_runtime_bundle_owned(
+    bundle_directory: &Path,
+    expected_identity: &lexicon_core::runtime::OwnedRuntimeIdentity,
+) -> Result<AdmittedHttpRuntimeBundle, RuntimeBundleAdmissionError> {
+    let bundle_metadata = fs::symlink_metadata(bundle_directory).map_err(|source| {
+        RuntimeBundleAdmissionError::BundleMetadata {
+            path: bundle_directory.to_path_buf(),
+            source,
+        }
+    })?;
+    if bundle_metadata.file_type().is_symlink() {
+        return Err(RuntimeBundleAdmissionError::BundleIsSymlink {
+            path: bundle_directory.to_path_buf(),
+        });
+    }
+    if !bundle_metadata.is_dir() {
+        return Err(RuntimeBundleAdmissionError::BundleNotDirectory {
+            path: bundle_directory.to_path_buf(),
+        });
+    }
+
+    let manifest_path = bundle_directory.join("runtime.json");
+    let manifest_metadata = fs::symlink_metadata(&manifest_path).map_err(|source| {
+        RuntimeBundleAdmissionError::ManifestMetadata {
+            path: manifest_path.clone(),
+            source,
+        }
+    })?;
+    if manifest_metadata.file_type().is_symlink() {
+        return Err(RuntimeBundleAdmissionError::ManifestIsSymlink {
+            path: manifest_path.clone(),
+        });
+    }
+    if !manifest_metadata.is_file() {
+        return Err(RuntimeBundleAdmissionError::ManifestNotRegularFile {
+            path: manifest_path.clone(),
+        });
+    }
+    if manifest_metadata.len() > MAX_RUNTIME_MANIFEST_BYTES as u64 {
+        return Err(RuntimeBundleAdmissionError::ManifestTooLarge {
+            maximum: MAX_RUNTIME_MANIFEST_BYTES,
+            actual: manifest_metadata.len(),
+        });
+    }
+
+    let manifest_bytes =
+        fs::read(&manifest_path).map_err(|source| RuntimeBundleAdmissionError::ReadManifest {
+            path: manifest_path.clone(),
+            source,
+        })?;
+    let manifest_text = validate_manifest_text(&manifest_bytes).map_err(|error| match error {
+        ManifestBoundaryError::InvalidBoundary => {
+            RuntimeBundleAdmissionError::InvalidManifestBoundary
+        }
+        ManifestBoundaryError::TooLarge { maximum, actual } => {
+            RuntimeBundleAdmissionError::ManifestTooLarge { maximum, actual }
+        }
+    })?;
+    let manifest = RuntimeManifestV1::from_json(manifest_text)
+        .map_err(RuntimeBundleAdmissionError::DecodeManifest)?;
+
+    manifest
+        .runtime_information()
+        .validate_compatibility_owned(expected_identity)
+        .map_err(RuntimeBundleAdmissionError::IncompatibleOwned)?;
+
+    let executable_path = bundle_directory.join(manifest.executable_name());
+    if executable_path.parent().map(Path::new) != Some(bundle_directory) {
+        return Err(RuntimeBundleAdmissionError::UnexpectedDirectoryEntry {
+            path: executable_path.clone(),
+        });
+    }
+
+    let executable_metadata = match fs::symlink_metadata(&executable_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(RuntimeBundleAdmissionError::MissingExecutable {
+                path: executable_path.clone(),
+            });
+        }
+        Err(error) => {
+            return Err(RuntimeBundleAdmissionError::ReadManifest {
+                path: executable_path.clone(),
+                source: error,
+            });
+        }
+    };
+    if executable_metadata.file_type().is_symlink() {
+        return Err(RuntimeBundleAdmissionError::ExecutableIsSymlink {
+            path: executable_path.clone(),
+        });
+    }
+    if !executable_metadata.is_file() {
+        return Err(RuntimeBundleAdmissionError::ExecutableNotRegularFile {
+            path: executable_path.clone(),
+        });
+    }
+
+    let entries = fs::read_dir(bundle_directory).map_err(|source| {
+        RuntimeBundleAdmissionError::ReadDirectory {
+            path: bundle_directory.to_path_buf(),
+            source,
+        }
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| RuntimeBundleAdmissionError::ReadDirectory {
+            path: bundle_directory.to_path_buf(),
+            source,
+        })?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if name == "runtime.json" || name == manifest.executable_name() {
+            continue;
+        }
+        return Err(RuntimeBundleAdmissionError::UnexpectedDirectoryEntry { path: entry.path() });
+    }
+
+    let artifact = hash_runtime_executable(&executable_path)
+        .map_err(RuntimeBundleAdmissionError::HashExecutable)?;
+    let expected_sha256 = manifest.executable_sha256();
+    let actual_sha256 = ExecutableSha256::from_hex(artifact.sha256()).unwrap();
+    if manifest.executable_size() != artifact.size() || expected_sha256 != actual_sha256 {
+        return Err(RuntimeBundleAdmissionError::ArtifactMismatch {
+            expected_size: manifest.executable_size(),
+            actual_size: artifact.size(),
+            expected_sha256,
+            actual_sha256,
+        });
+    }
+
+    Ok(AdmittedHttpRuntimeBundle {
+        directory: bundle_directory.to_path_buf(),
+        executable_path: executable_path.clone(),
+        manifest_path: manifest_path.clone(),
+        manifest,
+        artifact,
+    })
+}
+
+/// Variant of [`admit_processing_runtime_bundle`] that accepts an `OwnedRuntimeIdentity`.
+pub fn admit_processing_runtime_bundle_owned(
+    bundle_directory: &Path,
+    expected_identity: &lexicon_core::runtime::OwnedRuntimeIdentity,
+) -> Result<AdmittedProcessingRuntimeBundle, ProcessingRuntimeBundleAdmissionError> {
+
+    let bundle_metadata = fs::symlink_metadata(bundle_directory).map_err(|source| {
+        ProcessingRuntimeBundleAdmissionError::BundleMetadata {
+            path: bundle_directory.to_path_buf(),
+            source,
+        }
+    })?;
+    if bundle_metadata.file_type().is_symlink() {
+        return Err(ProcessingRuntimeBundleAdmissionError::BundleIsSymlink {
+            path: bundle_directory.to_path_buf(),
+        });
+    }
+    if !bundle_metadata.is_dir() {
+        return Err(ProcessingRuntimeBundleAdmissionError::BundleNotDirectory {
+            path: bundle_directory.to_path_buf(),
+        });
+    }
+
+    let manifest_path = bundle_directory.join("runtime.json");
+    let manifest_metadata = fs::symlink_metadata(&manifest_path).map_err(|source| {
+        ProcessingRuntimeBundleAdmissionError::ManifestMetadata {
+            path: manifest_path.clone(),
+            source,
+        }
+    })?;
+    if manifest_metadata.file_type().is_symlink() {
+        return Err(ProcessingRuntimeBundleAdmissionError::ManifestIsSymlink {
+            path: manifest_path.clone(),
+        });
+    }
+    if !manifest_metadata.is_file() {
+        return Err(ProcessingRuntimeBundleAdmissionError::ManifestNotRegularFile {
+            path: manifest_path.clone(),
+        });
+    }
+    if manifest_metadata.len() > MAX_RUNTIME_MANIFEST_BYTES as u64 {
+        return Err(ProcessingRuntimeBundleAdmissionError::ManifestTooLarge {
+            maximum: MAX_RUNTIME_MANIFEST_BYTES,
+            actual: manifest_metadata.len(),
+        });
+    }
+
+    let manifest_bytes = fs::read(&manifest_path).map_err(|source| {
+        ProcessingRuntimeBundleAdmissionError::ReadManifest {
+            path: manifest_path.clone(),
+            source,
+        }
+    })?;
+    let manifest_text = validate_manifest_text(&manifest_bytes).map_err(|error| match error {
+        ManifestBoundaryError::InvalidBoundary => {
+            ProcessingRuntimeBundleAdmissionError::InvalidManifestBoundary
+        }
+        ManifestBoundaryError::TooLarge { maximum, actual } => {
+            ProcessingRuntimeBundleAdmissionError::ManifestTooLarge { maximum, actual }
+        }
+    })?;
+
+    let manifest = ProcessingRuntimeManifestV1::from_json(manifest_text)
+        .map_err(ProcessingRuntimeBundleAdmissionError::DecodeManifest)?;
+
+    manifest
+        .runtime_information()
+        .validate_compatibility_owned(expected_identity)
+        .map_err(ProcessingRuntimeBundleAdmissionError::IncompatibleOwned)?;
+
+    let executable_path = bundle_directory.join(manifest.executable_name());
+    if executable_path.parent().map(Path::new) != Some(bundle_directory) {
+        return Err(ProcessingRuntimeBundleAdmissionError::UnexpectedDirectoryEntry {
+            path: executable_path.clone(),
+        });
+    }
+
+    let executable_metadata = match fs::symlink_metadata(&executable_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ProcessingRuntimeBundleAdmissionError::MissingExecutable {
+                path: executable_path.clone(),
+            });
+        }
+        Err(error) => {
+            return Err(ProcessingRuntimeBundleAdmissionError::ReadManifest {
+                path: executable_path.clone(),
+                source: error,
+            });
+        }
+    };
+    if executable_metadata.file_type().is_symlink() {
+        return Err(ProcessingRuntimeBundleAdmissionError::ExecutableIsSymlink {
+            path: executable_path.clone(),
+        });
+    }
+    if !executable_metadata.is_file() {
+        return Err(ProcessingRuntimeBundleAdmissionError::ExecutableNotRegularFile {
+            path: executable_path.clone(),
+        });
+    }
+
+    let entries = fs::read_dir(bundle_directory).map_err(|source| {
+        ProcessingRuntimeBundleAdmissionError::ReadDirectory {
+            path: bundle_directory.to_path_buf(),
+            source,
+        }
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| ProcessingRuntimeBundleAdmissionError::ReadDirectory {
+            path: bundle_directory.to_path_buf(),
+            source,
+        })?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if name == "runtime.json" || name == manifest.executable_name() {
+            continue;
+        }
+        return Err(ProcessingRuntimeBundleAdmissionError::UnexpectedDirectoryEntry {
+            path: entry.path(),
+        });
     }
 
     let artifact = hash_runtime_executable(&executable_path)

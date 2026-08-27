@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+
 use clap::{ArgGroup, Parser};
 
 #[derive(Parser, Debug, Clone)]
@@ -41,7 +43,7 @@ pub struct DataCommand {
         allow_hyphen_values = true,
         help = "Arguments forwarded after `--` to the selected source implementation."
     )]
-    pub passthrough: Vec<String>,
+    pub passthrough: Vec<OsString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +66,8 @@ impl DataCommand {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use crate::cli::{Cli, RootCommand};
     use clap::Parser;
 
@@ -86,7 +90,10 @@ mod tests {
                 assert_eq!(command.get.as_deref(), Some("example-source"));
                 assert_eq!(command.process, None);
                 assert!(command.bg);
-                assert_eq!(command.passthrough, vec!["--from", "2024-01-01"]);
+                assert_eq!(command.passthrough, vec![
+                    OsString::from("--from"),
+                    OsString::from("2024-01-01"),
+                ]);
             }
             other => panic!("expected Data subcommand, got {other:?}"),
         }
