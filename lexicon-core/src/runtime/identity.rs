@@ -127,6 +127,16 @@ impl RuntimeIdentity {
     pub const fn source_contract_version(&self) -> u32 {
         self.source_contract_version
     }
+
+    /// Convert to an owned identity.
+    pub fn into_owned_identity(self) -> OwnedRuntimeIdentity {
+        OwnedRuntimeIdentity {
+            source_name: self.source_name.to_string(),
+            protocol: self.protocol,
+            operation: self.operation,
+            source_contract_version: self.source_contract_version,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

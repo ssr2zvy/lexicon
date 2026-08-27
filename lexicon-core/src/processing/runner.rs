@@ -13,6 +13,11 @@ use crate::processing::{
 use crate::runtime::{
     RuntimeIdentity, RuntimeInvocationTransportDecodingError, parse_runtime_invocation,
 };
+use crate::session::{
+    CoreRunnerSessionError, SessionFailureKind, SessionOperationRoot, SessionState, SessionStore,
+    SessionTransition, decode_runtime_context_from_env,
+};
+use crate::session::store::RunningSession;
 
 pub use crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
 
@@ -506,7 +511,12 @@ mod tests {
 pub enum ProcessingRuntimeInvocationExecutionError {
     Transport(RuntimeInvocationTransportDecodingError),
     Admission(ProcessingRuntimeInvocationAdmissionError),
+    Session(CoreRunnerSessionError),
     Handler(ProcessingError),
+    TerminalPersistence {
+        handler_error: Option<ProcessingError>,
+        session_error: crate::session::SessionStoreError,
+    },
 }
 
 impl fmt::Display for ProcessingRuntimeInvocationExecutionError {
@@ -518,7 +528,14 @@ impl fmt::Display for ProcessingRuntimeInvocationExecutionError {
             Self::Admission(_) => {
                 formatter.write_str("processing runtime invocation admission error")
             }
+            Self::Session(_) => formatter.write_str("processing runtime session initialization error"),
             Self::Handler(_) => formatter.write_str("processing handler error"),
+            Self::TerminalPersistence { handler_error: Some(_), .. } => {
+                formatter.write_str("processing handler error; terminal session state persistence also failed")
+            }
+            Self::TerminalPersistence { handler_error: None, .. } => {
+                formatter.write_str("terminal session state persistence failed after successful handler")
+            }
         }
     }
 }
@@ -528,16 +545,31 @@ impl std::error::Error for ProcessingRuntimeInvocationExecutionError {
         match self {
             Self::Transport(e) => Some(e),
             Self::Admission(e) => Some(e),
+            Self::Session(e) => Some(e),
             Self::Handler(e) => Some(e),
+            Self::TerminalPersistence { session_error, .. } => Some(session_error),
         }
     }
 }
 
+/// Run a processing runtime invocation with full session lifecycle.
+///
+/// Supported order:
+/// 1. Parse invocation argv.
+/// 2. Admit invocation.
+/// 3. Decode runtime context configuration from the environment.
+/// 4. Compare context identities with admitted envelope.
+/// 5. Open session store.
+/// 6. Acquire/confirm session lease.
+/// 7. Transition Prepared → Running.
+/// 8. Construct bound operation context.
+/// 9. Invoke the selected handler.
+/// 10. Persist Succeeded or ordinary Failed.
+/// 11. Return typed result.
 pub fn run_processing_runtime_invocation(
     arguments: &[OsString],
     compiled_identity: RuntimeIdentity,
     source: &ProcessingSourceContractV1,
-    context: &mut ProcessingContext,
 ) -> Result<(), ProcessingRuntimeInvocationExecutionError> {
     let parsed = parse_runtime_invocation(arguments)
         .map_err(ProcessingRuntimeInvocationExecutionError::Transport)?;
@@ -545,11 +577,100 @@ pub fn run_processing_runtime_invocation(
     let admitted = admit_processing_runtime_invocation(parsed, compiled_identity, source)
         .map_err(ProcessingRuntimeInvocationExecutionError::Admission)?;
 
-    let (_, source_arguments, handler) = admitted.into_parts();
+    let (envelope, source_arguments, handler) = admitted.into_parts();
 
-    match handler {
-        AdmittedProcessingHandler::Process(f) => f(context, &source_arguments)
-            .map_err(ProcessingRuntimeInvocationExecutionError::Handler),
+    // Decode runtime context and compare identities against admitted envelope.
+    let context_document = decode_runtime_context_from_env(
+        envelope.project(),
+        &envelope.runtime().into_owned_identity(),
+        envelope.session(),
+    )
+    .map_err(|e| {
+        ProcessingRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::ContextDecode(e))
+    })?;
+
+    let operation_root = SessionOperationRoot::new(
+        context_document.paths.operation_root().to_path_buf(),
+    )
+    .map_err(|e| {
+        ProcessingRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
+    })?;
+
+    let store = SessionStore::open(operation_root).map_err(|e| {
+        ProcessingRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
+    })?;
+
+    let session_id = envelope.session().clone();
+
+    // Load the prepared session record.
+    let prepared_record = store.load(&session_id).map_err(|e| {
+        ProcessingRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
+    })?;
+
+    if prepared_record.state() != SessionState::Prepared {
+        return Err(ProcessingRuntimeInvocationExecutionError::Session(
+            CoreRunnerSessionError::StoreOpen(crate::session::SessionStoreError::InvalidTransition(
+                crate::session::SessionTransitionError::InvalidTransition {
+                    from: prepared_record.state(),
+                    to: SessionState::Running,
+                },
+            )),
+        ));
+    }
+
+    // Acquire exclusive session lease.
+    let lease = store.acquire_lease(&session_id).map_err(|e| {
+        ProcessingRuntimeInvocationExecutionError::Session(
+            CoreRunnerSessionError::LeaseAcquisition(e),
+        )
+    })?;
+
+    // Transition Prepared → Running.
+    let revision = prepared_record.revision();
+    let running_record = store
+        .transition(&session_id, revision, SessionTransition::ToRunning)
+        .map_err(|e| {
+            ProcessingRuntimeInvocationExecutionError::Session(
+                CoreRunnerSessionError::TransitionToRunning(e),
+            )
+        })?;
+
+    let running = RunningSession::from_parts(running_record, lease);
+
+    // Construct bound processing context.
+    let mut context = ProcessingContext::from_context_paths(&context_document.paths, running);
+
+    // Invoke the selected handler.
+    let handler_result = match handler {
+        AdmittedProcessingHandler::Process(f) => f(&mut context, &source_arguments),
+    };
+
+    // Retrieve the running session from the context.
+    let running = context.take_running_session().expect("running session must be present");
+
+    match handler_result {
+        Ok(()) => {
+            store.complete_succeeded(running).map_err(|e| {
+                ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
+                    handler_error: None,
+                    session_error: e,
+                }
+            })?;
+            Ok(())
+        }
+        Err(processing_error) => {
+            if let Err(persist_error) = store.complete_failed(
+                running,
+                SessionFailureKind::Source,
+                Some("processing source failure".to_string()),
+            ) {
+                return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
+                    handler_error: Some(processing_error),
+                    session_error: persist_error,
+                });
+            }
+            Err(ProcessingRuntimeInvocationExecutionError::Handler(processing_error))
+        }
     }
 }
 

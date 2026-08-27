@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod build;
 pub mod publication;
+pub mod session;
 pub use publication::{
     PublishedRuntimePair, RuntimePairCleanupWarning, RuntimePairPublicationError,
     publish_runtime_pair,
@@ -1761,10 +1762,6 @@ fn format_http_managed_runner_main(source_name: &str) -> String {
 ",
     );
     out.push_str(
-        "    HttpAcquisitionContext,
-",
-    );
-    out.push_str(
         "    HttpCapabilitySet,
 ",
     );
@@ -1854,36 +1851,7 @@ fn format_http_managed_runner_main(source_name: &str) -> String {
 
 ",
     );
-    out.push_str(
-        "    let mut context = match HttpAcquisitionContext::from_env() {
-",
-    );
-    out.push_str(
-        "        Ok(context) => context,
-",
-    );
-    out.push_str(
-        "        Err(error) => {
-",
-    );
-    out.push_str(
-        "            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
-",
-    );
-    out.push_str(
-        "            return ExitCode::FAILURE;
-",
-    );
-    out.push_str(
-        "        }
-",
-    );
-    out.push_str(
-        "    };
-
-",
-    );
-    out.push_str("    if let Err(error) = run_http_runtime_invocation(&arguments, IDENTITY, &SOURCE, HttpCapabilitySet::empty(), &mut context) {
+    out.push_str("    if let Err(error) = run_http_runtime_invocation(&arguments, IDENTITY, &SOURCE, HttpCapabilitySet::empty()) {
 ");
     out.push_str(
         "        let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
@@ -1930,10 +1898,6 @@ fn format_processing_managed_runner_main(source_name: &str) -> String {
     );
     out.push_str(
         "use lexicon_core::processing::{
-",
-    );
-    out.push_str(
-        "    ProcessingContext,
 ",
     );
     out.push_str(
@@ -2022,11 +1986,7 @@ fn format_processing_managed_runner_main(source_name: &str) -> String {
 
 ",
     );
-    out.push_str(
-        "    let mut context = ProcessingContext::default();
-",
-    );
-    out.push_str("    if let Err(error) = run_processing_runtime_invocation(&arguments, IDENTITY, &SOURCE, &mut context) {
+    out.push_str("    if let Err(error) = run_processing_runtime_invocation(&arguments, IDENTITY, &SOURCE) {
 ");
     out.push_str(
         "        let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
