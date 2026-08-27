@@ -129,6 +129,58 @@ impl RuntimeIdentity {
     }
 }
 
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedRuntimeIdentity {
+    source_name: String,
+    protocol: RuntimeProtocol,
+    operation: RuntimeOperation,
+    source_contract_version: u32,
+}
+
+impl OwnedRuntimeIdentity {
+    pub fn http_acquisition(source_name: impl Into<String>, source_contract_version: u32) -> Self {
+        Self {
+            source_name: source_name.into(),
+            protocol: RuntimeProtocol::Http,
+            operation: RuntimeOperation::Acquisition,
+            source_contract_version,
+        }
+    }
+
+    pub fn http_processing(source_name: impl Into<String>, source_contract_version: u32) -> Self {
+        Self {
+            source_name: source_name.into(),
+            protocol: RuntimeProtocol::Http,
+            operation: RuntimeOperation::Processing,
+            source_contract_version,
+        }
+    }
+
+    pub fn source_name(&self) -> &str {
+        &self.source_name
+    }
+
+    pub fn protocol(&self) -> RuntimeProtocol {
+        self.protocol
+    }
+
+    pub fn operation(&self) -> RuntimeOperation {
+        self.operation
+    }
+
+    pub fn source_contract_version(&self) -> u32 {
+        self.source_contract_version
+    }
+
+    pub fn matches(&self, other: RuntimeIdentity) -> bool {
+        self.source_name == other.source_name()
+            && self.protocol == other.protocol()
+            && self.operation == other.operation()
+            && self.source_contract_version == other.source_contract_version()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{RuntimeIdentifierError, RuntimeIdentity, RuntimeOperation, RuntimeProtocol};

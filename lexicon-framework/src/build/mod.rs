@@ -56,8 +56,10 @@ pub use runtime_probe::{
     MAX_RUNTIME_INFORMATION_PROBE_BYTES, MAX_RUNTIME_INFORMATION_PROBE_STDERR_BYTES,
     ProcessingRuntimeProbeAdmissionError, ProcessingRuntimeProbeExecutionError,
     RUNTIME_INFORMATION_PROBE_TIMEOUT, RuntimeProbeAdmissionError, RuntimeProbeExecutionError,
-    admit_http_runtime_information_probe, admit_processing_runtime_information_probe,
-    probe_http_runtime_information, probe_processing_runtime_information,
+    admit_http_runtime_information_probe, admit_http_runtime_information_probe_owned,
+    admit_processing_runtime_information_probe, admit_processing_runtime_information_probe_owned,
+    probe_http_runtime_information, probe_http_runtime_information_owned,
+    probe_processing_runtime_information, probe_processing_runtime_information_owned,
 };
 pub use runtime_staging::{
     ProcessingRuntimeBundleStagingError, RuntimeBundleStagingError, StagedHttpRuntimeBundle,
@@ -67,5 +69,6 @@ pub use runtime_staging::{
 pub use runtime_verification::{
     HashedRuntimeArtifact, HttpRuntimeVerificationError, ProcessingRuntimeVerificationError,
     RuntimeArtifactHashError, VerifiedHttpRuntime, VerifiedProcessingRuntime,
-    hash_runtime_executable, verify_http_runtime_candidate, verify_processing_runtime_candidate,
+    hash_runtime_executable, verify_http_runtime_candidate, verify_http_runtime_candidate_owned,
+    verify_processing_runtime_candidate, verify_processing_runtime_candidate_owned,
 };
