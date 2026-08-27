@@ -1,3 +1,4 @@
+pub mod binding;
 pub mod context;
 pub mod error;
 pub mod lease;
@@ -5,9 +6,13 @@ pub mod model;
 pub mod store;
 pub(crate) mod transition;
 
+pub use binding::{
+    BoundRuntimeSession, RunningRuntimeSession, RuntimeSessionBindingError, bind_runtime_session,
+};
 pub use context::{
     DecodedRuntimeContext, RUNTIME_CONTEXT_ENVIRONMENT_VARIABLE, RuntimeContextPaths,
-    decode_runtime_context, decode_runtime_context_from_env, encode_runtime_context,
+    SessionDataPaths, decode_runtime_context, decode_runtime_context_from_env,
+    encode_runtime_context,
 };
 pub use error::{
     CoreRunnerSessionError, RuntimeContextError, SessionDecodingError, SessionEncodingError,

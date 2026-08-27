@@ -148,6 +148,11 @@ impl SessionStore {
         })
     }
 
+    /// Read-only access to the validated operation root for this store.
+    pub fn operation_root(&self) -> &SessionOperationRoot {
+        &self.operation_root
+    }
+
     #[cfg(test)]
     pub(crate) fn open_with_clock(
         operation_root: SessionOperationRoot,
