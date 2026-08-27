@@ -1,166 +1,845 @@
-Foreground supervision closure and lifecycle correctness — completion report
+Current implementation milestone: foreground reconciliation closure
 
-Files created
+Objective
 
-None.
+Complete the remaining foreground supervision and reconciliation corrections in the implementation currently pushed to main.
 
-Files changed
+The source now has:
 
-lexicon-framework/src/data/foreground.rs
-lexicon-framework/src/data/outcome.rs
+* explicit prepared and running foreground owners;
+* a narrow process-launcher seam;
+* supervisor lease retention during the ordinary wait path;
+* typed pre-launch failure handling;
+* detailed-session identity validation;
+* root-summary validation and rebuilding;
+* typed child failure kinds and codes.
 
-Contract responsibility boundary preserved
+However, several error paths still discard durable-state failures or release ownership without proving the child has terminated.
 
-The contract assigns foreground ownership to the supervising Lexicon process. The supervisor selects, creates, or resumes a session; acquires the session lease; applies --abandon-past-fail; launches the source runtime; observes process exit and signals; and reconciles abnormal termination. The linked Core inside the source runtime is responsible for validating the invocation, entering Running state, recording ordinary source failure, and recording normal completion. This boundary is preserved.
+This milestone closes those remaining defects.
 
-Foreground owner types
+workspace/specs/contract.md remains the source of truth.
 
-PreparedForegroundExecution: owns PreparedSessionLaunch (and therefore the supervisor lease), DataOperation, project name, and source name. Neither Clone nor Copy. Fields are private.
+Do not begin the Core HTTP transaction engine until this closure is complete.
 
-RunningForegroundExecution: owns both the live std::process::Child handle and the PreparedSessionLaunch (and therefore the supervisor lease), plus operation, project name, and source name. Neither Clone nor Copy. Fields are private.
+Contract boundary
 
-Prepared-to-running ownership transition
+The contract requires:
 
-PreparedForegroundExecution is consumed into RunningForegroundExecution only after a successful spawn call. The session record is not altered by the parent process merely because spawn succeeded; the linked Core child is responsible for the Prepared → Running transition.
+supervising Lexicon process
+├── select, create, or resume a session
+├── acquire session locks
+├── apply --abandon-past-fail
+├── launch the source runtime
+├── observe process exit and signals
+└── reconcile abnormal termination
 
-Exact supervisor lease lifetime
+For foreground execution, the original Lexicon process owns this complete sequence.
 
-The supervisor lease is held from session preparation through invocation construction, encoding, executable integrity recheck, spawn, the wait loop, terminal reconciliation, final outcome construction, and is released only when the owning value is dropped.
+The required invariant is:
 
-Confirmation that reconciliation occurs before lease release
+child may still be alive
+⇒ supervisor retains child ownership
+⇒ supervisor retains session lease
 
-Terminal reconciliation is performed inside wait_and_reconcile, which holds RunningForegroundExecution (and therefore the PreparedSessionLaunch lease) throughout. The lease is released only after reconciliation completes or produces its final structured error.
+After confirmed child termination:
 
-Launcher seam
+supervisor retains session lease
+⇒ durable session reconciliation completes
+⇒ root summary is validated
+⇒ final result is constructed
+⇒ lease is released
 
-ForegroundRuntimeLauncher is a pub(crate) trait with a single spawn method accepting the exact admitted executable path, argument slice, runtime-context environment value, and working directory. The production implementation is ProcessCommandLauncher using std::process::Command with inherited stdio, no shell, no PATH lookup, the protocol root as working directory, LEXICON_RUNTIME_CONTEXT_V1 set to the context document, and LEXICON_SOURCE_DIRECTORY removed.
+No error path may silently bypass this boundary.
 
-Exact production command behavior
+Repository-grounded defects to correct
 
-Executable: exact admitted path. Arguments: exact encoded invocation argv. No shell. No PATH lookup. Working directory: HTTP protocol root. stdin/stdout/stderr: inherited. LEXICON_RUNTIME_CONTEXT_V1: set to context document. LEXICON_SOURCE_DIRECTORY: removed.
+1. Nonzero child failure discards root-summary reconciliation errors
 
-Invocation-construction failure behavior
+The current nonzero-exit/failed-session path calls:
 
-If RuntimeInvocationEnvelopeV1 construction fails, fail_prepared_execution is called with SessionFailureCode::InvocationConstructionFailed and the typed ForegroundPreparationError::InvocationConstruction cause. The session is transitioned to Failed before returning. The nested ForegroundInvocationConstructionError is preserved.
+let _ = validate_or_rebuild_summary_if_needed(...);
 
-Invocation-encoding failure behavior
+It then returns ChildFailed even if:
 
-If encode_runtime_invocation fails, fail_prepared_execution is called with SessionFailureCode::InvocationEncodingFailed and the typed ForegroundPreparationError::InvocationEncoding cause. The session is transitioned to Failed before returning. The nested RuntimeInvocationTransportEncodingError is preserved.
+* session_status.json is missing;
+* the summary is corrupt;
+* the summary identifies another session;
+* the summary has the wrong state or revision;
+* rebuilding fails;
+* revalidation fails.
 
-Integrity-failure behavior
+Remove this discarded result.
 
-If recheck_executable_integrity_typed detects a change or I/O error, fail_prepared_execution is called with SessionFailureCode::ExecutableIntegrityFailed and the typed ForegroundPreparationError cause. The session is transitioned to Failed. Executable contents are not included in diagnostics.
+A child failure is not fully reconciled until the detailed record and root summary agree.
 
-Combined preparation/persistence error behavior
+2. Signal reconciliation discards detailed-record load failures
 
-If a post-preparation failure transition itself fails to persist, ForegroundDataExecutionError::PreparationFailureAndPersistenceFailure is returned with both the preparation error and the persistence SessionCoordinationError preserved as typed fields. Neither error is discarded or collapsed to a String.
+The current signal path uses:
 
-Spawn-failure behavior
+if let Ok(record) =
+    load_terminal_session(...)
 
-If the launcher spawn call fails, fail_prepared_execution is called with SessionFailureCode::LaunchFailed and ForegroundPreparationError::ProcessSpawn. The session is transitioned to Failed before returning.
+If the detailed record is missing, corrupt, or unreadable, execution falls through and returns only AbnormalTermination.
 
-Interrupted-wait behavior
+Preserve and return the typed session-loading error.
 
-std::io::ErrorKind::Interrupted errors from child.wait() cause the wait to be retried without releasing ownership.
+3. Signal reconciliation validates an obsolete record
 
-Non-interrupted wait-failure recovery
+When a signaled child leaves the session Prepared or Running, the supervisor transitions it to Failed.
 
-Any other wait error triggers handle_wait_error: retains the child handle and lease; attempts Child::kill(); attempts a reap wait(); inspects durable session state and reconciles a nonterminal session to Failed; returns ForegroundDataExecutionError::ProcessWaitRecovery containing the typed WaitRecoveryFailure with the original wait error, any kill error, any reap error, and any session reconciliation error.
+The current code then validates the root summary against the old pre-transition record.
 
-Child termination and reap behavior
+Use the SessionRecordV1 returned by the successful transition.
 
-After the wait loop exits successfully, the child is known to have terminated. RunningForegroundExecution is held through all reconciliation steps and dropped only after the final outcome or error is ready.
+Never validate a post-transition summary against a stale record revision or state.
 
-Wait-recovery failure behavior
+4. Root-summary helper erases all errors
 
-If kill or reap fails, errors are captured in WaitRecoveryFailure and returned through ForegroundDataExecutionError::ProcessWaitRecovery. All errors are available as typed fields.
+The current helper returns:
 
-Detailed session identity validation
+Result<(), ()>
 
-After child termination, load_and_validate_terminal_session loads the session record and verifies agreement with the prepared record for: project identity, runtime identity, session identity, operation, execution mode, and supervision mode. A typed SessionIdentityDisagreement error is returned on mismatch. The mismatched record is not overwritten.
+and discards:
 
-Root-summary validation
+* operation-root construction errors;
+* session-store opening errors;
+* status loading errors;
+* status decoding errors;
+* validation disagreements;
+* rebuild failures;
+* post-rebuild validation failures.
 
-validate_root_summary_against_record checks the root session_status.json for agreement on: schema version, project, runtime, operation, current session identity, current session state, and revision.
+Replace it with a fully typed result.
 
-Root-summary rebuild behavior
+5. Wait recovery can drop ownership without confirming termination
 
-If validate_root_summary_against_record fails, rebuild_status_from_record is called while the supervisor lease is still held. The summary is reloaded and re-validated. If rebuild or re-validation fails, RootSummaryReconciliationFailed is returned with the detail string and optional rebuild error.
+After a non-interrupted Child::wait() error, the current code:
 
-Zero-exit reconciliation
+1. calls Child::kill();
+2. calls Child::wait() once;
+3. stores any errors;
+4. drops the child and lease;
+5. returns.
 
-Exit code 0 with Succeeded: validates root summary; attempts rebuild if stale; returns ForegroundDataOutcome only after both agree.
-Exit code 0 with Failed: preserves the failed record; returns ChildFailed.
-Exit code 0 with Prepared or Running: transitions to Failed with SessionFailureCode::ZeroExitWithoutCompletion while holding the lease; returns ZeroExitSessionIncomplete or AbnormalTerminationPersistence if persistence fails.
-Exit code 0 with Abandoned: returns ExitSessionDisagreement without mutation.
+If killing or reaping fails, the child may still be alive when ownership is released.
 
-Nonzero-exit reconciliation
+Correct this recovery path.
 
-Nonzero exit with Failed: validates or rebuilds root summary; returns ChildFailed with typed failure kind, failure code, exit code, source, operation, and session identity.
-Nonzero exit with Prepared or Running: transitions to Failed with SessionFailureCode::NonzeroExitWithoutFailureRecord; returns AbnormalTermination or AbnormalExitPersistence if persistence fails.
-Nonzero exit with Succeeded: returns ExitSessionDisagreement without mutation.
-Nonzero exit with Abandoned: returns ExitSessionDisagreement without mutation.
+6. Wait recovery ignores missing or corrupt session state
 
-Signaled termination reconciliation
+The current wait-recovery path reconciles only when:
 
-reconcile_signal accepts the full ObservedChildTermination value. Succeeded or Failed: the existing terminal record is preserved; root summary is validated or rebuilt. Abandoned: returns a typed ExitSessionDisagreement without mutating the record. Prepared or Running: transitions to Failed with SessionFailureCode::AbnormalTermination; if persistence fails, returns AbnormalTerminationPersistence with the typed error; on success, validates or rebuilds root summary.
+load_terminal_session(...)
 
-Unknown abnormal termination reconciliation
+returns Ok.
 
-ObservedChildTermination::UnknownAbnormalTermination is routed to reconcile_signal with that value. The same logic as signaled termination applies. No signal number is invented.
+A load failure is discarded instead of being retained in WaitRecoveryFailure.
 
-Exit/session disagreement behavior
+7. Integrity-error dispatch contains unreachable!
 
-ForegroundDataExecutionError::ExitSessionDisagreement carries the typed ObservedChildTermination and the typed SessionState. No free-form detail String is used.
+The current adapter assumes the integrity function can return exactly two variants:
 
-Filesystem metadata and type validation
+Err(_) => unreachable!(...)
 
-require_directory uses symlink_metadata so symlinks are rejected even when they point to directories. Distinct typed errors are returned for: missing path (MissingPath), symlink (SymlinkNotPermitted), regular file or other non-directory (NotADirectory), and metadata I/O failure (MetadataIo). validate_sources_root_containment uses symlink_metadata for the same reasons.
+A later variant can therefore turn an ordinary typed failure into a panic.
 
-Typed project-discovery errors
+Remove this assumption.
 
-ProjectDiscoveryError::CurrentDirectory wraps std::io::Error. ProjectDiscoveryError::FindRoot carries the String message from the internal find_project_root helper.
+8. Root-summary validation remains string-based
 
-Typed project-configuration errors
+The current API is:
 
-ProjectConfigurationError::Read, TomlDecode, Schema, Identity, and Other replace the prior ProjectConfiguration(String) variant. The load_project_config internal helper still returns a String; this is mapped to ProjectConfigurationError::Other.
+validate_root_summary_against_record(...)
+    -> Result<(), String>
 
-Typed runtime-layout errors
+Replace free-form mismatch strings with typed validation errors.
 
-RuntimeProjectLayoutError with variants SourcesRoot, SourceIdentity, NotADirectory, MissingPath, SymlinkNotPermitted, MetadataIo, and PathContainment.
+9. Detailed-record identity disagreement remains string-based
 
-Typed invocation errors
+SessionIdentityDisagreement currently stores formatted expected and actual strings.
 
-ForegroundInvocationConstructionError (InvalidProjectIdentity, InvalidSessionIdentity, EnvelopeConstruction) wraps the Core-owned error types. ForegroundDataExecutionError::InvocationConstruction(ForegroundInvocationConstructionError) and InvocationEncoding(RuntimeInvocationTransportEncodingError) replace the prior String variants.
+Preserve typed identity values or use a typed mismatch enum.
 
-Typed child failure kind and code behavior
+Do not use debug-formatted strings as an internal data model.
 
-SessionFailureKind and SessionFailureCode are retained as typed values in ForegroundDataExecutionError::ChildFailed. Display output uses their stable identifier() accessors, not Debug formatting.
+10. Project discovery and configuration remain partly string-based
 
-Free-form disagreement strings removed
+The current wrappers still contain:
 
-ExitSessionDisagreement carries termination: ObservedChildTermination and durable_state: SessionState instead of a detail: String.
+ProjectDiscoveryError::FindRoot(String)
+ProjectConfigurationError::Other(String)
 
-Final ForegroundDataOutcome guarantee
+because the shared project helpers return String.
 
-ForegroundDataOutcome may be returned only when: the exact admitted executable was launched; the child exited with code zero; the detailed session record is Succeeded; the detailed record identities match the prepared invocation; the root summary identifies the same session; the root summary state and revision agree; no reconciliation error remains; and the supervisor retained its lease through all checks. This guarantee is documented on the type.
+Move the shared project discovery and configuration helpers to typed errors so the foreground path does not stringify and re-wrap them.
 
-CLI diagnostic behavior
+Authoritative reconciliation API
 
-On success, the CLI prints: operation name, source name, and session id. On failure, the CLI renders the typed ForegroundDataExecutionError once at the CLI boundary via its Display impl.
+Create one authoritative operation equivalent to:
 
-Confirmation of non-printing
+pub fn reconcile_terminal_execution(
+    owner: RunningForegroundExecution,
+    termination: ObservedChildTermination,
+) -> Result<
+    ForegroundDataOutcome,
+    ForegroundDataExecutionError,
+>;
 
-Source arguments, invocation-envelope JSON, runtime-context JSON, child environment, and arbitrary source error messages are not printed or persisted.
+It must own the supervisor lease throughout:
 
-Confirmation of explicit exclusions
+* detailed-record loading;
+* identity validation;
+* terminal transition where required;
+* root-summary loading;
+* root-summary rebuilding;
+* root-summary revalidation;
+* final result construction.
 
-No HTTP transport, raw transaction recording, checkpoints, SQLite processing behavior, background host, or lexicon build was implemented in this milestone.
+Do not maintain separate best-effort reconciliation paths that discard different errors.
 
-Existing test source adjusted
+Typed root-summary validation
 
-No existing test source was structurally broken by these changes. No API-incompatible changes were made to previously compiled test code.
+Define an error equivalent to:
 
-Confirmation of no prohibited commands
+#[derive(Debug)]
+pub enum RootSummaryValidationError {
+    Missing,
+    Load(SessionStoreError),
+    SchemaVersionMismatch {
+        expected: u32,
+        actual: u32,
+    },
+    ProjectMismatch,
+    RuntimeMismatch,
+    OperationMismatch,
+    MissingCurrentSession,
+    SessionMismatch,
+    MissingCurrentState,
+    StateMismatch {
+        expected: SessionState,
+        actual: SessionState,
+    },
+    RevisionMismatch {
+        expected: u64,
+        actual: u64,
+    },
+}
 
-No cargo test, cargo check, cargo build, cargo fmt, cargo clippy, cargo metadata, rustc, CLI data command execution, generated-runtime execution, workspace validation, or bundle/install pipeline commands were run.
+Equivalent typed organization is acceptable.
+
+Provide:
+
+pub fn validate_root_summary_against_record(
+    store: &SessionStore,
+    record: &SessionRecordV1,
+) -> Result<(), RootSummaryValidationError>;
+
+Do not return a plain String.
+
+Do not format entire records into errors.
+
+Established non-secret identity values may be represented through their stable identifiers where required.
+
+Typed root-summary reconciliation
+
+Define:
+
+#[derive(Debug)]
+pub enum RootSummaryReconciliationError {
+    Validation(
+        RootSummaryValidationError,
+    ),
+    Rebuild(
+        SessionStoreError,
+    ),
+    ValidationAfterRebuild(
+        RootSummaryValidationError,
+    ),
+}
+
+Equivalent naming is acceptable.
+
+Provide one helper:
+
+pub fn validate_or_rebuild_root_summary(
+    store: &SessionStore,
+    record: &SessionRecordV1,
+) -> Result<(), RootSummaryReconciliationError>;
+
+Required order:
+
+validate current summary
+→ if valid: success
+→ if invalid: rebuild from exact detailed record
+→ reload and revalidate
+→ success only if revalidation passes
+
+Do not return Result<(), ()>.
+
+Do not discard a rebuild error.
+
+Do not report success merely because rebuild_status_from_record(...) returned successfully; revalidation remains mandatory.
+
+Terminal record and summary result
+
+Provide one typed validated result equivalent to:
+
+pub struct ReconciledTerminalSession {
+    record: SessionRecordV1,
+}
+
+It may be constructed only after:
+
+* detailed record identity agrees with the prepared record;
+* record is in the expected terminal state for the selected result;
+* root summary agrees after any required rebuild.
+
+Keep its field private.
+
+Do not provide an unchecked public constructor.
+
+Detailed identity mismatch
+
+Replace string-based mismatch fields with a typed representation such as:
+
+pub enum TerminalSessionIdentityMismatch {
+    Project,
+    Runtime,
+    Session,
+    Operation,
+    ExecutionMode {
+        expected: RuntimeExecutionMode,
+        actual: RuntimeExecutionMode,
+    },
+    SupervisionMode {
+        expected: RuntimeSupervisionMode,
+        actual: RuntimeSupervisionMode,
+    },
+}
+
+For project, runtime, and session mismatches, retain typed expected and actual values only when those types are established non-secret identifiers.
+
+Do not use:
+
+format!("{:?}", ...)
+
+to produce stored error fields.
+
+Successful zero exit
+
+For:
+
+exit code 0
+
+and detailed state:
+
+Succeeded
+
+require:
+
+1. exact detailed-record identity agreement;
+2. valid root summary or successful rebuild;
+3. successful post-rebuild validation;
+4. lease still held through all checks.
+
+Only then return ForegroundDataOutcome.
+
+If root-summary reconciliation fails, return the typed reconciliation error.
+
+Do not discard it.
+
+Zero exit with Failed
+
+If the child exits zero but Core recorded Failed:
+
+1. validate detailed-record identity;
+2. validate or rebuild root summary;
+3. return typed ChildFailed.
+
+Do not rewrite the session to succeeded.
+
+Do not return ChildFailed if summary reconciliation failed; return the reconciliation error instead.
+
+Zero exit with Prepared or Running
+
+Transition to:
+
+Failed
+AbnormalTermination
+ZeroExitWithoutCompletion
+
+Use the SessionRecordV1 returned by the transition.
+
+Then:
+
+1. validate the returned failed record’s identity;
+2. validate or rebuild root summary against the returned record;
+3. return ZeroExitSessionIncomplete.
+
+If transition or summary reconciliation fails, preserve the typed nested error.
+
+Nonzero exit with Failed
+
+For an ordinary child failure already recorded by Core:
+
+1. validate detailed-record identity;
+2. validate or rebuild the root summary;
+3. return typed ChildFailed.
+
+Remove:
+
+let _ = validate_or_rebuild_summary_if_needed(...)
+
+The returned child failure must retain:
+
+* DataOperation;
+* source identifier;
+* SessionIdentity;
+* SessionFailureKind;
+* SessionFailureCode;
+* exit code.
+
+Do not convert these fields to strings before the CLI boundary.
+
+Nonzero exit with Prepared or Running
+
+Transition to:
+
+Failed
+AbnormalTermination
+NonzeroExitWithoutFailureRecord
+
+Use the returned failed record for root-summary reconciliation.
+
+Do not validate the old prepared or running record afterward.
+
+Return AbnormalTermination only after the resulting failed detailed record and root summary agree.
+
+Signaled or unknown abnormal termination
+
+Remove the current:
+
+if let Ok(record)
+
+behavior.
+
+Required order:
+
+load exact detailed record
+→ preserve typed load failure
+→ validate identity
+→ inspect state
+
+For Prepared or Running:
+
+transition to Failed
+→ use returned failed record
+→ validate/rebuild root summary
+→ return typed abnormal termination
+
+For Failed:
+
+preserve record
+→ validate/rebuild root summary
+→ return typed child/abnormal failure
+
+For Succeeded:
+
+preserve record
+→ validate/rebuild root summary
+→ return typed exit/session disagreement
+
+For Abandoned:
+
+do not mutate
+→ return typed exit/session disagreement
+
+Do not silently ignore record or summary errors.
+
+Wait recovery state machine
+
+Replace the current one-shot recovery with an explicit state machine.
+
+Representative states:
+
+enum WaitRecoveryState {
+    WaitFailed,
+    ChildAlreadyExited,
+    TerminationRequested,
+    TerminationObserved,
+    Reaped,
+    OwnershipUncertain,
+}
+
+Equivalent private organization is acceptable.
+
+Initial wait error
+
+For ErrorKind::Interrupted, retry ordinary waiting.
+
+For another error:
+
+1. retain the child;
+2. retain the lease;
+3. call try_wait() to determine whether the child already exited;
+4. if terminated, reconcile the observed status normally;
+5. if still running, request termination;
+6. wait for termination;
+7. retry on Interrupted;
+8. reconcile the durable state;
+9. release ownership only after reconciliation.
+
+Do not immediately call kill() before checking whether the child already exited.
+
+Kill behavior
+
+Child::kill() failure does not by itself prove the child remains alive.
+
+After kill failure:
+
+* call try_wait();
+* if termination is observed, continue to reap and reconcile;
+* if still running or state is unknown, preserve the typed uncertainty.
+
+Do not discard the kill error.
+
+Reap behavior
+
+After a successful termination request, continue waiting until:
+
+* termination is observed; or
+* a nonrecoverable operating-system error leaves ownership genuinely uncertain.
+
+Retry Interrupted.
+
+Do not add arbitrary sleeps.
+
+Do not perform a single reap attempt and immediately release ownership.
+
+Ownership-uncertain result
+
+If operating-system errors make it impossible to determine whether the child remains alive, return a distinct typed result:
+
+ForegroundDataExecutionError::ChildOwnershipUncertain(
+    ChildOwnershipUncertainError,
+)
+
+It must retain:
+
+* original wait error;
+* try_wait error, if any;
+* kill error, if any;
+* reap error, if any;
+* session-loading error, if any;
+* session-reconciliation error, if any.
+
+Before returning, perform every safe available child-state query and reconciliation action.
+
+Do not claim the child terminated.
+
+Do not claim the session was reconciled.
+
+Do not silently downgrade this to ProcessWaitRecovery.
+
+Because the public foreground API cannot safely return an owned live child to the CLI, document this as a fatal supervision failure requiring the next invocation’s stale-ownership reconciliation.
+
+Do not intentionally leak the child or lease.
+
+Wait recovery and durable session state
+
+After termination is confirmed:
+
+* load the exact session record;
+* preserve load or decoding failures;
+* validate identity;
+* transition Prepared or Running to failed;
+* preserve existing terminal state;
+* reconcile root summary;
+* return a typed wait-recovery error containing the final durable state.
+
+Add the session-load error to WaitRecoveryFailure.
+
+Do not use:
+
+if let Ok(record)
+
+for recovery.
+
+Remove unit-error helper
+
+Delete:
+
+validate_or_rebuild_summary_if_needed(...)
+    -> Result<(), ()>
+
+Replace all callers with the typed authoritative helper.
+
+Do not retain it as a compatibility wrapper.
+
+Remove discarded reconciliation results
+
+Remove every production pattern equivalent to:
+
+let _ = reconcile(...);
+let _ = validate(...);
+if let Ok(...) { ... }
+
+when failure affects session correctness.
+
+Best-effort behavior is acceptable only for explicitly nonessential cleanup, not for:
+
+* detailed session loading;
+* session transitions;
+* root-summary validation;
+* root-summary rebuilding;
+* child termination observation;
+* child reaping.
+
+Remove unreachable! from integrity adaptation
+
+Change the executable-integrity API so it returns a dedicated typed error directly.
+
+Preferred structure:
+
+pub enum ExecutableIntegrityError {
+    Changed {
+        path: PathBuf,
+        expected: ExecutableIdentity,
+        actual: ExecutableIdentity,
+    },
+    Inspection(
+        RuntimeArtifactHashError,
+    ),
+}
+
+Then:
+
+recheck_executable_integrity(...)
+    -> Result<(), ExecutableIntegrityError>
+
+The foreground preparation layer should wrap this type directly.
+
+Do not translate from a broad top-level execution error.
+
+Do not use unreachable!.
+
+Typed shared project discovery
+
+Refactor the shared helper:
+
+find_project_root(...)
+
+to return a typed error.
+
+Representative variants:
+
+pub enum ProjectRootDiscoveryError {
+    CurrentDirectoryMetadata {
+        path: PathBuf,
+        source: io::Error,
+    },
+    ParentTraversal,
+    ProjectNotFound,
+    NestedProjectConflict,
+}
+
+Equivalent organization is acceptable.
+
+Update existing source-create, source-build, and foreground callers to convert this typed error only at their public command boundary.
+
+Do not change discovery behavior.
+
+Typed shared project configuration
+
+Refactor:
+
+load_project_config(...)
+
+to return a typed error.
+
+Representative variants:
+
+pub enum ProjectConfigLoadError {
+    Read {
+        path: PathBuf,
+        source: io::Error,
+    },
+    DecodeToml {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    UnsupportedSchemaVersion {
+        actual: u32,
+    },
+    InvalidProjectIdentity(
+        RuntimeInvocationValueError,
+    ),
+    InvalidSourcesDirectory,
+    SourcesDirectoryTraversal,
+}
+
+Equivalent organization is acceptable.
+
+Remove:
+
+ProjectConfigurationError::Other(String)
+
+when no supported caller requires it.
+
+Do not change lexicon.toml syntax or schema.
+
+Error formatting constraints
+
+Diagnostics must not reveal:
+
+* source arguments;
+* invocation-envelope JSON;
+* runtime-context JSON;
+* environment contents;
+* arbitrary source errors;
+* request or response contents;
+* encoded native path bytes.
+
+Established non-secret identifiers may appear:
+
+* project;
+* source;
+* protocol;
+* operation;
+* session;
+* state;
+* revision;
+* failure kind;
+* failure code;
+* exit code;
+* Unix signal number.
+
+Source-only execution policy
+
+Do not run tests or validation commands.
+
+Existing test source may be adjusted only where required by changed production APIs.
+
+Do not create a broad new test suite in this milestone.
+
+Prohibited commands
+
+Do not run:
+
+cargo test
+cargo check
+cargo build
+cargo fmt
+cargo clippy
+cargo metadata
+rustc
+
+Do not execute:
+
+* the CLI data command;
+* generated runtimes;
+* source build;
+* workspace validation;
+* bundle/install automation.
+
+Use static source inspection only.
+
+Preserve existing behavior
+
+Do not change:
+
+* CLI commands or arguments;
+* source-argument OsString preservation;
+* project schema;
+* source schema;
+* managed runner templates;
+* managed runner package or binary names;
+* source handler signatures;
+* invocation-envelope JSON;
+* invocation argv layout;
+* runtime-context environment format;
+* runtime-information probe behavior;
+* probe limits or timeout;
+* HTTP or processing admission;
+* session schema except narrowly typed error additions;
+* bundle manifests;
+* executable hashing;
+* runtime verification;
+* staging;
+* bundle admission;
+* paired publication;
+* lexicon init;
+* lexicon source create;
+* lexicon source build;
+* MZA;
+* Protocol 1;
+* installer behavior.
+
+Explicit exclusions
+
+Do not implement:
+
+* HTTP request execution;
+* HttpAcquisitionContext::execute;
+* HTTP transport configuration;
+* redirects;
+* retries;
+* rate limiting;
+* authentication;
+* redaction;
+* raw transaction recording;
+* checkpoints;
+* SQLite processing;
+* background execution;
+* __operator-host;
+* process groups;
+* signal forwarding;
+* user cancellation;
+* lexicon build;
+* automatic migration;
+* cross-compilation;
+* MZA or installer changes.
+
+Completion report
+
+After implementation, replace current.md with a report containing:
+
+* files changed;
+* contract supervision boundary;
+* exact child/lease ownership invariant;
+* nonzero failed-session summary handling;
+* signaled-session load-error handling;
+* post-transition record usage;
+* typed root-summary validation error;
+* typed root-summary reconciliation error;
+* root-summary rebuild and mandatory revalidation;
+* detailed-record identity mismatch representation;
+* zero-exit reconciliation;
+* nonzero-exit reconciliation;
+* signaled reconciliation;
+* unknown abnormal reconciliation;
+* wait-recovery state machine;
+* try_wait behavior;
+* kill behavior;
+* reap behavior;
+* interrupted-wait behavior;
+* ownership-uncertain behavior;
+* wait-recovery session-load behavior;
+* confirmation that no session load, transition, summary validation, or summary rebuild error is discarded;
+* unit-error helper removal;
+* let _ = reconciliation removal;
+* integrity unreachable! removal;
+* executable-integrity typed error;
+* typed shared project-root discovery;
+* typed shared project-configuration loading;
+* free-form project/configuration fallback strings removed;
+* final foreground success guarantee;
+* confirmation that the supervisor lease remains held through all normal terminal reconciliation;
+* confirmation that no HTTP transport, raw recording, checkpoints, SQLite, background host, signal forwarding, or lexicon build was implemented;
+* existing test source adjusted only for API alignment, if applicable;
+* confirmation that no tests, checks, builds, formatting, linting, metadata commands, CLI execution, generated-runtime execution, workspace validation, or bundle/install pipeline were run.
+
+Then stop.
+
+Do not begin the Core HTTP transaction engine until this reconciliation closure is complete.
