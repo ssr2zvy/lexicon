@@ -5,12 +5,13 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use lexicon_core::processing::ProcessingRuntimeInformationV1;
-use lexicon_core::runtime::{RuntimeIdentity, RuntimeInformationV1};
+use lexicon_core::runtime::{OwnedRuntimeIdentity, RuntimeIdentity, RuntimeInformationV1};
 
 use super::runtime_probe::{
     AdmittedProcessingRuntimeInformation, AdmittedRuntimeInformation,
     ProcessingRuntimeProbeExecutionError, RuntimeProbeExecutionError,
-    probe_http_runtime_information, probe_processing_runtime_information,
+    probe_http_runtime_information, probe_http_runtime_information_owned,
+    probe_processing_runtime_information, probe_processing_runtime_information_owned,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,6 +338,25 @@ pub fn verify_http_runtime_candidate(
     )
 }
 
+pub fn verify_http_runtime_candidate_owned(
+    executable: &Path,
+    expected: &OwnedRuntimeIdentity,
+) -> Result<VerifiedHttpRuntime, HttpRuntimeVerificationError> {
+    let initial_hash = hash_runtime_executable(executable)
+        .map_err(HttpRuntimeVerificationError::InitialHash)?;
+    let information = probe_http_runtime_information_owned(executable, expected)
+        .map_err(HttpRuntimeVerificationError::Probe)?;
+    let final_hash = hash_runtime_executable(executable)
+        .map_err(HttpRuntimeVerificationError::FinalHash)?;
+    if initial_hash != final_hash {
+        return Err(HttpRuntimeVerificationError::ArtifactChangedDuringProbe {
+            before: initial_hash,
+            after: final_hash,
+        });
+    }
+    Ok(VerifiedHttpRuntime { artifact: final_hash, information })
+}
+
 pub(crate) fn verify_processing_runtime_candidate_with<FHash, FProbe>(
     executable: &Path,
     expected_identity: RuntimeIdentity,
@@ -383,6 +403,25 @@ pub fn verify_processing_runtime_candidate(
     )
 }
 
+pub fn verify_processing_runtime_candidate_owned(
+    executable: &Path,
+    expected: &OwnedRuntimeIdentity,
+) -> Result<VerifiedProcessingRuntime, ProcessingRuntimeVerificationError> {
+    let initial_hash = hash_runtime_executable(executable)
+        .map_err(ProcessingRuntimeVerificationError::InitialHash)?;
+    let information = probe_processing_runtime_information_owned(executable, expected)
+        .map_err(ProcessingRuntimeVerificationError::Probe)?;
+    let final_hash = hash_runtime_executable(executable)
+        .map_err(ProcessingRuntimeVerificationError::FinalHash)?;
+    if initial_hash != final_hash {
+        return Err(ProcessingRuntimeVerificationError::ArtifactChangedDuringProbe {
+            before: initial_hash,
+            after: final_hash,
+        });
+    }
+    Ok(VerifiedProcessingRuntime { artifact: final_hash, information })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -392,7 +431,7 @@ mod tests {
 
     use lexicon_core::processing::{ProcessingRuntimeInformationV1, ProcessingSourceContractV1};
     use lexicon_core::protocols::http::{HttpCapabilitySet, HttpSourceContractV1};
-    use lexicon_core::runtime::{RuntimeIdentity, RuntimeInformationV1};
+    use lexicon_core::runtime::{OwnedRuntimeIdentity, RuntimeIdentity, RuntimeInformationV1};
 
     use super::{
         HashedRuntimeArtifact, HttpRuntimeVerificationError, ProcessingRuntimeProbeExecutionError,

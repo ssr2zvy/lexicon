@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -11,6 +12,254 @@ pub use publication::{
     PublishedRuntimePair, RuntimePairCleanupWarning, RuntimePairPublicationError,
     publish_runtime_pair,
 };
+
+const MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1;
+const MAX_MANAGED_RUNNER_ERROR_DISPLAY_BYTES: usize = 4096;
+
+#[derive(Debug)]
+pub enum ManagedWorkspaceValidationError {
+    MissingManifest(String),
+    ManifestParseFailed(String),
+    InvalidMembers { expected: Vec<String>, found: Vec<String> },
+    MissingImplementation(String),
+    MissingRunner(String),
+    MissingLibrarySource(String),
+    MissingRunnerSource(String),
+    ImplNameMismatch { expected: String, found: String },
+    RunnerNameMismatch { expected: String, found: String },
+    BinaryNameMismatch { expected: String, found: String },
+    InvalidRunnerTemplate(String),
+    LegacyLayout(String),
+    ExtraWorkspaceMembers(Vec<String>),
+}
+
+impl fmt::Display for ManagedWorkspaceValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingManifest(message)
+            | Self::ManifestParseFailed(message)
+            | Self::InvalidRunnerTemplate(message)
+            | Self::LegacyLayout(message) => formatter.write_str(message),
+            Self::InvalidMembers { expected, found } => write!(
+                formatter,
+                "managed workspace has incorrect members: expected {:?}, found {:?}",
+                expected,
+                found
+            ),
+            Self::MissingImplementation(operation) => {
+                write!(formatter, "missing managed {operation} implementation manifest")
+            }
+            Self::MissingRunner(operation) => {
+                write!(formatter, "missing managed {operation} runner manifest")
+            }
+            Self::MissingLibrarySource(operation) => {
+                write!(formatter, "missing managed {operation} implementation library")
+            }
+            Self::MissingRunnerSource(operation) => {
+                write!(formatter, "missing managed {operation} runner source")
+            }
+            Self::ImplNameMismatch { expected, found } => write!(
+                formatter,
+                "managed implementation package name mismatch: expected '{expected}', found '{found}'"
+            ),
+            Self::RunnerNameMismatch { expected, found } => write!(
+                formatter,
+                "managed runner package name mismatch: expected '{expected}', found '{found}'"
+            ),
+            Self::BinaryNameMismatch { expected, found } => write!(
+                formatter,
+                "managed runner binary name mismatch: expected '{expected}', found '{found}'"
+            ),
+            Self::ExtraWorkspaceMembers(members) => write!(
+                formatter,
+                "managed workspace contains unexpected extra members: {:?}",
+                members
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ManagedWorkspaceValidationError {}
+
+#[derive(Debug)]
+pub enum ManagedWorkspaceMetadataError {
+    CommandFailed(String),
+    OutputInvalid(String),
+    PackageNotFound { name: String },
+}
+
+impl fmt::Display for ManagedWorkspaceMetadataError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CommandFailed(message) | Self::OutputInvalid(message) => {
+                formatter.write_str(message)
+            }
+            Self::PackageNotFound { name } => {
+                write!(formatter, "workspace metadata package not found: {name}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManagedWorkspaceMetadataError {}
+
+#[derive(Debug)]
+pub enum ManagedRunnerArtifactSelectionError {
+    MetadataCommand(String),
+    MetadataOutput(String),
+    PackageNotFound { name: String },
+    NoMatchingArtifact { package_id: String, binary_name: String },
+    MultipleMatchingArtifacts { package_id: String, binary_name: String },
+    MissingExecutablePath { package_id: String, binary_name: String },
+    MalformedJsonLine { line: String },
+}
+
+impl fmt::Display for ManagedRunnerArtifactSelectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MetadataCommand(message) | Self::MetadataOutput(message) => {
+                formatter.write_str(message)
+            }
+            Self::PackageNotFound { name } => {
+                write!(formatter, "workspace package not found for managed runner build: {name}")
+            }
+            Self::NoMatchingArtifact {
+                package_id,
+                binary_name,
+            } => write!(
+                formatter,
+                "no matching managed runner artifact for package '{package_id}' binary '{binary_name}'"
+            ),
+            Self::MultipleMatchingArtifacts {
+                package_id,
+                binary_name,
+            } => write!(
+                formatter,
+                "multiple managed runner artifacts matched package '{package_id}' binary '{binary_name}'"
+            ),
+            Self::MissingExecutablePath {
+                package_id,
+                binary_name,
+            } => write!(
+                formatter,
+                "managed runner artifact for package '{package_id}' binary '{binary_name}' did not include an executable path"
+            ),
+            Self::MalformedJsonLine { line } => {
+                write!(formatter, "malformed cargo JSON line: {line}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManagedRunnerArtifactSelectionError {}
+
+#[derive(Debug)]
+pub enum ManagedRunnerBuildError {
+    ArtifactSelection(ManagedRunnerArtifactSelectionError),
+    CommandFailed { operation: String, stderr: Vec<u8> },
+    ExecutableNotFile(PathBuf),
+}
+
+fn managed_runner_stderr_excerpt(stderr: &[u8]) -> String {
+    let retained = &stderr[..stderr.len().min(MAX_MANAGED_RUNNER_ERROR_DISPLAY_BYTES)];
+    let mut message = String::from_utf8_lossy(retained).into_owned();
+    if stderr.len() > MAX_MANAGED_RUNNER_ERROR_DISPLAY_BYTES {
+        message.push_str("… [truncated]");
+    }
+    message
+}
+
+impl fmt::Display for ManagedRunnerBuildError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ArtifactSelection(error) => write!(formatter, "managed runner artifact selection failed: {error}"),
+            Self::CommandFailed { operation, stderr } => {
+                let rendered = managed_runner_stderr_excerpt(stderr);
+                if rendered.trim().is_empty() {
+                    write!(formatter, "{operation} managed runner build failed")
+                } else {
+                    write!(formatter, "{operation} managed runner build failed: {rendered}")
+                }
+            }
+            Self::ExecutableNotFile(path) => write!(
+                formatter,
+                "managed runner build did not yield a regular executable file: {}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ManagedRunnerBuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ArtifactSelection(error) => Some(error),
+            Self::CommandFailed { .. } | Self::ExecutableNotFile(_) => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ManagedSourceBuildError {
+    WorkspaceValidation(ManagedWorkspaceValidationError),
+    Metadata(ManagedWorkspaceMetadataError),
+    CargoBuild(ManagedRunnerBuildError),
+    AcquisitionVerification(crate::build::HttpRuntimeVerificationError),
+    ProcessingVerification(crate::build::ProcessingRuntimeVerificationError),
+    AcquisitionStaging(crate::build::RuntimeBundleStagingError),
+    ProcessingStaging(crate::build::ProcessingRuntimeBundleStagingError),
+    Publication(crate::publication::RuntimePairPublicationError),
+    MissingLockfile(PathBuf),
+    LockfileModified(PathBuf),
+}
+
+impl fmt::Display for ManagedSourceBuildError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WorkspaceValidation(error) => write!(formatter, "managed workspace validation failed: {error}"),
+            Self::Metadata(error) => write!(formatter, "managed workspace metadata failed: {error}"),
+            Self::CargoBuild(error) => write!(formatter, "managed runner build failed: {error}"),
+            Self::AcquisitionVerification(error) => write!(formatter, "HTTP runtime verification failed: {error}"),
+            Self::ProcessingVerification(error) => write!(formatter, "processing runtime verification failed: {error}"),
+            Self::AcquisitionStaging(error) => write!(formatter, "HTTP bundle staging failed: {error}"),
+            Self::ProcessingStaging(error) => write!(formatter, "processing bundle staging failed: {error}"),
+            Self::Publication(error) => write!(formatter, "paired runtime publication failed: {error}"),
+            Self::MissingLockfile(path) => {
+                write!(formatter, "missing Cargo.lock for managed workspace: {}", path.display())
+            }
+            Self::LockfileModified(path) => {
+                write!(formatter, "managed workspace lockfile changed during build: {}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManagedSourceBuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::WorkspaceValidation(error) => Some(error),
+            Self::Metadata(error) => Some(error),
+            Self::CargoBuild(error) => Some(error),
+            Self::AcquisitionVerification(error) => Some(error),
+            Self::ProcessingVerification(error) => Some(error),
+            Self::AcquisitionStaging(error) => Some(error),
+            Self::ProcessingStaging(error) => Some(error),
+            Self::Publication(error) => Some(error),
+            Self::MissingLockfile(_) | Self::LockfileModified(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadataDocument {
+    packages: Vec<CargoMetadataPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadataPackage {
+    id: String,
+    name: String,
+}
 
 #[derive(Debug, Deserialize)]
 struct LexiconProjectConfig {
@@ -71,7 +320,7 @@ pub mod commands {
     }
 
     pub fn source_build(source_name: &str, protocol: &str) -> Result<SourceBuildResult, String> {
-        build_source(source_name, protocol)
+        build_source(source_name, protocol).map_err(|error| error.to_string())
     }
 }
 
@@ -382,72 +631,110 @@ fn generate_source_scaffold(
     Ok(commands::SourceCreateResult {
         source_name: source_name.to_string(),
         protocol: protocol.to_string(),
-        protocol_dir: source_dir.join(protocol),
+        protocol_dir,
         created_files,
     })
 }
 
-fn build_source(source_name: &str, protocol: &str) -> Result<commands::SourceBuildResult, String> {
-    validate_source_name(source_name)?;
-    validate_protocol(protocol)?;
+fn build_source(
+    source_name: &str,
+    protocol: &str,
+) -> Result<commands::SourceBuildResult, ManagedSourceBuildError> {
+    validate_source_name(source_name).map_err(|error| {
+        ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
+            error,
+        ))
+    })?;
+    validate_protocol(protocol).map_err(|error| {
+        ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
+            error,
+        ))
+    })?;
 
-    let project_root = find_project_root(
-        &env::current_dir()
-            .map_err(|error| format!("failed to determine current directory: {error}"))?,
-    )?;
-    let sources_root = configured_sources_directory(&project_root)?;
+    let current_dir = env::current_dir().map_err(|error| {
+        ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
+            format!("failed to determine current directory: {error}"),
+        ))
+    })?;
+    let project_root = find_project_root(&current_dir).map_err(|error| {
+        ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
+            error,
+        ))
+    })?;
+    let sources_root = configured_sources_directory(&project_root).map_err(|error| {
+        ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
+            error,
+        ))
+    })?;
     let source_root = sources_root.join(source_name);
     let protocol_root = source_root.join(protocol);
 
-    if !source_root.exists() {
-        return Err(format!("source '{}' does not exist", source_name));
-    }
     if !source_root.is_dir() {
-        return Err(format!("source '{}' does not exist", source_name));
-    }
-    if !protocol_root.exists() {
-        return Err(format!(
-            "protocol '{}' does not exist for source '{}'",
-            protocol, source_name
+        return Err(ManagedSourceBuildError::WorkspaceValidation(
+            ManagedWorkspaceValidationError::LegacyLayout(format!(
+                "source '{}' does not exist",
+                source_name
+            )),
         ));
     }
     if !protocol_root.is_dir() {
-        return Err(format!(
-            "protocol '{}' does not exist for source '{}'",
-            protocol, source_name
+        return Err(ManagedSourceBuildError::WorkspaceValidation(
+            ManagedWorkspaceValidationError::LegacyLayout(format!(
+                "protocol '{}' does not exist for source '{}'",
+                protocol, source_name
+            )),
         ));
     }
 
     let source_toml = protocol_root.join("source.toml");
-    let _source_doc = load_source_metadata(&source_toml, source_name, protocol)?;
+    let _source_doc = load_source_metadata(&source_toml, source_name, protocol).map_err(|error| {
+        ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
+            error,
+        ))
+    })?;
 
     let get_workspace = protocol_root.join("get-raw-data");
     let process_workspace = protocol_root.join("process-data");
     let get_workspace_manifest = get_workspace.join("Cargo.toml");
     let process_workspace_manifest = process_workspace.join("Cargo.toml");
     if !get_workspace_manifest.is_file() {
-        return Err("missing managed acquisition workspace manifest".to_owned());
+        return Err(ManagedSourceBuildError::WorkspaceValidation(
+            ManagedWorkspaceValidationError::MissingManifest(
+                "missing managed acquisition workspace manifest".to_owned(),
+            ),
+        ));
     }
     if !process_workspace_manifest.is_file() {
-        return Err("missing managed processing workspace manifest".to_owned());
+        return Err(ManagedSourceBuildError::WorkspaceValidation(
+            ManagedWorkspaceValidationError::MissingManifest(
+                "missing managed processing workspace manifest".to_owned(),
+            ),
+        ));
     }
 
     validate_managed_workspace_layout(
         &get_workspace,
-        &source_name,
+        source_name,
         "get-raw-data",
         &format!("{source_name}-get-raw-data"),
         &format!("{source_name}-get-raw-data-runner"),
         &format!("{source_name}-get-raw-data"),
-    )?;
+    )
+    .map_err(ManagedSourceBuildError::WorkspaceValidation)?;
     validate_managed_workspace_layout(
         &process_workspace,
-        &source_name,
+        source_name,
         "process-data",
         &format!("{source_name}-process-data"),
         &format!("{source_name}-process-data-runner"),
         &format!("{source_name}-process-data"),
-    )?;
+    )
+    .map_err(ManagedSourceBuildError::WorkspaceValidation)?;
+
+    let get_lockfile = get_workspace.join("Cargo.lock");
+    let process_lockfile = process_workspace.join("Cargo.lock");
+    let get_lockfile_before = read_lockfile_snapshot(&get_lockfile)?;
+    let process_lockfile_before = read_lockfile_snapshot(&process_lockfile)?;
 
     let get_runner = build_managed_runner(
         &get_workspace_manifest,
@@ -462,48 +749,64 @@ fn build_source(source_name: &str, protocol: &str) -> Result<commands::SourceBui
         "process-data",
     )?;
 
-    let get_source_name = Box::leak(source_name.to_string().into_boxed_str());
-    let process_source_name = Box::leak(source_name.to_string().into_boxed_str());
-    let get_expected_identity =
-        lexicon_core::runtime::RuntimeIdentity::http_acquisition(get_source_name, lexicon_core::protocols::http::HttpSourceContractV1::CONTRACT_VERSION);
-    let process_expected_identity =
-        lexicon_core::runtime::RuntimeIdentity::http_processing(process_source_name, lexicon_core::processing::ProcessingSourceContractV1::CONTRACT_VERSION);
+    ensure_lockfile_unchanged(&get_lockfile, &get_lockfile_before)?;
+    ensure_lockfile_unchanged(&process_lockfile, &process_lockfile_before)?;
 
-    let get_verified = crate::build::verify_http_runtime_candidate(&get_runner, get_expected_identity)
-        .map_err(|error| format!("HTTP runtime verification failed: {error}"))?;
-    let process_verified =
-        crate::build::verify_processing_runtime_candidate(&process_runner, process_expected_identity)
-            .map_err(|error| format!("processing runtime verification failed: {error}"))?;
+    let get_expected_identity = lexicon_core::runtime::OwnedRuntimeIdentity::http_acquisition(
+        source_name,
+        lexicon_core::protocols::http::HttpSourceContractV1::CONTRACT_VERSION,
+    );
+    let process_expected_identity = lexicon_core::runtime::OwnedRuntimeIdentity::http_processing(
+        source_name,
+        lexicon_core::processing::ProcessingSourceContractV1::CONTRACT_VERSION,
+    );
+
+    let get_verified = crate::build::verify_http_runtime_candidate_owned(
+        get_runner.executable(),
+        &get_expected_identity,
+    )
+    .map_err(ManagedSourceBuildError::AcquisitionVerification)?;
+    let process_verified = crate::build::verify_processing_runtime_candidate_owned(
+        process_runner.executable(),
+        &process_expected_identity,
+    )
+    .map_err(ManagedSourceBuildError::ProcessingVerification)?;
 
     let get_runtime_dir = protocol_root.join("get-raw-data/runtime");
     let process_runtime_dir = protocol_root.join("process-data/runtime");
-    fs::create_dir_all(&get_runtime_dir)
-        .map_err(|error| format!("failed to create {}: {error}", get_runtime_dir.display()))?;
-    fs::create_dir_all(&process_runtime_dir)
-        .map_err(|error| format!("failed to create {}: {error}", process_runtime_dir.display()))?;
+    fs::create_dir_all(&get_runtime_dir).map_err(|error| {
+        ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
+            format!("failed to create {}: {error}", get_runtime_dir.display()),
+        ))
+    })?;
+    fs::create_dir_all(&process_runtime_dir).map_err(|error| {
+        ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
+            format!("failed to create {}: {error}", process_runtime_dir.display()),
+        ))
+    })?;
 
     let get_bundle = crate::build::stage_verified_http_runtime_bundle(
         &get_runtime_dir,
         &format!("{source_name}-get-raw-data"),
         &get_verified,
     )
-    .map_err(|error| format!("HTTP bundle staging failed: {error}"))?;
+    .map_err(ManagedSourceBuildError::AcquisitionStaging)?;
     let process_bundle = crate::build::stage_verified_processing_runtime_bundle(
         &process_runtime_dir,
         &format!("{source_name}-process-data"),
         &process_verified,
     )
-    .map_err(|error| format!("processing bundle staging failed: {error}"))?;
+    .map_err(ManagedSourceBuildError::ProcessingStaging)?;
 
     let published = crate::publication::publish_runtime_pair(
         get_bundle,
         process_bundle,
         &get_runtime_dir,
         &process_runtime_dir,
-        get_expected_identity,
-        process_expected_identity,
+        get_verified.information().identity(),
+        process_verified.information().identity(),
     )
-    .map_err(|error| format!("paired runtime publication failed: {error}"))?;
+    .map_err(ManagedSourceBuildError::Publication)?;
 
     Ok(commands::SourceBuildResult {
         source_name: source_name.to_string(),
@@ -539,90 +842,89 @@ fn load_source_metadata(
     Ok(parsed)
 }
 
-pub struct BuiltExecutable {
-    pub path: PathBuf,
-    pub _target_dir: tempfile::TempDir,
+pub struct BuiltManagedRunner {
+    executable: PathBuf,
+    #[allow(dead_code)]
+    target_directory: tempfile::TempDir,
 }
 
-pub fn build_single_crate(
-    manifest_path: &Path,
-    operation_name: &str,
-) -> Result<BuiltExecutable, String> {
-    let manifest = manifest_path
-        .canonicalize()
-        .map_err(|error| format!("failed to resolve {}: {error}", manifest_path.display()))?;
-    ensure_lockfile_for_manifest(&manifest)?;
-
-    let tempdir = tempfile::Builder::new()
-        .prefix(&format!("lexicon-{operation_name}-build-"))
-        .tempdir()
-        .map_err(|error| format!("failed to create temporary build directory: {error}"))?;
-    let target_dir = tempdir.path().to_path_buf();
-
-    let output = Command::new("cargo")
-        .arg("build")
-        .arg("--release")
-        .arg("--locked")
-        .arg("--manifest-path")
-        .arg(&manifest)
-        .arg("--target-dir")
-        .arg(&target_dir)
-        .arg("--message-format=json-render-diagnostics")
-        .output()
-        .map_err(|_| {
-            "[lexicon] ERROR: source build requires Cargo and a Rust development toolchain"
-                .to_owned()
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.trim().is_empty() {
-            eprintln!("{stderr}");
-        }
-        return Err(format!("{} implementation build failed", operation_name));
+impl BuiltManagedRunner {
+    pub fn executable(&self) -> &Path {
+        &self.executable
     }
+}
 
-    let executable = select_executable_from_cargo_json(
-        &String::from_utf8_lossy(&output.stdout),
-        operation_name,
-    )?;
-    if !executable.is_file() {
-        return Err(format!("{} implementation build failed", operation_name));
+fn read_lockfile_snapshot(lockfile: &Path) -> Result<Vec<u8>, ManagedSourceBuildError> {
+    if !lockfile.is_file() {
+        return Err(ManagedSourceBuildError::MissingLockfile(lockfile.to_path_buf()));
     }
-
-    Ok(BuiltExecutable {
-        path: executable,
-        _target_dir: tempdir,
+    fs::read(lockfile).map_err(|error| {
+        ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
+            format!("failed to read {}: {error}", lockfile.display()),
+        ))
     })
 }
 
-fn ensure_lockfile_for_manifest(manifest_path: &Path) -> Result<(), String> {
-    let status = Command::new("cargo")
-        .arg("generate-lockfile")
-        .arg("--manifest-path")
-        .arg(manifest_path)
-        .status()
-        .map_err(|error| {
-            format!(
-                "failed to generate lockfile for {}: {error}",
-                manifest_path.display()
-            )
-        })?;
-
-    if !status.success() {
-        return Err(format!(
-            "failed to generate Cargo lockfile for {}",
-            manifest_path.display()
-        ));
+fn ensure_lockfile_unchanged(lockfile: &Path, original: &[u8]) -> Result<(), ManagedSourceBuildError> {
+    let current = read_lockfile_snapshot(lockfile)?;
+    if current != original {
+        return Err(ManagedSourceBuildError::LockfileModified(lockfile.to_path_buf()));
     }
     Ok(())
 }
 
-pub fn select_executable_from_cargo_json(
+fn resolve_managed_package_id(
+    workspace_manifest: &Path,
+    package_name: &str,
+) -> Result<String, ManagedRunnerArtifactSelectionError> {
+    let output = Command::new("cargo")
+        .arg("metadata")
+        .arg("--manifest-path")
+        .arg(workspace_manifest)
+        .arg("--locked")
+        .arg("--no-deps")
+        .arg("--format-version")
+        .arg("1")
+        .output()
+        .map_err(|error| {
+            ManagedRunnerArtifactSelectionError::MetadataCommand(format!(
+                "failed to run cargo metadata for {}: {error}",
+                workspace_manifest.display()
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(ManagedRunnerArtifactSelectionError::MetadataCommand(format!(
+            "cargo metadata failed for {}: {}",
+            workspace_manifest.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let metadata: CargoMetadataDocument = serde_json::from_slice(&output.stdout).map_err(|error| {
+        ManagedRunnerArtifactSelectionError::MetadataOutput(format!(
+            "failed to parse cargo metadata for {}: {error}",
+            workspace_manifest.display()
+        ))
+    })?;
+
+    metadata
+        .packages
+        .into_iter()
+        .find(|package| package.name == package_name)
+        .map(|package| package.id)
+        .ok_or_else(|| ManagedRunnerArtifactSelectionError::PackageNotFound {
+            name: package_name.to_owned(),
+        })
+}
+
+fn select_artifact_from_cargo_output(
     cargo_output: &str,
-    operation_name: &str,
-) -> Result<PathBuf, String> {
-    let mut candidates = Vec::new();
+    expected_package_id: &str,
+    expected_binary_name: &str,
+) -> Result<PathBuf, ManagedRunnerArtifactSelectionError> {
+    let mut matches = Vec::new();
+    let mut missing_executable_path = false;
 
     for line in cargo_output.lines() {
         let trimmed = line.trim();
@@ -633,98 +935,58 @@ pub fn select_executable_from_cargo_json(
         let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
-
         if value.get("reason").and_then(|item| item.as_str()) != Some("compiler-artifact") {
+            continue;
+        }
+        if value.get("package_id").and_then(|item| item.as_str()) != Some(expected_package_id) {
             continue;
         }
 
         let target = value.get("target").cloned().unwrap_or_default();
-        let kinds = target
+        let is_bin = target
             .get("kind")
             .and_then(|item| item.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let is_bin = kinds.iter().any(|item| item.as_str() == Some("bin"));
-        let is_lib = kinds.iter().any(|item| item.as_str() == Some("lib"));
-        if !is_bin || is_lib {
+            .is_some_and(|kinds| kinds.iter().any(|item| item.as_str() == Some("bin")));
+        if !is_bin {
+            continue;
+        }
+        if target.get("name").and_then(|item| item.as_str()) != Some(expected_binary_name) {
             continue;
         }
 
-        let target_name = target
-            .get("name")
-            .and_then(|item| item.as_str())
-            .unwrap_or("");
-        let package_id = value
-            .get("package_id")
-            .and_then(|item| item.as_str())
-            .unwrap_or("");
-        let matches_requested =
-            target_name.contains(operation_name) || package_id.contains(operation_name);
-        if !matches_requested {
-            continue;
-        }
-
-        let executable = value.get("executable").and_then(|item| item.as_str());
-        let Some(path) = executable else {
-            return Err(format!("{} implementation build failed", operation_name));
-        };
-        let candidate = PathBuf::from(path);
-        if candidate.file_name().is_some() && !candidate.ends_with(".d") {
-            candidates.push(candidate);
+        match value.get("executable").and_then(|item| item.as_str()) {
+            Some(path) => matches.push(PathBuf::from(path)),
+            None => missing_executable_path = true,
         }
     }
 
-    match candidates.len() {
-        0 => Err(format!("{} implementation build failed", operation_name)),
-        1 => Ok(candidates[0].clone()),
-        _ => Err(format!(
-            "{} implementation build failed: multiple executable artifacts matched {}",
-            operation_name, operation_name
-        )),
+    match matches.len() {
+        0 if missing_executable_path => Err(
+            ManagedRunnerArtifactSelectionError::MissingExecutablePath {
+                package_id: expected_package_id.to_owned(),
+                binary_name: expected_binary_name.to_owned(),
+            },
+        ),
+        0 => Err(ManagedRunnerArtifactSelectionError::NoMatchingArtifact {
+            package_id: expected_package_id.to_owned(),
+            binary_name: expected_binary_name.to_owned(),
+        }),
+        1 => Ok(matches.remove(0)),
+        _ => Err(ManagedRunnerArtifactSelectionError::MultipleMatchingArtifacts {
+            package_id: expected_package_id.to_owned(),
+            binary_name: expected_binary_name.to_owned(),
+        }),
     }
 }
 
-pub fn stage_runtime_file(
-    runtime_dir: &Path,
-    source_executable: &Path,
-    operation_name: &str,
-) -> Result<PathBuf, String> {
-    let executable_name = source_executable
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| {
-            source_executable
-                .file_name()
-                .and_then(|name| name.to_str())
-                .filter(|name| !name.is_empty())
-                .unwrap_or(operation_name)
-        });
-
-    let staging_file = tempfile::Builder::new()
-        .prefix(&format!(".{executable_name}.staging-"))
-        .tempfile_in(runtime_dir)
-        .map_err(|error| {
-            format!(
-                "failed to create staging file in {}: {error}",
-                runtime_dir.display()
-            )
-        })?;
-    let staged = staging_file.path().to_path_buf();
-
-    fs::copy(source_executable, &staged)
-        .map_err(|error| format!("failed to stage {}: {error}", runtime_dir.display()))?;
-    let metadata = fs::metadata(&staged)
-        .map_err(|error| format!("failed to inspect staged {}: {error}", staged.display()))?;
-    if !metadata.is_file() {
-        let _ = fs::remove_file(&staged);
-        return Err(format!("{} implementation build failed", operation_name));
-    }
-
-    let _ = staging_file
-        .persist(&staged)
-        .map_err(|error| format!("failed to persist staged {}: {error}", staged.display()));
-    Ok(staged)
+pub fn select_managed_runner_executable(
+    cargo_output: &str,
+    workspace_manifest: &Path,
+    expected_package_name: &str,
+    expected_binary_name: &str,
+) -> Result<PathBuf, ManagedRunnerArtifactSelectionError> {
+    let package_id = resolve_managed_package_id(workspace_manifest, expected_package_name)?;
+    select_artifact_from_cargo_output(cargo_output, &package_id, expected_binary_name)
 }
 
 pub fn move_to_backup(path: &Path) -> Result<PathBuf, String> {
@@ -740,79 +1002,6 @@ pub fn move_to_backup(path: &Path) -> Result<PathBuf, String> {
     fs::rename(path, &backup)
         .map_err(|error| format!("failed to create backup for {}: {error}", path.display()))?;
     Ok(backup)
-}
-
-pub fn publish_runtime_transaction<F, R>(
-    get_staged: &Path,
-    process_staged: &Path,
-    get_final: &Path,
-    process_final: &Path,
-    get_backup: Option<&PathBuf>,
-    process_backup: Option<&PathBuf>,
-    rename: F,
-    remove: R,
-) -> Result<(), String>
-where
-    F: Fn(&Path, &Path) -> std::io::Result<()>,
-    R: Fn(&Path) -> std::io::Result<()>,
-{
-    if let Err(error) = rename(get_staged, get_final) {
-        restore_runtime_after_failure(
-            get_final,
-            get_backup,
-            get_staged,
-            process_staged,
-            process_final,
-            process_backup,
-            &remove,
-        )?;
-        return Err(format!(
-            "source runtime publication failed; previous runtimes were restored: {error}"
-        ));
-    }
-    if let Err(error) = rename(process_staged, process_final) {
-        let _ = remove(get_final);
-        restore_runtime_after_failure(
-            get_final,
-            get_backup,
-            get_staged,
-            process_staged,
-            process_final,
-            process_backup,
-            &remove,
-        )?;
-        return Err(format!(
-            "source runtime publication failed; previous runtimes were restored: {error}"
-        ));
-    }
-    Ok(())
-}
-
-fn restore_runtime_after_failure<F>(
-    get_final: &Path,
-    get_backup: Option<&PathBuf>,
-    get_staged: &Path,
-    process_staged: &Path,
-    process_final: &Path,
-    process_backup: Option<&PathBuf>,
-    remove: &F,
-) -> Result<(), String>
-where
-    F: Fn(&Path) -> std::io::Result<()>,
-{
-    let _ = remove(get_staged);
-    let _ = remove(process_staged);
-    let _ = remove(get_final);
-    let _ = remove(process_final);
-    if let Some(path) = get_backup {
-        fs::rename(path, get_final)
-            .map_err(|error| format!("failed to restore get runtime: {error}"))?;
-    }
-    if let Some(path) = process_backup {
-        fs::rename(path, process_final)
-            .map_err(|error| format!("failed to restore process runtime: {error}"))?;
-    }
-    Ok(())
 }
 
 fn finalize_source_staging(staging: tempfile::TempDir, source_dir: &Path) -> Result<(), String> {
@@ -1212,20 +1401,6 @@ fn format_workspace_cargo_toml(operation_name: &str, members: &[&str]) -> String
     out
 }
 
-fn format_impl_cargo_toml(package_name: &str) -> String {
-    let mut out = String::new();
-    out.push_str("[package]\n");
-    out.push_str(&format!("name = \"{package_name}\"\n"));
-    out.push_str("version = \"0.1.0\"\n");
-    out.push_str("edition = \"2024\"\n\n");
-    out.push_str("[dependencies]\n");
-    out.push_str("lexicon-framework-core = {\n");
-    out.push_str("    git = \"https://github.com/ssr2zvy/lexicon\",\n");
-    out.push_str("    tag = \"v0.1.2\"\n");
-    out.push_str("}\n");
-    out
-}
-
 fn format_implementation_cargo_toml(package_name: &str) -> String {
     let mut out = String::new();
     out.push_str("[package]\n");
@@ -1254,30 +1429,6 @@ fn format_runner_cargo_toml(package_name: &str, binary_name: &str, implementatio
     out
 }
 
-fn to_pascal_case(source_name: &str) -> String {
-    let mut out = String::new();
-    let mut capitalize_next = true;
-
-    for ch in source_name.chars() {
-        if ch == '-' || ch == '_' || ch == ' ' {
-            capitalize_next = true;
-            continue;
-        }
-        if capitalize_next {
-            out.extend(ch.to_uppercase());
-            capitalize_next = false;
-        } else {
-            out.extend(ch.to_lowercase());
-        }
-    }
-
-    if out.is_empty() {
-        "Source".to_string()
-    } else {
-        out
-    }
-}
-
 fn format_http_implementation_library(source_name: &str) -> String {
     let _ = source_name;
     let mut out = String::new();
@@ -1295,33 +1446,6 @@ fn format_http_implementation_library(source_name: &str) -> String {
     out.push_str(") -> AcquisitionResult<()> {\n");
     out.push_str("    let _ = (context, arguments);\n");
     out.push_str("    todo!(\"implement HTTP acquisition\")\n");
-    out.push_str("}\n");
-    out
-}
-
-fn format_get_raw_data_main(source_name: &str) -> String {
-    let source_type = to_pascal_case(source_name);
-    let mut out = String::new();
-    out.push_str("use lexicon_framework_core::{\n");
-    out.push_str("    run_http_source,\n");
-    out.push_str("    HttpAcquisition,\n");
-    out.push_str("    HttpAcquisitionContext,\n");
-    out.push_str("};\n\n");
-    out.push_str(&format!("struct {source_type};\n\n"));
-    out.push_str(&format!("impl HttpAcquisition for {source_type} {{\n"));
-    out.push_str(&format!(
-        "    fn acquire(&self, context: &mut HttpAcquisitionContext) -> Result<(), String> {{\n"
-    ));
-    out.push_str("        let _ = context;\n");
-    out.push_str("        todo!(\"implement HTTP acquisition\")\n");
-    out.push_str("    }\n");
-    out.push_str("}\n\n");
-    out.push_str("fn main() {\n");
-    out.push_str(&format!("    let source = {source_type};\n"));
-    out.push_str("    if let Err(error) = run_http_source(source) {\n");
-    out.push_str("        eprintln!(\"[lexicon] ERROR: {error}\");\n");
-    out.push_str("        std::process::exit(1);\n");
-    out.push_str("    }\n");
     out.push_str("}\n");
     out
 }
@@ -1349,80 +1473,182 @@ fn format_processing_implementation_library(source_name: &str) -> String {
 
 fn format_http_managed_runner_main(source_name: &str) -> String {
     let mut out = String::new();
-    out.push_str("use std::env;\n");
-    out.push_str("use std::ffi::OsString;\n");
-    out.push_str("use std::io::{self, Write};\n");
-    out.push_str("use std::process::ExitCode;\n\n");
-    out.push_str("use lexicon_core::http::{\n");
-    out.push_str("    HttpAcquisitionContext,\n");
-    out.push_str("    HttpCapabilitySet,\n");
-    out.push_str("    HttpSourceContractV1,\n");
-    out.push_str("    RuntimeInformationProbeOutcome,\n");
-    out.push_str("};\n");
-    out.push_str("use lexicon_core::protocols::http::runner::{run_http_runtime_invocation, try_write_runtime_information_probe};\n");
-    out.push_str("use lexicon_core::runtime::RuntimeIdentity;\n\n");
-    out.push_str("use source_implementation::SOURCE;\n\n");
-    out.push_str(&format!("const IDENTITY: RuntimeIdentity = RuntimeIdentity::http_acquisition(\"{source_name}\", HttpSourceContractV1::CONTRACT_VERSION);\n\n"));
-    out.push_str("fn main() -> ExitCode {\n");
-    out.push_str("    let arguments: Vec<OsString> = env::args_os().skip(1).collect();\n");
-    out.push_str("    let mut stderr = io::stderr().lock();\n");
-    out.push_str("    match try_write_runtime_information_probe(IDENTITY, &SOURCE, HttpCapabilitySet::empty(), &arguments, &mut stderr) {\n");
-    out.push_str("        Ok(RuntimeInformationProbeOutcome::Written) => return ExitCode::SUCCESS,\n");
-    out.push_str("        Ok(RuntimeInformationProbeOutcome::NotRequested) => {}\n");
-    out.push_str("        Err(error) => {\n");
-    out.push_str("            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");\n");
-    out.push_str("            return ExitCode::FAILURE;\n");
-    out.push_str("        }\n");
-    out.push_str("    }\n\n");
-    out.push_str("    let mut context = match HttpAcquisitionContext::from_env() {\n");
-    out.push_str("        Ok(context) => context,\n");
-    out.push_str("        Err(error) => {\n");
-    out.push_str("            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");\n");
-    out.push_str("            return ExitCode::FAILURE;\n");
-    out.push_str("        }\n");
-    out.push_str("    };\n\n");
-    out.push_str("    if let Err(error) = run_http_runtime_invocation(&arguments, IDENTITY, &SOURCE, HttpCapabilitySet::empty(), &mut context) {\n");
-    out.push_str("        let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");\n");
-    out.push_str("        return ExitCode::FAILURE;\n");
-    out.push_str("    }\n\n");
-    out.push_str("    ExitCode::SUCCESS\n");
-    out.push_str("}\n");
+    out.push_str("use std::env;
+");
+    out.push_str("use std::ffi::OsString;
+");
+    out.push_str("use std::io::{self, Write};
+");
+    out.push_str("use std::process::ExitCode;
+
+");
+    out.push_str("use lexicon_core::http::{
+");
+    out.push_str("    HttpAcquisitionContext,
+");
+    out.push_str("    HttpCapabilitySet,
+");
+    out.push_str("    HttpSourceContractV1,
+");
+    out.push_str("    RuntimeInformationProbeOutcome,
+");
+    out.push_str("};
+");
+    out.push_str("use lexicon_core::protocols::http::runner::{run_http_runtime_invocation, try_write_runtime_information_probe};
+");
+    out.push_str("use lexicon_core::runtime::RuntimeIdentity;
+
+");
+    out.push_str("use source_implementation::SOURCE;
+
+");
+    out.push_str(&format!(
+        "const IDENTITY: RuntimeIdentity = RuntimeIdentity::http_acquisition(\"{source_name}\", HttpSourceContractV1::CONTRACT_VERSION);\n"
+    ));
+    out.push_str(&format!(
+        "const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = {};\n\n",
+        MANAGED_RUNNER_TEMPLATE_VERSION
+    ));
+    out.push_str("fn main() -> ExitCode {
+");
+    out.push_str("    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
+");
+    out.push_str("    let stdout = io::stdout();
+");
+    out.push_str("    let mut stdout = stdout.lock();
+");
+    out.push_str("    let stderr = io::stderr();
+");
+    out.push_str("    let mut stderr = stderr.lock();
+");
+    out.push_str("    match try_write_runtime_information_probe(IDENTITY, &SOURCE, HttpCapabilitySet::empty(), &arguments, &mut stdout) {
+");
+    out.push_str("        Ok(RuntimeInformationProbeOutcome::Written) => return ExitCode::SUCCESS,
+");
+    out.push_str("        Ok(RuntimeInformationProbeOutcome::NotRequested) => {}
+");
+    out.push_str("        Err(error) => {
+");
+    out.push_str("            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
+");
+    out.push_str("            return ExitCode::FAILURE;
+");
+    out.push_str("        }
+");
+    out.push_str("    }
+
+");
+    out.push_str("    let mut context = match HttpAcquisitionContext::from_env() {
+");
+    out.push_str("        Ok(context) => context,
+");
+    out.push_str("        Err(error) => {
+");
+    out.push_str("            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
+");
+    out.push_str("            return ExitCode::FAILURE;
+");
+    out.push_str("        }
+");
+    out.push_str("    };
+
+");
+    out.push_str("    if let Err(error) = run_http_runtime_invocation(&arguments, IDENTITY, &SOURCE, HttpCapabilitySet::empty(), &mut context) {
+");
+    out.push_str("        let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
+");
+    out.push_str("        return ExitCode::FAILURE;
+");
+    out.push_str("    }
+
+");
+    out.push_str("    ExitCode::SUCCESS
+");
+    out.push_str("}
+");
     out
 }
 
 fn format_processing_managed_runner_main(source_name: &str) -> String {
     let mut out = String::new();
-    out.push_str("use std::env;\n");
-    out.push_str("use std::ffi::OsString;\n");
-    out.push_str("use std::io::{self, Write};\n");
-    out.push_str("use std::process::ExitCode;\n\n");
-    out.push_str("use lexicon_core::processing::{\n");
-    out.push_str("    ProcessingContext,\n");
-    out.push_str("    ProcessingSourceContractV1,\n");
-    out.push_str("    ProcessingRuntimeInformationProbeOutcome,\n");
-    out.push_str("};\n");
-    out.push_str("use lexicon_core::processing::runner::{run_processing_runtime_invocation, try_write_runtime_information_probe};\n");
-    out.push_str("use lexicon_core::runtime::RuntimeIdentity;\n\n");
-    out.push_str("use source_implementation::SOURCE;\n\n");
-    out.push_str(&format!("const IDENTITY: RuntimeIdentity = RuntimeIdentity::http_processing(\"{source_name}\", ProcessingSourceContractV1::CONTRACT_VERSION);\n\n"));
-    out.push_str("fn main() -> ExitCode {\n");
-    out.push_str("    let arguments: Vec<OsString> = env::args_os().skip(1).collect();\n");
-    out.push_str("    let mut stderr = io::stderr().lock();\n");
-    out.push_str("    match try_write_runtime_information_probe(IDENTITY, &SOURCE, &arguments, &mut stderr) {\n");
-    out.push_str("        Ok(ProcessingRuntimeInformationProbeOutcome::Written) => return ExitCode::SUCCESS,\n");
-    out.push_str("        Ok(ProcessingRuntimeInformationProbeOutcome::NotRequested) => {}\n");
-    out.push_str("        Err(error) => {\n");
-    out.push_str("            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");\n");
-    out.push_str("            return ExitCode::FAILURE;\n");
-    out.push_str("        }\n");
-    out.push_str("    }\n\n");
-    out.push_str("    let mut context = ProcessingContext::default();\n");
-    out.push_str("    if let Err(error) = run_processing_runtime_invocation(&arguments, IDENTITY, &SOURCE, &mut context) {\n");
-    out.push_str("        let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");\n");
-    out.push_str("        return ExitCode::FAILURE;\n");
-    out.push_str("    }\n\n");
-    out.push_str("    ExitCode::SUCCESS\n");
-    out.push_str("}\n");
+    out.push_str("use std::env;
+");
+    out.push_str("use std::ffi::OsString;
+");
+    out.push_str("use std::io::{self, Write};
+");
+    out.push_str("use std::process::ExitCode;
+
+");
+    out.push_str("use lexicon_core::processing::{
+");
+    out.push_str("    ProcessingContext,
+");
+    out.push_str("    ProcessingSourceContractV1,
+");
+    out.push_str("    ProcessingRuntimeInformationProbeOutcome,
+");
+    out.push_str("};
+");
+    out.push_str("use lexicon_core::processing::runner::{run_processing_runtime_invocation, try_write_runtime_information_probe};
+");
+    out.push_str("use lexicon_core::runtime::RuntimeIdentity;
+
+");
+    out.push_str("use source_implementation::SOURCE;
+
+");
+    out.push_str(&format!(
+        "const IDENTITY: RuntimeIdentity = RuntimeIdentity::http_processing(\"{source_name}\", ProcessingSourceContractV1::CONTRACT_VERSION);\n"
+    ));
+    out.push_str(&format!(
+        "const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = {};\n\n",
+        MANAGED_RUNNER_TEMPLATE_VERSION
+    ));
+    out.push_str("fn main() -> ExitCode {
+");
+    out.push_str("    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
+");
+    out.push_str("    let stdout = io::stdout();
+");
+    out.push_str("    let mut stdout = stdout.lock();
+");
+    out.push_str("    let stderr = io::stderr();
+");
+    out.push_str("    let mut stderr = stderr.lock();
+");
+    out.push_str("    match try_write_runtime_information_probe(IDENTITY, &SOURCE, &arguments, &mut stdout) {
+");
+    out.push_str("        Ok(ProcessingRuntimeInformationProbeOutcome::Written) => return ExitCode::SUCCESS,
+");
+    out.push_str("        Ok(ProcessingRuntimeInformationProbeOutcome::NotRequested) => {}
+");
+    out.push_str("        Err(error) => {
+");
+    out.push_str("            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
+");
+    out.push_str("            return ExitCode::FAILURE;
+");
+    out.push_str("        }
+");
+    out.push_str("    }
+
+");
+    out.push_str("    let mut context = ProcessingContext::default();
+");
+    out.push_str("    if let Err(error) = run_processing_runtime_invocation(&arguments, IDENTITY, &SOURCE, &mut context) {
+");
+    out.push_str("        let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
+");
+    out.push_str("        return ExitCode::FAILURE;
+");
+    out.push_str("    }
+
+");
+    out.push_str("    ExitCode::SUCCESS
+");
+    out.push_str("}
+");
     out
 }
 
@@ -1472,94 +1698,144 @@ fn validate_managed_workspace_layout(
     expected_impl_name: &str,
     expected_runner_name: &str,
     expected_binary_name: &str,
-) -> Result<(), String> {
+) -> Result<(), ManagedWorkspaceValidationError> {
     let manifest_path = workspace_root.join("Cargo.toml");
     if !manifest_path.is_file() {
-        return Err(format!(
+        return Err(ManagedWorkspaceValidationError::MissingManifest(format!(
             "missing managed workspace manifest for {} at {}",
             operation_name,
             workspace_root.display()
+        )));
+    }
+
+    let lockfile = workspace_root.join("Cargo.lock");
+    if !lockfile.is_file() {
+        return Err(ManagedWorkspaceValidationError::LegacyLayout(
+            "missing Cargo.lock for managed workspace".to_owned(),
         ));
     }
 
-    let contents = fs::read_to_string(&manifest_path)
-        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
-    let parsed: toml::Value = toml::from_str(&contents)
-        .map_err(|error| format!("failed to parse {}: {error}", manifest_path.display()))?;
+    let contents = fs::read_to_string(&manifest_path).map_err(|error| {
+        ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "failed to read {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let parsed: toml::Value = toml::from_str(&contents).map_err(|error| {
+        ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "failed to parse {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
 
     let members = parsed
         .get("workspace")
         .and_then(|value| value.get("members"))
         .and_then(toml::Value::as_array)
-        .ok_or_else(|| format!("managed workspace manifest {} is missing workspace members", manifest_path.display()))?;
+        .ok_or_else(|| ManagedWorkspaceValidationError::InvalidMembers {
+            expected: vec![format!("{operation_name}-impl"), "lexicon-runner".to_string()],
+            found: Vec::new(),
+        })?;
     let member_names: Vec<String> = members
         .iter()
         .filter_map(|value| value.as_str().map(str::to_owned))
         .collect();
-    let expected_members = [format!("{operation_name}-impl"), "lexicon-runner".to_string()];
-    if member_names != expected_members {
-        return Err(format!(
-            "managed workspace {} has incorrect members: expected {:?}, found {:?}",
-            operation_name,
-            expected_members,
-            member_names
+    let expected_members = vec![format!("{operation_name}-impl"), "lexicon-runner".to_string()];
+    let extra_members: Vec<String> = member_names
+        .iter()
+        .filter(|member| !expected_members.contains(member))
+        .cloned()
+        .collect();
+    if !extra_members.is_empty() {
+        return Err(ManagedWorkspaceValidationError::ExtraWorkspaceMembers(
+            extra_members,
         ));
     }
+    if member_names != expected_members {
+        return Err(ManagedWorkspaceValidationError::InvalidMembers {
+            expected: expected_members,
+            found: member_names,
+        });
+    }
 
-    let impl_manifest = workspace_root.join(&format!("{operation_name}-impl/Cargo.toml"));
+    let impl_manifest = workspace_root.join(format!("{operation_name}-impl/Cargo.toml"));
     let runner_manifest = workspace_root.join("lexicon-runner/Cargo.toml");
-    let impl_lib = workspace_root.join(&format!("{operation_name}-impl/src/lib.rs"));
+    let impl_lib = workspace_root.join(format!("{operation_name}-impl/src/lib.rs"));
     let runner_main = workspace_root.join("lexicon-runner/src/main.rs");
 
     if !impl_manifest.is_file() {
-        return Err(format!("missing managed {} implementation manifest", operation_name));
+        return Err(ManagedWorkspaceValidationError::MissingImplementation(
+            operation_name.to_owned(),
+        ));
     }
     if !runner_manifest.is_file() {
-        return Err(format!("missing managed {} runner manifest", operation_name));
+        return Err(ManagedWorkspaceValidationError::MissingRunner(
+            operation_name.to_owned(),
+        ));
     }
     if !impl_lib.is_file() {
-        return Err(format!("missing managed {} implementation library", operation_name));
+        return Err(ManagedWorkspaceValidationError::MissingLibrarySource(
+            operation_name.to_owned(),
+        ));
     }
     if !runner_main.is_file() {
-        return Err(format!("missing managed {} runner source", operation_name));
+        return Err(ManagedWorkspaceValidationError::MissingRunnerSource(
+            operation_name.to_owned(),
+        ));
     }
 
-    let impl_doc: toml::Value = toml::from_str(
-        &fs::read_to_string(&impl_manifest)
-            .map_err(|error| format!("failed to read {}: {error}", impl_manifest.display()))?,
-    )
-    .map_err(|error| format!("failed to parse {}: {error}", impl_manifest.display()))?;
+    let impl_doc: toml::Value = toml::from_str(&fs::read_to_string(&impl_manifest).map_err(|error| {
+        ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "failed to read {}: {error}",
+            impl_manifest.display()
+        ))
+    })?)
+    .map_err(|error| {
+        ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "failed to parse {}: {error}",
+            impl_manifest.display()
+        ))
+    })?;
     let impl_name = impl_doc
         .get("package")
         .and_then(|value| value.get("name"))
         .and_then(toml::Value::as_str)
-        .ok_or_else(|| format!("managed {} implementation manifest has no package name", operation_name))?;
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} implementation manifest has no package name",
+            operation_name
+        )))?;
     if impl_name != expected_impl_name {
-        return Err(format!(
-            "managed {} implementation package name mismatch: expected '{}', found '{}'",
-            operation_name,
-            expected_impl_name,
-            impl_name
-        ));
+        return Err(ManagedWorkspaceValidationError::ImplNameMismatch {
+            expected: expected_impl_name.to_owned(),
+            found: impl_name.to_owned(),
+        });
     }
 
-    let runner_doc: toml::Value = toml::from_str(
-        &fs::read_to_string(&runner_manifest)
-            .map_err(|error| format!("failed to read {}: {error}", runner_manifest.display()))?,
-    )
-    .map_err(|error| format!("failed to parse {}: {error}", runner_manifest.display()))?;
+    let runner_doc: toml::Value = toml::from_str(&fs::read_to_string(&runner_manifest).map_err(|error| {
+        ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "failed to read {}: {error}",
+            runner_manifest.display()
+        ))
+    })?)
+    .map_err(|error| {
+        ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "failed to parse {}: {error}",
+            runner_manifest.display()
+        ))
+    })?;
     let runner_name = runner_doc
         .get("package")
         .and_then(|value| value.get("name"))
         .and_then(toml::Value::as_str)
-        .ok_or_else(|| format!("managed {} runner manifest has no package name", operation_name))?;
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} runner manifest has no package name",
+            operation_name
+        )))?;
     if runner_name != expected_runner_name {
-        return Err(format!(
-            "managed {} runner package name mismatch: expected '{}', found '{}'",
-            operation_name,
-            expected_runner_name,
-            runner_name
-        ));
+        return Err(ManagedWorkspaceValidationError::RunnerNameMismatch {
+            expected: expected_runner_name.to_owned(),
+            found: runner_name.to_owned(),
+        });
     }
 
     let bin_name = runner_doc
@@ -1567,38 +1843,66 @@ fn validate_managed_workspace_layout(
         .and_then(|array| array.as_array())
         .and_then(|items| items.iter().find(|entry| entry.get("path").is_some()))
         .and_then(|entry| entry.get("name").and_then(toml::Value::as_str))
-        .ok_or_else(|| format!("managed {} runner manifest has no binary target", operation_name))?;
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} runner manifest has no binary target",
+            operation_name
+        )))?;
     if bin_name != expected_binary_name {
-        return Err(format!(
-            "managed {} runner binary name mismatch: expected '{}', found '{}'",
-            operation_name,
-            expected_binary_name,
-            bin_name
-        ));
+        return Err(ManagedWorkspaceValidationError::BinaryNameMismatch {
+            expected: expected_binary_name.to_owned(),
+            found: bin_name.to_owned(),
+        });
     }
 
-    let runner_src = fs::read_to_string(&runner_main)
-        .map_err(|error| format!("failed to read {}: {error}", runner_main.display()))?;
+    let runner_src = fs::read_to_string(&runner_main).map_err(|error| {
+        ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "failed to read {}: {error}",
+            runner_main.display()
+        ))
+    })?;
+    let expected_template_marker = format!(
+        "const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = {};",
+        MANAGED_RUNNER_TEMPLATE_VERSION
+    );
+    if !runner_src.contains("const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 =") {
+        return Err(ManagedWorkspaceValidationError::InvalidRunnerTemplate(format!(
+            "managed {} runner is missing the template version marker",
+            operation_name
+        )));
+    }
+    if !runner_src.contains(&expected_template_marker) {
+        return Err(ManagedWorkspaceValidationError::InvalidRunnerTemplate(format!(
+            "managed {} runner template version mismatch: expected {}",
+            operation_name, MANAGED_RUNNER_TEMPLATE_VERSION
+        )));
+    }
     let expected_identity_fragment = if operation_name == "get-raw-data" {
-        format!("RuntimeIdentity::http_acquisition(\"{source_name}\", HttpSourceContractV1::CONTRACT_VERSION)")
+        format!(
+            "RuntimeIdentity::http_acquisition(\"{source_name}\", HttpSourceContractV1::CONTRACT_VERSION)"
+        )
     } else {
-        format!("RuntimeIdentity::http_processing(\"{source_name}\", ProcessingSourceContractV1::CONTRACT_VERSION)")
+        format!(
+            "RuntimeIdentity::http_processing(\"{source_name}\", ProcessingSourceContractV1::CONTRACT_VERSION)"
+        )
     };
-    if !runner_src.contains("source_implementation::SOURCE") || !runner_src.contains(&expected_identity_fragment) {
-        return Err(format!(
+    if !runner_src.contains("source_implementation::SOURCE")
+        || !runner_src.contains(&expected_identity_fragment)
+    {
+        return Err(ManagedWorkspaceValidationError::LegacyLayout(format!(
             "managed {} runner does not reference the expected source implementation and identity",
             operation_name
-        ));
+        )));
     }
 
-    if impl_manifest.exists() && fs::read_to_string(&impl_manifest)
-        .map(|text| text.contains("src/main.rs"))
-        .unwrap_or(false)
+    if impl_manifest.exists()
+        && fs::read_to_string(&impl_manifest)
+            .map(|text| text.contains("src/main.rs"))
+            .unwrap_or(false)
     {
-        return Err(format!(
+        return Err(ManagedWorkspaceValidationError::LegacyLayout(format!(
             "managed {} implementation manifest still references a source-owned main entrypoint",
             operation_name
-        ));
+        )));
     }
 
     Ok(())
@@ -1609,11 +1913,17 @@ fn build_managed_runner(
     expected_package: &str,
     expected_binary: &str,
     operation_name: &str,
-) -> Result<PathBuf, String> {
+) -> Result<BuiltManagedRunner, ManagedSourceBuildError> {
     let tempdir = tempfile::Builder::new()
         .prefix(&format!("lexicon-{operation_name}-runner-build-"))
         .tempdir()
-        .map_err(|error| format!("failed to create temporary build directory: {error}"))?;
+        .map_err(|error| {
+            ManagedSourceBuildError::WorkspaceValidation(
+                ManagedWorkspaceValidationError::LegacyLayout(format!(
+                    "failed to create temporary build directory: {error}"
+                )),
+            )
+        })?;
     let target_dir = tempdir.path().to_path_buf();
 
     let output = Command::new("cargo")
@@ -1630,23 +1940,45 @@ fn build_managed_runner(
         .arg("--target-dir")
         .arg(&target_dir)
         .output()
-        .map_err(|_| "[lexicon] ERROR: source build requires Cargo and a Rust development toolchain".to_owned())?;
+        .map_err(|error| {
+            ManagedSourceBuildError::CargoBuild(ManagedRunnerBuildError::CommandFailed {
+                operation: operation_name.to_owned(),
+                stderr: format!(
+                    "[lexicon] ERROR: source build requires Cargo and a Rust development toolchain: {error}"
+                )
+                .into_bytes(),
+            })
+        })?;
 
     if !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr);
-        if !error.trim().is_empty() {
-            eprintln!("{error}");
-        }
-        return Err(format!("{} managed runner build failed", operation_name));
+        return Err(ManagedSourceBuildError::CargoBuild(
+            ManagedRunnerBuildError::CommandFailed {
+                operation: operation_name.to_owned(),
+                stderr: output.stderr,
+            },
+        ));
     }
 
     let cargo_json = String::from_utf8_lossy(&output.stdout);
-    let artifact = select_executable_from_cargo_json(&cargo_json, operation_name)?;
+    let artifact = select_managed_runner_executable(
+        &cargo_json,
+        workspace_manifest,
+        expected_package,
+        expected_binary,
+    )
+    .map_err(|error| {
+        ManagedSourceBuildError::CargoBuild(ManagedRunnerBuildError::ArtifactSelection(error))
+    })?;
     if !artifact.is_file() {
-        return Err(format!("{} managed runner build did not yield the expected executable", operation_name));
+        return Err(ManagedSourceBuildError::CargoBuild(
+            ManagedRunnerBuildError::ExecutableNotFile(artifact),
+        ));
     }
 
-    Ok(artifact)
+    Ok(BuiltManagedRunner {
+        executable: artifact,
+        target_directory: tempdir,
+    })
 }
 
 fn format_session_status_json(source_name: &str, stage: &str) -> String {
@@ -1661,28 +1993,24 @@ fn format_session_status_json(source_name: &str, stage: &str) -> String {
     out
 }
 
-fn format_cargo_lockfile() -> String {
-    let mut out = String::new();
-    out.push_str("# This file is automatically @generated by Cargo.\n");
-    out.push_str("# It is not intended for manual editing.\n");
-    out.push_str("version = 3\n");
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
+
+    use lexicon_core::runtime::{OwnedRuntimeIdentity, RuntimeOperation, RuntimeProtocol};
 
     use super::commands::{init, source_create};
     use super::{
-        build_single_crate, configured_sources_directory, finalize_source_staging,
-        find_descendant_project_root, find_project_root, format_get_raw_data_main,
-        format_impl_cargo_toml, format_source_toml, move_to_backup, publish_runtime_transaction,
-        restore_runtime_after_failure, select_executable_from_cargo_json, stage_runtime_file,
-        validate_protocol, validate_source_name,
+        BuiltManagedRunner, ManagedRunnerArtifactSelectionError, ManagedRunnerBuildError,
+        ManagedSourceBuildError, ManagedWorkspaceMetadataError, ManagedWorkspaceValidationError,
+        MANAGED_RUNNER_TEMPLATE_VERSION, configured_sources_directory, finalize_source_staging,
+        find_descendant_project_root, find_project_root, format_http_managed_runner_main,
+        format_processing_managed_runner_main, format_source_toml, format_workspace_cargo_toml,
+        format_implementation_cargo_toml, format_runner_cargo_toml,
+        select_artifact_from_cargo_output, validate_managed_workspace_layout, validate_protocol,
+        validate_source_name,
     };
 
     static TEST_CWD_LOCK: Mutex<()> = Mutex::new(());
@@ -1698,6 +2026,51 @@ mod tests {
         let result = func();
         std::env::set_current_dir(&original).unwrap();
         result
+    }
+
+    fn write_valid_managed_workspace(root: &Path, source_name: &str, operation_name: &str) {
+        let impl_name = if operation_name == "get-raw-data" {
+            format!("{source_name}-get-raw-data")
+        } else {
+            format!("{source_name}-process-data")
+        };
+        let runner_name = if operation_name == "get-raw-data" {
+            format!("{source_name}-get-raw-data-runner")
+        } else {
+            format!("{source_name}-process-data-runner")
+        };
+        let binary_name = impl_name.clone();
+        let impl_dir = root.join(format!("{operation_name}-impl/src"));
+        let runner_dir = root.join("lexicon-runner/src");
+        fs::create_dir_all(&impl_dir).unwrap();
+        fs::create_dir_all(&runner_dir).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            format_workspace_cargo_toml(operation_name, &[&format!("{operation_name}-impl"), "lexicon-runner"]),
+        )
+        .unwrap();
+        fs::write(root.join("Cargo.lock"), "# lockfile\n").unwrap();
+        fs::write(
+            root.join(format!("{operation_name}-impl/Cargo.toml")),
+            format_implementation_cargo_toml(&impl_name),
+        )
+        .unwrap();
+        fs::write(
+            root.join(format!("{operation_name}-impl/src/lib.rs")),
+            "pub fn placeholder() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("lexicon-runner/Cargo.toml"),
+            format_runner_cargo_toml(&runner_name, &binary_name, &format!("../{operation_name}-impl")),
+        )
+        .unwrap();
+        let main = if operation_name == "get-raw-data" {
+            format_http_managed_runner_main(source_name)
+        } else {
+            format_processing_managed_runner_main(source_name)
+        };
+        fs::write(root.join("lexicon-runner/src/main.rs"), main).unwrap();
     }
 
     #[test]
@@ -1722,24 +2095,48 @@ mod tests {
     }
 
     #[test]
-    fn generated_impl_manifest_uses_new_portable_core_tag() {
-        let manifest = format_impl_cargo_toml("example-source-get-raw-data");
+    fn generated_acquisition_runner_probe_uses_stdout() {
+        let source = format_http_managed_runner_main("example-source");
 
-        assert!(manifest.contains("name = \"example-source-get-raw-data\""));
-        assert!(manifest.contains("git = \"https://github.com/ssr2zvy/lexicon\""));
-        assert!(manifest.contains("tag = \"v0.1.2\""));
-        assert!(!manifest.contains("tag = \"v0.1.0\""));
-        assert!(!manifest.contains("/workspaces/lexicon"));
+        assert!(source.contains("let stdout = io::stdout();"));
+        assert!(source.contains("let mut stdout = stdout.lock();"));
+        assert!(source.contains("&mut stdout)"));
     }
 
     #[test]
-    fn generated_http_template_uses_context_based_acquire_contract() {
-        let source = format_get_raw_data_main("example-source");
+    fn generated_acquisition_runner_probe_stderr_is_not_used_for_probe() {
+        let source = format_http_managed_runner_main("example-source");
 
-        assert!(source.contains("HttpAcquisitionContext"));
-        assert!(source.contains("fn acquire(&self, context: &mut HttpAcquisitionContext)"));
-        assert!(source.contains("if let Err(error) = run_http_source(source)"));
-        assert!(source.contains("let source = ExampleSource;"));
+        assert!(!source.contains("&mut stderr)"));
+    }
+
+    #[test]
+    fn generated_processing_runner_probe_uses_stdout() {
+        let source = format_processing_managed_runner_main("example-source");
+
+        assert!(source.contains("let stdout = io::stdout();"));
+        assert!(source.contains("let mut stdout = stdout.lock();"));
+        assert!(source.contains("&mut stdout)"));
+    }
+
+    #[test]
+    fn generated_acquisition_runner_includes_template_version_marker() {
+        let source = format_http_managed_runner_main("example-source");
+
+        assert!(source.contains(&format!(
+            "const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = {};",
+            MANAGED_RUNNER_TEMPLATE_VERSION
+        )));
+    }
+
+    #[test]
+    fn generated_processing_runner_includes_template_version_marker() {
+        let source = format_processing_managed_runner_main("example-source");
+
+        assert!(source.contains(&format!(
+            "const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = {};",
+            MANAGED_RUNNER_TEMPLATE_VERSION
+        )));
     }
 
     #[test]
@@ -1817,7 +2214,6 @@ mod tests {
         let raw = root.join("data/raw");
         let processed = root.join("data/processed");
         let nested = root.join("data/nested-project");
-
         fs::create_dir_all(&raw).unwrap();
         fs::create_dir_all(&processed).unwrap();
         fs::create_dir_all(&nested).unwrap();
@@ -1881,202 +2277,280 @@ mod tests {
     }
 
     #[test]
-    fn selects_correct_binary_artifact_from_compiler_json() {
-        let output = r#"{"reason":"compiler-artifact","package_id":"example-source-get-raw-data 0.1.0 (path+file:///tmp/example-source/http/get-raw-data/get-raw-data-impl)","target":{"kind":["bin"],"name":"example-source-get-raw-data"},"executable":"/tmp/example-source/http/get-raw-data/runtime/example-source-get-raw-data"}
-{"reason":"compiler-artifact","target":{"kind":["lib"],"name":"example-source_get_raw_data"},"executable":"/tmp/lib.so"}
-{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"other-binary"},"executable":"/tmp/other-binary"}
-"#;
+    fn built_managed_runner_struct_keeps_executable_accessible() {
+        let runner = BuiltManagedRunner {
+            executable: PathBuf::from("/tmp/test-binary"),
+            target_directory: tempfile::tempdir().unwrap(),
+        };
 
-        let result = select_executable_from_cargo_json(output, "get-raw-data").unwrap();
-        assert_eq!(
+        assert_eq!(runner.executable(), Path::new("/tmp/test-binary"));
+        assert!(runner.target_directory.path().is_dir());
+    }
+
+    #[test]
+    fn select_managed_runner_executable_rejects_no_artifact() {
+        let result = select_artifact_from_cargo_output(
+            r#"{"reason":"compiler-artifact","package_id":"pkg 0.1.0","target":{"kind":["bin"],"name":"other"},"executable":"/bin/other"}"#,
+            "expected 0.1.0",
+            "expected-bin",
+        );
+
+        assert!(matches!(
             result,
-            PathBuf::from(
-                "/tmp/example-source/http/get-raw-data/runtime/example-source-get-raw-data"
-            )
-        );
+            Err(ManagedRunnerArtifactSelectionError::NoMatchingArtifact { .. })
+        ));
     }
 
     #[test]
-    fn ignores_unrelated_compiler_artifact_json() {
-        let output = r#"{"reason":"compiler-artifact","package_id":"other-package 0.1.0 (path+file:///tmp/other)","target":{"kind":["bin"],"name":"other-binary"},"executable":"/tmp/other-binary"}
-{"reason":"compiler-artifact","package_id":"example-source-process-data 0.1.0 (path+file:///tmp/example-source/http/process-data/process-data-impl)","target":{"kind":["bin"],"name":"example-source-process-data"},"executable":"/tmp/example-source-process-data"}
-{"reason":"compiler-artifact","target":{"kind":["test"],"name":"test-suite"},"executable":"/tmp/test-suite"}
-{"reason":"compiler-artifact","target":{"kind":["example"],"name":"example"},"executable":"/tmp/example"}
-{"reason":"compiler-artifact","target":{"kind":["custom-build"],"name":"build-script"},"executable":"/tmp/build-script"}
-"#;
+    fn select_managed_runner_executable_rejects_multiple_artifacts() {
+        let output = r#"{"reason":"compiler-artifact","package_id":"expected 0.1.0","target":{"kind":["bin"],"name":"expected-bin"},"executable":"/bin/one"}
+{"reason":"compiler-artifact","package_id":"expected 0.1.0","target":{"kind":["bin"],"name":"expected-bin"},"executable":"/bin/two"}"#;
 
-        let result = select_executable_from_cargo_json(output, "get-raw-data").unwrap_err();
-        assert!(result.contains("implementation build failed"));
+        let result = select_artifact_from_cargo_output(output, "expected 0.1.0", "expected-bin");
+
+        assert!(matches!(
+            result,
+            Err(ManagedRunnerArtifactSelectionError::MultipleMatchingArtifacts { .. })
+        ));
     }
 
     #[test]
-    fn rejects_missing_executable_in_compiler_artifact_json() {
-        let output = r#"{"reason":"compiler-artifact","package_id":"example-source-get-raw-data 0.1.0 (path+file:///tmp/example-source/http/get-raw-data/get-raw-data-impl)","target":{"kind":["bin"],"name":"example-source-get-raw-data"}}
-"#;
+    fn select_managed_runner_executable_exact_package_id_required() {
+        let output = r#"{"reason":"compiler-artifact","package_id":"expected-similar 0.1.0","target":{"kind":["bin"],"name":"expected-bin"},"executable":"/bin/one"}"#;
 
-        let result = select_executable_from_cargo_json(output, "get-raw-data");
-        assert!(
-            result.is_err(),
-            "missing executable path must fail the build"
-        );
+        let result = select_artifact_from_cargo_output(output, "expected 0.1.0", "expected-bin");
+
+        assert!(matches!(
+            result,
+            Err(ManagedRunnerArtifactSelectionError::NoMatchingArtifact { .. })
+        ));
     }
 
     #[test]
-    fn rejects_ambiguous_executable_selection_in_compiler_artifact_json() {
-        let output = r#"{"reason":"compiler-artifact","package_id":"example-source-get-raw-data 0.1.0 (path+file:///tmp/example-source/http/get-raw-data/get-raw-data-impl)","target":{"kind":["bin"],"name":"example-source-get-raw-data"},"executable":"/tmp/first"}
-{"reason":"compiler-artifact","package_id":"example-source-get-raw-data 0.1.0 (path+file:///tmp/example-source/http/get-raw-data/get-raw-data-impl)","target":{"kind":["bin"],"name":"example-source-get-raw-data"},"executable":"/tmp/second"}
-"#;
+    fn select_managed_runner_executable_exact_binary_name_required() {
+        let output = r#"{"reason":"compiler-artifact","package_id":"expected 0.1.0","target":{"kind":["bin"],"name":"wrong-bin"},"executable":"/bin/one"}"#;
 
-        let result = select_executable_from_cargo_json(output, "get-raw-data");
-        assert!(
-            result.is_err(),
-            "multiple matching executable artifacts must fail deterministically"
-        );
+        let result = select_artifact_from_cargo_output(output, "expected 0.1.0", "expected-bin");
+
+        assert!(matches!(
+            result,
+            Err(ManagedRunnerArtifactSelectionError::NoMatchingArtifact { .. })
+        ));
     }
 
     #[test]
-    fn stage_runtime_file_uses_randomized_unique_suffixes_in_runtime_directory() {
-        use std::os::unix::fs::PermissionsExt;
+    fn owned_runtime_identity_http_acquisition_has_correct_fields() {
+        let identity = OwnedRuntimeIdentity::http_acquisition("test-source", 1);
 
-        let root_dir = unique_test_dir("lexicon-runtime-staging-");
-        let root = root_dir.path().to_path_buf();
-        let executable = root.join("example-source-process-data");
-        fs::write(&executable, "binary\n").unwrap();
-        let permissions = std::fs::Permissions::from_mode(0o755);
-        fs::set_permissions(&executable, permissions).unwrap();
-
-        let stale_pid_path = root.join(".example-source-process-data.staging");
-        fs::write(&stale_pid_path, "stale-value\n").unwrap();
-
-        let first = stage_runtime_file(&root, &executable, "process-data").unwrap();
-        let second = stage_runtime_file(&root, &executable, "process-data").unwrap();
-
-        assert_ne!(first, second, "randomized staging paths must differ");
-        assert!(first.starts_with(&root));
-        assert!(second.starts_with(&root));
-        assert!(
-            first
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with(".example-source-process-data.staging-")
-        );
-        assert!(
-            second
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with(".example-source-process-data.staging-")
-        );
-        assert_ne!(
-            first.file_name().unwrap().to_string_lossy().as_ref(),
-            ".example-source-process-data.staging"
-        );
-        assert!(
-            stale_pid_path.exists(),
-            "the stale PID-style file must remain untouched"
-        );
-        assert_eq!(
-            fs::read_to_string(&stale_pid_path).unwrap(),
-            "stale-value\n"
-        );
-
-        let _ = fs::remove_file(&first);
-        let _ = fs::remove_file(&second);
-        let _ = fs::remove_file(&stale_pid_path);
+        assert_eq!(identity.source_name(), "test-source");
+        assert_eq!(identity.protocol(), RuntimeProtocol::Http);
+        assert_eq!(identity.operation(), RuntimeOperation::Acquisition);
+        assert_eq!(identity.source_contract_version(), 1);
     }
 
     #[test]
-    fn build_single_crate_keeps_the_built_executable_available_after_return() {
-        let root_dir = unique_test_dir("lexicon-build-artifact-");
-        let root = root_dir.path().to_path_buf();
-        fs::create_dir_all(root.join("src")).unwrap();
+    fn owned_runtime_identity_does_not_require_static_lifetime() {
+        let source_name = String::from("dynamic-source");
+        let identity = OwnedRuntimeIdentity::http_acquisition(source_name.as_str(), 1);
 
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"temporary-build-check\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("src/main.rs"),
-            "fn main() { println!(\"ok\"); }\n",
-        )
-        .unwrap();
-
-        let manifest = root.join("Cargo.toml");
-        let artifact = build_single_crate(&manifest, "temporary-build-check").unwrap();
-
-        assert!(artifact.path.is_file());
-        assert!(artifact.path.exists());
-        assert!(artifact.path.metadata().unwrap().is_file());
-        assert!(
-            artifact
-                .path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .contains("temporary-build-check")
-        );
+        assert_eq!(identity.source_name(), "dynamic-source");
     }
 
     #[test]
-    fn publication_transaction_publishes_both_executables_successfully() {
-        let root_dir = unique_test_dir("lexicon-publish-success-");
-        let root = root_dir.path().to_path_buf();
+    fn managed_source_build_error_displays_without_panic() {
+        let validation_errors = vec![
+            ManagedWorkspaceValidationError::MissingManifest("missing manifest".to_owned()),
+            ManagedWorkspaceValidationError::ManifestParseFailed("bad manifest".to_owned()),
+            ManagedWorkspaceValidationError::InvalidMembers {
+                expected: vec!["a".to_owned()],
+                found: vec!["b".to_owned()],
+            },
+            ManagedWorkspaceValidationError::MissingImplementation("get-raw-data".to_owned()),
+            ManagedWorkspaceValidationError::MissingRunner("get-raw-data".to_owned()),
+            ManagedWorkspaceValidationError::MissingLibrarySource("get-raw-data".to_owned()),
+            ManagedWorkspaceValidationError::MissingRunnerSource("get-raw-data".to_owned()),
+            ManagedWorkspaceValidationError::ImplNameMismatch {
+                expected: "expected".to_owned(),
+                found: "found".to_owned(),
+            },
+            ManagedWorkspaceValidationError::RunnerNameMismatch {
+                expected: "expected".to_owned(),
+                found: "found".to_owned(),
+            },
+            ManagedWorkspaceValidationError::BinaryNameMismatch {
+                expected: "expected".to_owned(),
+                found: "found".to_owned(),
+            },
+            ManagedWorkspaceValidationError::InvalidRunnerTemplate("bad template".to_owned()),
+            ManagedWorkspaceValidationError::LegacyLayout("legacy".to_owned()),
+            ManagedWorkspaceValidationError::ExtraWorkspaceMembers(vec!["extra".to_owned()]),
+        ];
+        let metadata_errors = vec![
+            ManagedWorkspaceMetadataError::CommandFailed("command failed".to_owned()),
+            ManagedWorkspaceMetadataError::OutputInvalid("bad output".to_owned()),
+            ManagedWorkspaceMetadataError::PackageNotFound {
+                name: "pkg".to_owned(),
+            },
+        ];
+        let artifact_errors = vec![
+            ManagedRunnerArtifactSelectionError::MetadataCommand("command failed".to_owned()),
+            ManagedRunnerArtifactSelectionError::MetadataOutput("bad output".to_owned()),
+            ManagedRunnerArtifactSelectionError::PackageNotFound {
+                name: "pkg".to_owned(),
+            },
+            ManagedRunnerArtifactSelectionError::NoMatchingArtifact {
+                package_id: "pkg-id".to_owned(),
+                binary_name: "bin".to_owned(),
+            },
+            ManagedRunnerArtifactSelectionError::MultipleMatchingArtifacts {
+                package_id: "pkg-id".to_owned(),
+                binary_name: "bin".to_owned(),
+            },
+            ManagedRunnerArtifactSelectionError::MissingExecutablePath {
+                package_id: "pkg-id".to_owned(),
+                binary_name: "bin".to_owned(),
+            },
+            ManagedRunnerArtifactSelectionError::MalformedJsonLine {
+                line: "{".to_owned(),
+            },
+        ];
+        let build_errors = vec![
+            ManagedRunnerBuildError::ArtifactSelection(
+                ManagedRunnerArtifactSelectionError::NoMatchingArtifact {
+                    package_id: "pkg-id".to_owned(),
+                    binary_name: "bin".to_owned(),
+                },
+            ),
+            ManagedRunnerBuildError::CommandFailed {
+                operation: "get-raw-data".to_owned(),
+                stderr: b"stderr".to_vec(),
+            },
+            ManagedRunnerBuildError::ExecutableNotFile(PathBuf::from("not-a-file")),
+        ];
+        let source_errors = vec![
+            ManagedSourceBuildError::WorkspaceValidation(
+                ManagedWorkspaceValidationError::MissingManifest("missing manifest".to_owned()),
+            ),
+            ManagedSourceBuildError::Metadata(ManagedWorkspaceMetadataError::CommandFailed(
+                "command failed".to_owned(),
+            )),
+            ManagedSourceBuildError::CargoBuild(ManagedRunnerBuildError::CommandFailed {
+                operation: "get-raw-data".to_owned(),
+                stderr: b"stderr".to_vec(),
+            }),
+            ManagedSourceBuildError::AcquisitionVerification(
+                crate::build::HttpRuntimeVerificationError::InitialHash(
+                    crate::build::RuntimeArtifactHashError::MissingCandidate {
+                        path: PathBuf::from("missing-http"),
+                    },
+                ),
+            ),
+            ManagedSourceBuildError::ProcessingVerification(
+                crate::build::ProcessingRuntimeVerificationError::InitialHash(
+                    crate::build::RuntimeArtifactHashError::MissingCandidate {
+                        path: PathBuf::from("missing-processing"),
+                    },
+                ),
+            ),
+            ManagedSourceBuildError::AcquisitionStaging(
+                crate::build::RuntimeBundleStagingError::InvalidStagingParent {
+                    path: PathBuf::from("bad-http-parent"),
+                },
+            ),
+            ManagedSourceBuildError::ProcessingStaging(
+                crate::build::ProcessingRuntimeBundleStagingError::InvalidStagingParent {
+                    path: PathBuf::from("bad-processing-parent"),
+                },
+            ),
+            ManagedSourceBuildError::Publication(
+                crate::publication::RuntimePairPublicationError::InvalidDestinations,
+            ),
+            ManagedSourceBuildError::MissingLockfile(PathBuf::from("Cargo.lock")),
+            ManagedSourceBuildError::LockfileModified(PathBuf::from("Cargo.lock")),
+        ];
 
-        let get_final = root.join("get-raw-data");
-        let process_final = root.join("process-data");
-        let get_staged = root.join(".get.staging");
-        let process_staged = root.join(".process.staging");
-        fs::write(&get_final, "old-get\n").unwrap();
-        fs::write(&process_final, "old-process\n").unwrap();
-        fs::write(&get_staged, "new-get\n").unwrap();
-        fs::write(&process_staged, "new-process\n").unwrap();
-
-        let get_backup = Some(move_to_backup(&get_final).unwrap());
-        let process_backup = Some(move_to_backup(&process_final).unwrap());
-        let result = publish_runtime_transaction(
-            &get_staged,
-            &process_staged,
-            &get_final,
-            &process_final,
-            get_backup.as_ref(),
-            process_backup.as_ref(),
-            |src, dst| fs::rename(src, dst),
-            |path| fs::remove_file(path),
-        );
-
-        assert!(result.is_ok());
-        assert_eq!(fs::read_to_string(&get_final).unwrap(), "new-get\n");
-        assert_eq!(fs::read_to_string(&process_final).unwrap(), "new-process\n");
-        assert!(!get_staged.exists());
-        assert!(!process_staged.exists());
-        fs::remove_file(get_backup.as_ref().unwrap()).unwrap();
-        fs::remove_file(process_backup.as_ref().unwrap()).unwrap();
-        assert!(!get_backup.as_ref().unwrap().exists());
-        assert!(!process_backup.as_ref().unwrap().exists());
+        for rendered in validation_errors
+            .into_iter()
+            .map(|error| error.to_string())
+            .chain(metadata_errors.into_iter().map(|error| error.to_string()))
+            .chain(artifact_errors.into_iter().map(|error| error.to_string()))
+            .chain(build_errors.into_iter().map(|error| error.to_string()))
+            .chain(source_errors.into_iter().map(|error| error.to_string()))
+        {
+            assert!(!rendered.is_empty());
+        }
     }
 
     #[test]
-    fn publication_transaction_backs_up_existing_executables() {
-        let root_dir = unique_test_dir("lexicon-publish-backup-");
-        let root = root_dir.path().to_path_buf();
-
-        let get_final = root.join("get-raw-data");
-        let process_final = root.join("process-data");
-        fs::write(&get_final, "old-get\n").unwrap();
-        fs::write(&process_final, "old-process\n").unwrap();
-
-        let get_backup = move_to_backup(&get_final).unwrap();
-        let process_backup = move_to_backup(&process_final).unwrap();
-
-        assert!(get_backup.exists());
-        assert!(process_backup.exists());
-        assert_eq!(fs::read_to_string(&get_backup).unwrap(), "old-get\n");
-        assert_eq!(
-            fs::read_to_string(&process_backup).unwrap(),
-            "old-process\n"
+    fn workspace_validation_rejects_missing_template_version_marker() {
+        let root_dir = unique_test_dir("lexicon-workspace-missing-marker-");
+        write_valid_managed_workspace(root_dir.path(), "example-source", "get-raw-data");
+        let runner_main = root_dir.path().join("lexicon-runner/src/main.rs");
+        let marker = format!(
+            "const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = {};\n\n",
+            MANAGED_RUNNER_TEMPLATE_VERSION
         );
+        let source = fs::read_to_string(&runner_main).unwrap().replace(&marker, "");
+        fs::write(&runner_main, source).unwrap();
+
+        let result = validate_managed_workspace_layout(
+            root_dir.path(),
+            "example-source",
+            "get-raw-data",
+            "example-source-get-raw-data",
+            "example-source-get-raw-data-runner",
+            "example-source-get-raw-data",
+        );
+
+        assert!(matches!(
+            result,
+            Err(ManagedWorkspaceValidationError::InvalidRunnerTemplate(_))
+        ));
+    }
+
+    #[test]
+    fn workspace_validation_accepts_correct_template_version_marker() {
+        let root_dir = unique_test_dir("lexicon-workspace-valid-marker-");
+        write_valid_managed_workspace(root_dir.path(), "example-source", "get-raw-data");
+
+        let result = validate_managed_workspace_layout(
+            root_dir.path(),
+            "example-source",
+            "get-raw-data",
+            "example-source-get-raw-data",
+            "example-source-get-raw-data-runner",
+            "example-source-get-raw-data",
+        );
+
+        assert!(result.is_ok(), "result: {result:?}");
+    }
+
+    #[test]
+    fn managed_runner_build_error_captures_stderr() {
+        let error = ManagedRunnerBuildError::CommandFailed {
+            operation: "get-raw-data".to_owned(),
+            stderr: b"captured stderr".to_vec(),
+        };
+
+        match error {
+            ManagedRunnerBuildError::CommandFailed { stderr, .. } => {
+                assert_eq!(stderr, b"captured stderr".to_vec());
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_runner_build_error_display_truncates_long_stderr() {
+        let error = ManagedRunnerBuildError::CommandFailed {
+            operation: "get-raw-data".to_owned(),
+            stderr: vec![b'x'; 5000],
+        };
+
+        let rendered = error.to_string();
+
+        assert!(rendered.len() <= 4200, "display too long: {}", rendered.len());
+        assert!(rendered.contains("get-raw-data managed runner build failed"));
     }
 
     #[test]
@@ -2116,217 +2590,6 @@ mod tests {
         assert!(
             result.unwrap_err().contains("unsupported protocol"),
             "error must describe the unsupported protocol"
-        );
-    }
-
-    #[test]
-    fn publication_failure_in_second_publish_restores_the_first_runtime() {
-        let root_dir = unique_test_dir("lexicon-publish-second-fail-");
-        let root = root_dir.path().to_path_buf();
-
-        let get_final = root.join("get-raw-data");
-        let process_final = root.join("process-data");
-        let get_staged = root.join(".get.staging");
-        let process_staged = root.join(".process.staging");
-        fs::write(&get_final, "old-get\n").unwrap();
-        fs::write(&process_final, "old-process\n").unwrap();
-        let get_backup = Some(move_to_backup(&get_final).unwrap());
-        let process_backup = Some(move_to_backup(&process_final).unwrap());
-        fs::write(&get_final, "old-get\n").unwrap();
-        fs::write(&process_final, "old-process\n").unwrap();
-        fs::write(&get_staged, "new-get\n").unwrap();
-        fs::write(&process_staged, "new-process\n").unwrap();
-
-        let result = publish_runtime_transaction(
-            &get_staged,
-            &process_staged,
-            &get_final,
-            &process_final,
-            get_backup.as_ref(),
-            process_backup.as_ref(),
-            |src, dst| {
-                if src == process_staged {
-                    Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "simulated second publish failure",
-                    ))
-                } else {
-                    fs::rename(src, dst)
-                }
-            },
-            |path| fs::remove_file(path),
-        );
-
-        assert!(result.is_err());
-        assert_eq!(fs::read_to_string(&get_final).unwrap(), "old-get\n");
-        assert_eq!(fs::read_to_string(&process_final).unwrap(), "old-process\n");
-        assert!(!get_staged.exists());
-        assert!(!process_staged.exists());
-    }
-
-    #[test]
-    fn publication_failure_restores_both_previous_runtime_executables() {
-        let root_dir = unique_test_dir("lexicon-publish-both-restore-");
-        let root = root_dir.path().to_path_buf();
-
-        let get_final = root.join("get-raw-data");
-        let process_final = root.join("process-data");
-        let get_staged = root.join(".get.staging");
-        let process_staged = root.join(".process.staging");
-        fs::write(&get_final, "old-get\n").unwrap();
-        fs::write(&process_final, "old-process\n").unwrap();
-        fs::write(&get_staged, "new-get\n").unwrap();
-        fs::write(&process_staged, "new-process\n").unwrap();
-
-        let get_backup = Some(move_to_backup(&get_final).unwrap());
-        let process_backup = Some(move_to_backup(&process_final).unwrap());
-        let result = publish_runtime_transaction(
-            &get_staged,
-            &process_staged,
-            &get_final,
-            &process_final,
-            get_backup.as_ref(),
-            process_backup.as_ref(),
-            |src, dst| {
-                if src == get_staged {
-                    Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "simulated first publish failure",
-                    ))
-                } else {
-                    fs::rename(src, dst)
-                }
-            },
-            |path| fs::remove_file(path),
-        );
-
-        assert!(result.is_err());
-        assert_eq!(fs::read_to_string(&get_final).unwrap(), "old-get\n");
-        assert_eq!(fs::read_to_string(&process_final).unwrap(), "old-process\n");
-        assert!(!get_staged.exists());
-        assert!(!process_staged.exists());
-    }
-
-    #[test]
-    fn transaction_cleanup_removes_staged_files_after_failure() {
-        let root_dir = unique_test_dir("lexicon-staged-cleanup-");
-        let root = root_dir.path().to_path_buf();
-
-        let get_final = root.join("get-raw-data");
-        let process_final = root.join("process-data");
-        let get_staged = root.join(".get.staging");
-        let process_staged = root.join(".process.staging");
-        fs::write(&get_final, "old-get\n").unwrap();
-        fs::write(&process_final, "old-process\n").unwrap();
-        fs::write(&get_staged, "new-get\n").unwrap();
-        fs::write(&process_staged, "new-process\n").unwrap();
-
-        let _ = restore_runtime_after_failure(
-            &get_final,
-            Some(&move_to_backup(&get_final).unwrap()),
-            &get_staged,
-            &process_staged,
-            &process_final,
-            Some(&move_to_backup(&process_final).unwrap()),
-            &|path| fs::remove_file(path),
-        );
-
-        assert!(!get_staged.exists());
-        assert!(!process_staged.exists());
-        assert!(get_final.exists());
-        assert!(process_final.exists());
-    }
-
-    #[test]
-    fn transaction_cleanup_removes_backup_files_after_success() {
-        let root_dir = unique_test_dir("lexicon-backup-cleanup-");
-        let root = root_dir.path().to_path_buf();
-
-        let get_final = root.join("get-raw-data");
-        let process_final = root.join("process-data");
-        fs::write(&get_final, "old-get\n").unwrap();
-        fs::write(&process_final, "old-process\n").unwrap();
-
-        let get_backup = move_to_backup(&get_final).unwrap();
-        let process_backup = move_to_backup(&process_final).unwrap();
-        fs::write(&get_final, "new-get\n").unwrap();
-        fs::write(&process_final, "new-process\n").unwrap();
-
-        assert!(get_backup.exists());
-        assert!(process_backup.exists());
-        fs::remove_file(&get_backup).unwrap();
-        fs::remove_file(&process_backup).unwrap();
-        assert!(!get_backup.exists());
-        assert!(!process_backup.exists());
-    }
-
-    #[test]
-    fn unrelated_runtime_files_remain_untouched() {
-        let root_dir = unique_test_dir("lexicon-unrelated-keep-");
-        let root = root_dir.path().to_path_buf();
-
-        let get_final = root.join("get-raw-data");
-        let process_final = root.join("process-data");
-        let unrelated = root.join("notes.txt");
-        fs::write(&get_final, "old-get\n").unwrap();
-        fs::write(&process_final, "old-process\n").unwrap();
-        fs::write(&unrelated, "keep-me\n").unwrap();
-
-        let result = restore_runtime_after_failure(
-            &get_final,
-            Some(&move_to_backup(&get_final).unwrap()),
-            &root.join(".get.staging"),
-            &root.join(".process.staging"),
-            &process_final,
-            Some(&move_to_backup(&process_final).unwrap()),
-            &|path| fs::remove_file(path),
-        );
-
-        assert!(result.is_ok());
-        assert_eq!(fs::read_to_string(&unrelated).unwrap(), "keep-me\n");
-    }
-
-    #[test]
-    fn gitignore_file_remains_untouched_after_runtime_restore() {
-        let root_dir = unique_test_dir("lexicon-gitignore-restore-");
-        let root = root_dir.path().to_path_buf();
-
-        let get_directory = root.join("get-raw-data");
-        let process_directory = root.join("process-data");
-        fs::create_dir_all(&get_directory).unwrap();
-        fs::create_dir_all(&process_directory).unwrap();
-        let get_file = get_directory.join("get-raw-data");
-        let process_file = process_directory.join("process-data");
-        fs::write(&get_file, "old-get\n").unwrap();
-        fs::write(&process_file, "old-process\n").unwrap();
-        fs::write(get_directory.join(".gitignore"), "*\n!.gitignore\n").unwrap();
-        fs::write(process_directory.join(".gitignore"), "*\n!.gitignore\n").unwrap();
-
-        let get_backup = Some(move_to_backup(&get_file).unwrap());
-        let process_backup = Some(move_to_backup(&process_file).unwrap());
-        fs::write(&get_file, "new-get\n").unwrap();
-        fs::write(&process_file, "new-process\n").unwrap();
-        fs::write(get_directory.join(".get.staging"), "staged\n").unwrap();
-        fs::write(process_directory.join(".process.staging"), "staged\n").unwrap();
-
-        let restore = restore_runtime_after_failure(
-            &get_file,
-            get_backup.as_ref(),
-            &get_directory.join(".get.staging"),
-            &process_directory.join(".process.staging"),
-            &process_file,
-            process_backup.as_ref(),
-            &|path| fs::remove_file(path),
-        );
-
-        assert!(restore.is_ok());
-        assert_eq!(
-            fs::read_to_string(get_directory.join(".gitignore")).unwrap(),
-            "*\n!.gitignore\n"
-        );
-        assert_eq!(
-            fs::read_to_string(process_directory.join(".gitignore")).unwrap(),
-            "*\n!.gitignore\n"
         );
     }
 

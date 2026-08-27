@@ -13,7 +13,7 @@ use lexicon_core::processing::{
 };
 use lexicon_core::protocols::http::runner::RUNTIME_INFORMATION_PROBE_ARGUMENT;
 use lexicon_core::runtime::{
-    RuntimeCompatibilityError, RuntimeIdentity, RuntimeInformationDecodingError,
+    OwnedRuntimeIdentity, RuntimeCompatibilityError, RuntimeIdentity, RuntimeInformationDecodingError,
     RuntimeInformationV1,
 };
 
@@ -58,6 +58,7 @@ pub enum RuntimeProbeAdmissionError {
     InvalidOutputBoundary,
     Decode(RuntimeInformationDecodingError),
     Incompatible(RuntimeCompatibilityError),
+    IncompatibleOwned(String),
 }
 
 #[derive(Debug)]
@@ -69,6 +70,7 @@ pub enum ProcessingRuntimeProbeAdmissionError {
     InvalidOutputBoundary,
     Decode(lexicon_core::processing::ProcessingRuntimeInformationDecodingError),
     Incompatible(ProcessingRuntimeCompatibilityError),
+    IncompatibleOwned(String),
 }
 
 impl fmt::Display for RuntimeProbeAdmissionError {
@@ -98,6 +100,10 @@ impl fmt::Display for RuntimeProbeAdmissionError {
                 formatter,
                 "runtime information probe compatibility validation failed: {error}"
             ),
+            Self::IncompatibleOwned(description) => write!(
+                formatter,
+                "runtime identity incompatible: {description}"
+            ),
         }
     }
 }
@@ -116,6 +122,7 @@ impl fmt::Display for ProcessingRuntimeProbeAdmissionError {
             Self::InvalidOutputBoundary => formatter.write_str("processing runtime information probe output does not match the required exact boundary"),
             Self::Decode(error) => write!(formatter, "processing runtime information probe decode failed: {error}"),
             Self::Incompatible(error) => write!(formatter, "processing runtime information probe compatibility validation failed: {error}"),
+            Self::IncompatibleOwned(description) => write!(formatter, "runtime identity incompatible: {description}"),
         }
     }
 }
@@ -129,7 +136,8 @@ impl std::error::Error for RuntimeProbeAdmissionError {
             Self::OutputTooLarge { .. }
             | Self::EmptyOutput
             | Self::ContainsNul
-            | Self::InvalidOutputBoundary => None,
+            | Self::InvalidOutputBoundary
+            | Self::IncompatibleOwned(_) => None,
         }
     }
 }
@@ -143,7 +151,8 @@ impl std::error::Error for ProcessingRuntimeProbeAdmissionError {
             Self::OutputTooLarge { .. }
             | Self::EmptyOutput
             | Self::ContainsNul
-            | Self::InvalidOutputBoundary => None,
+            | Self::InvalidOutputBoundary
+            | Self::IncompatibleOwned(_) => None,
         }
     }
 }
@@ -224,6 +233,7 @@ pub enum RuntimeProbeExecutionError {
         stderr: Vec<u8>,
         stderr_truncated: bool,
     },
+    UnexpectedStderr { stderr: Vec<u8> },
     Admission(RuntimeProbeAdmissionError),
 }
 
@@ -256,6 +266,7 @@ pub enum ProcessingRuntimeProbeExecutionError {
         stderr: Vec<u8>,
         stderr_truncated: bool,
     },
+    UnexpectedStderr { stderr: Vec<u8> },
     Admission(ProcessingRuntimeProbeAdmissionError),
 }
 
@@ -299,6 +310,11 @@ impl fmt::Display for RuntimeProbeExecutionError {
             Self::UnsuccessfulExit { status, .. } => write!(
                 formatter,
                 "runtime information probe exited unsuccessfully: {status}"
+            ),
+            Self::UnexpectedStderr { stderr } => write!(
+                formatter,
+                "runtime information probe wrote unexpected stderr output: {}",
+                format_probe_stderr_excerpt(stderr)
             ),
             Self::Admission(error) => write!(
                 formatter,
@@ -350,6 +366,11 @@ impl fmt::Display for ProcessingRuntimeProbeExecutionError {
                 formatter,
                 "processing runtime information probe exited unsuccessfully: {status}"
             ),
+            Self::UnexpectedStderr { stderr } => write!(
+                formatter,
+                "processing runtime information probe wrote unexpected stderr output: {}",
+                format_probe_stderr_excerpt(stderr)
+            ),
             Self::Admission(error) => write!(
                 formatter,
                 "processing runtime information probe output was rejected: {error}"
@@ -369,6 +390,7 @@ impl std::error::Error for RuntimeProbeExecutionError {
             | Self::StdoutTooLarge { .. }
             | Self::StderrTooLarge { .. }
             | Self::UnsuccessfulExit { .. }
+            | Self::UnexpectedStderr { .. }
             | Self::Admission(_) => None,
         }
     }
@@ -385,9 +407,21 @@ impl std::error::Error for ProcessingRuntimeProbeExecutionError {
             | Self::StdoutTooLarge { .. }
             | Self::StderrTooLarge { .. }
             | Self::UnsuccessfulExit { .. }
+            | Self::UnexpectedStderr { .. }
             | Self::Admission(_) => None,
         }
     }
+}
+
+fn format_probe_stderr_excerpt(stderr: &[u8]) -> String {
+    const MAX_BYTES: usize = 256;
+
+    let retained = &stderr[..stderr.len().min(MAX_BYTES)];
+    let mut message = String::from_utf8_lossy(retained).into_owned();
+    if stderr.len() > MAX_BYTES {
+        message.push_str("…");
+    }
+    message
 }
 
 fn drain_bounded_stream<R: Read>(reader: R, maximum: usize) -> io::Result<BoundedCapturedStream> {
@@ -794,6 +828,35 @@ pub fn probe_http_runtime_information(
     )
 }
 
+pub fn probe_http_runtime_information_owned(
+    executable: &Path,
+    expected: &OwnedRuntimeIdentity,
+) -> Result<AdmittedRuntimeInformation, RuntimeProbeExecutionError> {
+    probe_http_runtime_information_with_timeout_owned(
+        executable,
+        expected,
+        RUNTIME_INFORMATION_PROBE_TIMEOUT,
+    )
+}
+
+fn probe_http_runtime_information_with_timeout_owned(
+    executable: &Path,
+    expected: &OwnedRuntimeIdentity,
+    timeout: Duration,
+) -> Result<AdmittedRuntimeInformation, RuntimeProbeExecutionError> {
+    let captured = execute_runtime_information_probe(executable, timeout)
+        .map_err(map_runtime_probe_transport_error)?;
+    if !captured.stderr().is_empty() {
+        return Err(RuntimeProbeExecutionError::UnexpectedStderr {
+            stderr: captured.stderr().to_vec(),
+        });
+    }
+    match admit_http_runtime_information_probe_owned(expected, captured.stdout()) {
+        Ok(admitted) => Ok(admitted),
+        Err(error) => Err(RuntimeProbeExecutionError::Admission(error)),
+    }
+}
+
 pub fn admit_http_runtime_information_probe(
     expected_identity: RuntimeIdentity,
     stdout: &[u8],
@@ -845,6 +908,61 @@ pub fn admit_http_runtime_information_probe(
     information
         .validate_compatibility(expected_identity)
         .map_err(RuntimeProbeAdmissionError::Incompatible)?;
+
+    Ok(AdmittedRuntimeInformation { information })
+}
+
+pub fn admit_http_runtime_information_probe_owned(
+    expected: &OwnedRuntimeIdentity,
+    stdout: &[u8],
+) -> Result<AdmittedRuntimeInformation, RuntimeProbeAdmissionError> {
+    if stdout.len() > MAX_RUNTIME_INFORMATION_PROBE_BYTES {
+        return Err(RuntimeProbeAdmissionError::OutputTooLarge {
+            maximum: MAX_RUNTIME_INFORMATION_PROBE_BYTES,
+            actual: stdout.len(),
+        });
+    }
+
+    if stdout.is_empty() {
+        return Err(RuntimeProbeAdmissionError::EmptyOutput);
+    }
+
+    if stdout.iter().any(|byte| *byte == 0) {
+        return Err(RuntimeProbeAdmissionError::ContainsNul);
+    }
+
+    let text = std::str::from_utf8(stdout).map_err(RuntimeProbeAdmissionError::InvalidUtf8)?;
+
+    if !text.ends_with('\n') {
+        return Err(RuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    if text.bytes().filter(|byte| *byte == b'\n').count() != 1 {
+        return Err(RuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    if text.starts_with('\n') || text.starts_with('\r') || text.contains('\r') {
+        return Err(RuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    let json_text = &text[..text.len() - 1];
+    if json_text
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_whitespace())
+        || json_text
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_whitespace())
+    {
+        return Err(RuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    let information =
+        RuntimeInformationV1::from_json(json_text).map_err(RuntimeProbeAdmissionError::Decode)?;
+    information
+        .validate_compatibility_owned(expected)
+        .map_err(RuntimeProbeAdmissionError::IncompatibleOwned)?;
 
     Ok(AdmittedRuntimeInformation { information })
 }
@@ -916,6 +1034,35 @@ pub fn probe_processing_runtime_information(
     )
 }
 
+pub fn probe_processing_runtime_information_owned(
+    executable: &Path,
+    expected: &OwnedRuntimeIdentity,
+) -> Result<AdmittedProcessingRuntimeInformation, ProcessingRuntimeProbeExecutionError> {
+    probe_processing_runtime_information_with_timeout_owned(
+        executable,
+        expected,
+        RUNTIME_INFORMATION_PROBE_TIMEOUT,
+    )
+}
+
+fn probe_processing_runtime_information_with_timeout_owned(
+    executable: &Path,
+    expected: &OwnedRuntimeIdentity,
+    timeout: Duration,
+) -> Result<AdmittedProcessingRuntimeInformation, ProcessingRuntimeProbeExecutionError> {
+    let captured = execute_runtime_information_probe(executable, timeout)
+        .map_err(map_processing_runtime_probe_transport_error)?;
+    if !captured.stderr().is_empty() {
+        return Err(ProcessingRuntimeProbeExecutionError::UnexpectedStderr {
+            stderr: captured.stderr().to_vec(),
+        });
+    }
+    match admit_processing_runtime_information_probe_owned(expected, captured.stdout()) {
+        Ok(admitted) => Ok(admitted),
+        Err(error) => Err(ProcessingRuntimeProbeExecutionError::Admission(error)),
+    }
+}
+
 pub(crate) fn probe_processing_runtime_information_with_timeout(
     executable: &Path,
     expected_identity: RuntimeIdentity,
@@ -928,6 +1075,62 @@ pub(crate) fn probe_processing_runtime_information_with_timeout(
         Ok(admitted) => Ok(admitted),
         Err(error) => Err(ProcessingRuntimeProbeExecutionError::Admission(error)),
     }
+}
+
+pub fn admit_processing_runtime_information_probe_owned(
+    expected: &OwnedRuntimeIdentity,
+    stdout: &[u8],
+) -> Result<AdmittedProcessingRuntimeInformation, ProcessingRuntimeProbeAdmissionError> {
+    if stdout.len() > MAX_RUNTIME_INFORMATION_PROBE_BYTES {
+        return Err(ProcessingRuntimeProbeAdmissionError::OutputTooLarge {
+            maximum: MAX_RUNTIME_INFORMATION_PROBE_BYTES,
+            actual: stdout.len(),
+        });
+    }
+
+    if stdout.is_empty() {
+        return Err(ProcessingRuntimeProbeAdmissionError::EmptyOutput);
+    }
+
+    if stdout.iter().any(|byte| *byte == 0) {
+        return Err(ProcessingRuntimeProbeAdmissionError::ContainsNul);
+    }
+
+    let text =
+        std::str::from_utf8(stdout).map_err(ProcessingRuntimeProbeAdmissionError::InvalidUtf8)?;
+
+    if !text.ends_with('\n') {
+        return Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    if text.bytes().filter(|byte| *byte == b'\n').count() != 1 {
+        return Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    if text.starts_with('\n') || text.starts_with('\r') || text.contains('\r') {
+        return Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    let json_text = &text[..text.len() - 1];
+    if json_text
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_whitespace())
+        || json_text
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_whitespace())
+    {
+        return Err(ProcessingRuntimeProbeAdmissionError::InvalidOutputBoundary);
+    }
+
+    let information = ProcessingRuntimeInformationV1::from_json(json_text)
+        .map_err(ProcessingRuntimeProbeAdmissionError::Decode)?;
+    information
+        .validate_compatibility_owned(expected)
+        .map_err(ProcessingRuntimeProbeAdmissionError::IncompatibleOwned)?;
+
+    Ok(AdmittedProcessingRuntimeInformation { information })
 }
 
 #[cfg(test)]
