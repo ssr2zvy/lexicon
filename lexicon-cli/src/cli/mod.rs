@@ -40,16 +40,29 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Some(RootCommand::Data(command)) => {
-            let mode = command.mode();
-            let action = match &mode {
-                DataMode::Get(source) => format!("get {source}"),
-                DataMode::Process(source) => format!("process {source}"),
+            let (operation, source_name) = match command.mode() {
+                DataMode::Get(source) => (lexicon_framework::data::DataOperation::Acquisition, source),
+                DataMode::Process(source) => (lexicon_framework::data::DataOperation::Processing, source),
             };
-            println!(
-                "Parsed data command: {} (bg={}, abandon_past_fail={}, passthrough={:?})",
-                action, command.bg, command.abandon_past_fail, command.passthrough
-            );
-            Ok(())
+            let request = lexicon_framework::data::ForegroundDataRequest {
+                operation,
+                source_name,
+                abandon_past_failure: command.abandon_past_fail,
+                background: command.bg,
+                source_arguments: command.passthrough,
+            };
+            match lexicon_framework::data::execute_foreground_data(request) {
+                Ok(outcome) => {
+                    println!(
+                        "[lexicon] {} complete: source='{}' session={}",
+                        outcome.operation.display_name(),
+                        outcome.source,
+                        outcome.session.id()
+                    );
+                    Ok(())
+                }
+                Err(err) => Err(err.to_string()),
+            }
         }
         Some(RootCommand::Source(command)) => match command.action {
             SourceAction::Create(create_command) => {

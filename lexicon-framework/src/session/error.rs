@@ -66,7 +66,7 @@ impl std::error::Error for SessionCoordinationError {
             | Self::UnresolvedFailure
             | Self::ResumeUnavailable
             | Self::ResumeNotSupportedForOperation
-            | Self::AbandonmentUnavailable { .. }
+            | Self::AbandonmentUnavailable { .. } => None,
             Self::ContextEncoding(err) => Some(err),
             Self::InvalidOperationRoot(err) => Some(err),
         }

@@ -409,13 +409,13 @@ pub struct SessionRecordV1 {
     operation: SessionOperation,
     execution_mode: RuntimeExecutionMode,
     supervision_mode: RuntimeSupervisionMode,
-    state: SessionState,
-    revision: u64,
+    pub(super) state: SessionState,
+    pub(super) revision: u64,
     created_at: SessionTimestamp,
-    updated_at: SessionTimestamp,
-    started_at: Option<SessionTimestamp>,
-    finished_at: Option<SessionTimestamp>,
-    failure: Option<SessionFailureV1>,
+    pub(super) updated_at: SessionTimestamp,
+    pub(super) started_at: Option<SessionTimestamp>,
+    pub(super) finished_at: Option<SessionTimestamp>,
+    pub(super) failure: Option<SessionFailureV1>,
 }
 
 impl SessionRecordV1 {
@@ -482,6 +482,9 @@ impl SessionRecordV1 {
             return Err(SessionDecodingError::UnknownSchemaVersion(doc.schema_version));
         }
 
+        // Validate state-dependent field invariants before any partial moves.
+        validate_record_invariants(&doc)?;
+
         let project = ProjectInvocationIdentity::new(doc.project.name).map_err(|e| {
             SessionDecodingError::InvalidInvariant(format!("invalid project name: {e}"))
         })?;
@@ -518,9 +521,6 @@ impl SessionRecordV1 {
                 "session operation does not agree with runtime operation".to_string()
             ));
         }
-
-        // Validate state-dependent field invariants
-        validate_record_invariants(&doc)?;
 
         Ok(Self {
             schema_version: doc.schema_version,

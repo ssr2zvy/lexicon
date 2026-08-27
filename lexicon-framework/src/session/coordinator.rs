@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use lexicon_core::session::{
     NewSessionRecord, ProjectIdentity, RuntimeContextPaths, SafeSessionFailure, SessionIdentity,
     SessionLease, SessionOperation, SessionOperationRoot, SessionRecordV1, SessionStore,
@@ -21,10 +23,10 @@ use super::selection::{
 /// - The `PreparedSession` record.
 /// - The exclusive parent-side lease on the session.
 /// - The runtime context environment document (JSON string for the child process).
+/// - The operation root needed for post-launch session reconciliation.
 ///
-/// The parent lease must be held through child startup. When the child
-/// process acquires the lease on its own (via an explicit handoff method to
-/// be provided by a later process-launching milestone), the parent drops it.
+/// The parent lease must be held through child startup, child execution,
+/// and terminal reconciliation.
 ///
 /// Do not drop this value before the child has started unless the preparation
 /// should be marked as failed.
@@ -32,6 +34,7 @@ pub struct PreparedSessionLaunch {
     record: SessionRecordV1,
     lease: SessionLease,
     context_document: String,
+    operation_root: PathBuf,
 }
 
 impl PreparedSessionLaunch {
@@ -39,9 +42,19 @@ impl PreparedSessionLaunch {
         &self.record
     }
 
+    /// The generated session identity for this launch.
+    pub fn session(&self) -> &SessionIdentity {
+        self.record.session()
+    }
+
     /// The JSON string to set as `LEXICON_RUNTIME_CONTEXT_V1` in the child environment.
     pub fn context_document(&self) -> &str {
         &self.context_document
+    }
+
+    /// The operation root directory, needed to reload the session record after child termination.
+    pub fn operation_root(&self) -> &std::path::Path {
+        &self.operation_root
     }
 
     /// Mark the prepared session as failed, releasing the lease.
@@ -86,17 +99,26 @@ pub struct SessionCoordinator {
     runtime: OwnedRuntimeIdentity,
     operation: SessionOperation,
     store: SessionStore,
-    context_paths: RuntimeContextPaths,
+    /// Absolute project root directory, used when building per-session context paths.
+    project_root: PathBuf,
+    /// Absolute protocol root directory (e.g. `<sources_root>/<source>/http`), used when
+    /// building per-session context paths.
+    protocol_root: PathBuf,
 }
 
 impl SessionCoordinator {
     /// Construct a coordinator from validated identities and paths.
+    ///
+    /// `operation_root` is the session store root (e.g. `protocol_root/get-raw-data` or
+    /// `protocol_root/process-data`). `project_root` and `protocol_root` are retained to
+    /// derive per-session `RuntimeContextPaths` after the session identity is generated.
     pub fn new(
         project: ProjectIdentity,
         runtime: OwnedRuntimeIdentity,
         operation: SessionOperation,
         operation_root: SessionOperationRoot,
-        context_paths: RuntimeContextPaths,
+        project_root: PathBuf,
+        protocol_root: PathBuf,
     ) -> Result<Self, SessionCoordinationError> {
         let store = SessionStore::open(operation_root).map_err(SessionCoordinationError::Store)?;
         Ok(Self {
@@ -104,7 +126,8 @@ impl SessionCoordinator {
             runtime,
             operation,
             store,
-            context_paths,
+            project_root,
+            protocol_root,
         })
     }
 
@@ -222,6 +245,11 @@ impl SessionCoordinator {
             .map_err(SessionCoordinationError::Store)
     }
 
+    /// Expose the underlying store for post-launch session reconciliation.
+    pub fn store(&self) -> &SessionStore {
+        &self.store
+    }
+
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
@@ -252,8 +280,13 @@ impl SessionCoordinator {
             .map_err(SessionCoordinationError::Lease)?;
 
         // Build context paths scoped to this session.
-        let session_paths = build_session_paths(&self.context_paths, &session_id, self.operation)
-            .map_err(SessionCoordinationError::InvalidOperationRoot)?;
+        let session_paths = build_session_paths(
+            &self.project_root,
+            &self.protocol_root,
+            self.operation,
+            &session_id,
+        )
+        .map_err(SessionCoordinationError::InvalidOperationRoot)?;
 
         let context_document = encode_runtime_context(
             &self.project,
@@ -263,10 +296,13 @@ impl SessionCoordinator {
         )
         .map_err(SessionCoordinationError::ContextEncoding)?;
 
+        let operation_root = self.store.operation_root().path().to_path_buf();
+
         Ok(PreparedSessionLaunch {
             record: prepared.into_record(),
             lease,
             context_document,
+            operation_root,
         })
     }
 }
@@ -275,25 +311,32 @@ impl SessionCoordinator {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Build `RuntimeContextPaths` scoped to a specific session within the coordinator's paths.
+/// Build `RuntimeContextPaths` scoped to a specific session.
 fn build_session_paths(
-    coordinator_paths: &RuntimeContextPaths,
-    session: &lexicon_core::session::SessionIdentity,
+    project_root: &std::path::Path,
+    protocol_root: &std::path::Path,
     operation: SessionOperation,
+    session: &SessionIdentity,
 ) -> Result<RuntimeContextPaths, lexicon_core::session::RuntimeContextError> {
     let op = operation.to_runtime_operation();
-    let session_directory = coordinator_paths
-        .operation_root()
-        .join("sessions")
-        .join(session.id());
+
+    let op_name = match op {
+        lexicon_core::runtime::RuntimeOperation::Acquisition => "get-raw-data",
+        lexicon_core::runtime::RuntimeOperation::Processing => "process-data",
+        _ => unreachable!("unknown RuntimeOperation variant"),
+    };
+    let operation_root = protocol_root.join(op_name);
+    let session_directory = operation_root.join("sessions").join(session.id());
+    let raw_data_directory = protocol_root.join("data/raw");
+    let processed_data_directory = protocol_root.join("data/processed");
 
     RuntimeContextPaths::new(
-        coordinator_paths.project_root().to_path_buf(),
-        coordinator_paths.protocol_root().to_path_buf(),
-        coordinator_paths.operation_root().to_path_buf(),
+        project_root.to_path_buf(),
+        protocol_root.to_path_buf(),
+        operation_root,
         session_directory,
-        coordinator_paths.raw_data_directory().to_path_buf(),
-        coordinator_paths.processed_data_directory().to_path_buf(),
+        raw_data_directory,
+        processed_data_directory,
         op,
         session,
     )

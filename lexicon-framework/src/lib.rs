@@ -7,6 +7,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 pub mod build;
+pub mod data;
 pub mod publication;
 pub mod session;
 pub use publication::{
@@ -1281,7 +1282,7 @@ fn finalize_source_staging(staging: tempfile::TempDir, source_dir: &Path) -> Res
     Ok(())
 }
 
-fn validate_source_name(source_name: &str) -> Result<(), String> {
+pub(crate) fn validate_source_name(source_name: &str) -> Result<(), String> {
     if source_name.trim().is_empty() {
         return Err("source name cannot be empty".to_string());
     }
@@ -1321,7 +1322,7 @@ fn validate_protocol(protocol: &str) -> Result<(), String> {
     }
 }
 
-fn find_project_root(start_dir: &Path) -> Result<PathBuf, String> {
+pub(crate) fn find_project_root(start_dir: &Path) -> Result<PathBuf, String> {
     let mut current = start_dir.to_path_buf();
     let mut ancestors = Vec::new();
 
@@ -1570,6 +1571,85 @@ fn configured_sources_directory(project_root: &Path) -> Result<PathBuf, String> 
     }
 
     resolve_project_directory(project_root, configured)
+}
+
+/// Project configuration data loaded from `lexicon.toml`.
+pub(crate) struct ProjectConfigData {
+    /// The project name from `[project].name`.
+    pub name: String,
+    /// The absolute, resolved sources root directory.
+    pub sources_root: PathBuf,
+}
+
+/// Load the project name and resolved sources root from `lexicon.toml`.
+///
+/// Reuses the existing schema validation, name validation, and path resolution
+/// logic from `configured_sources_directory`.
+pub(crate) fn load_project_config(project_root: &Path) -> Result<ProjectConfigData, String> {
+    let config_path = project_root.join("lexicon.toml");
+    let contents = fs::read_to_string(&config_path)
+        .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
+    let parsed: LexiconProjectConfig = toml::from_str(&contents)
+        .map_err(|error| format!("failed to parse {}: {error}", config_path.display()))?;
+
+    if parsed.schema_version != Some(1) {
+        return Err(format!(
+            "unsupported schema_version in {}: expected 1 but found {:?}",
+            config_path.display(),
+            parsed.schema_version
+        ));
+    }
+
+    let project = parsed
+        .project
+        .as_ref()
+        .ok_or_else(|| format!("missing [project] section in {}", config_path.display()))?;
+    let project_name = project
+        .name
+        .as_deref()
+        .ok_or_else(|| format!("missing project.name in {}", config_path.display()))?
+        .trim();
+    if project_name.is_empty()
+        || project_name == "."
+        || project_name == ".."
+        || project_name.contains(['/', '\\'])
+    {
+        return Err(format!(
+            "invalid project.name '{}' in {}",
+            project_name,
+            config_path.display()
+        ));
+    }
+
+    let configured = project.sources_directory.as_deref().unwrap_or("sources");
+
+    let path = Path::new(configured);
+    if path.is_absolute() {
+        return Err(format!(
+            "invalid sources_directory '{}' in {}: must be a relative path",
+            configured,
+            config_path.display()
+        ));
+    }
+    if path.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(format!(
+            "invalid sources_directory '{}' in {}: must remain within the project root",
+            configured,
+            config_path.display()
+        ));
+    }
+
+    let sources_root = resolve_project_directory(project_root, configured)?;
+
+    Ok(ProjectConfigData {
+        name: project_name.to_owned(),
+        sources_root,
+    })
 }
 
 fn format_source_toml(source_name: &str, protocol: &str) -> String {
