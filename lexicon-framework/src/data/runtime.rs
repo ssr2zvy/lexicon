@@ -9,7 +9,7 @@ use crate::build::{
     admit_http_runtime_bundle_owned,
     admit_processing_runtime_bundle_owned, hash_runtime_executable,
 };
-use crate::data::error::ForegroundDataExecutionError;
+use crate::data::error::{ExecutableIntegrityError, ForegroundDataExecutionError};
 use crate::data::project::RuntimeProjectLayout;
 use crate::data::request::DataOperation;
 
@@ -156,44 +156,41 @@ fn admit_processing_bundle(
 /// the admitted artifact (size + SHA-256). Reject symlinks.
 pub fn recheck_executable_integrity(
     admitted: &AdmittedBundle,
-) -> Result<(), ForegroundDataExecutionError> {
+) -> Result<(), ExecutableIntegrityError> {
     let executable = admitted.executable_path();
     let original = admitted.admitted_artifact();
 
     // Reject symlinks.
     let symlink_meta = std::fs::symlink_metadata(executable).map_err(|e| {
-        ForegroundDataExecutionError::ExecutableIntegrityCheck(
-            crate::build::RuntimeArtifactHashError::Read {
-                path: executable.to_path_buf(),
-                source: e,
-            },
-        )
+        ExecutableIntegrityError::Inspection(crate::build::RuntimeArtifactHashError::Read {
+            path: executable.to_path_buf(),
+            source: e,
+        })
     })?;
     if symlink_meta.file_type().is_symlink() {
-        return Err(ForegroundDataExecutionError::ExecutableIntegrityChanged {
+        return Err(ExecutableIntegrityError::Changed {
             path: executable.to_path_buf(),
-            detail: "executable is now a symlink".to_owned(),
+            expected: original.clone(),
+            actual: original.clone(),
         });
     }
 
     // Re-hash.
     let current = hash_runtime_executable(executable)
-        .map_err(ForegroundDataExecutionError::ExecutableIntegrityCheck)?;
+        .map_err(ExecutableIntegrityError::Inspection)?;
 
     if current.size() != original.size() {
-        return Err(ForegroundDataExecutionError::ExecutableIntegrityChanged {
+        return Err(ExecutableIntegrityError::Changed {
             path: executable.to_path_buf(),
-            detail: format!(
-                "size changed from {} to {}",
-                original.size(),
-                current.size()
-            ),
+            expected: original.clone(),
+            actual: current.clone(),
         });
     }
     if current.sha256() != original.sha256() {
-        return Err(ForegroundDataExecutionError::ExecutableIntegrityChanged {
+        return Err(ExecutableIntegrityError::Changed {
             path: executable.to_path_buf(),
-            detail: "SHA-256 hash changed".to_owned(),
+            expected: original.clone(),
+            actual: current,
         });
     }
 

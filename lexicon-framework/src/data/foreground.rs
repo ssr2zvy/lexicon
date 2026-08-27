@@ -12,7 +12,7 @@ use lexicon_core::session::{
 };
 
 use crate::data::error::{
-    ForegroundDataExecutionError, ForegroundInvocationConstructionError,
+    ChildOwnershipUncertainError, ForegroundDataExecutionError, ForegroundInvocationConstructionError,
     ForegroundPreparationError, WaitRecoveryFailure,
 };
 use crate::data::outcome::{ForegroundDataOutcome, ObservedChildTermination};
@@ -21,10 +21,10 @@ use crate::data::request::{DataOperation, ForegroundDataRequest};
 use crate::data::runtime::{AdmittedBundle, admit_bundle, recheck_executable_integrity};
 use crate::data::session::{
     build_coordinator, build_project_identity, load_and_validate_terminal_session,
-    load_terminal_session, persist_abnormal_termination,
-    select_and_prepare_session, validate_root_summary_against_record,
+    persist_abnormal_termination, select_and_prepare_session, validate_or_rebuild_root_summary,
+    validate_terminal_session_identity,
 };
-use crate::session::{PreparedSessionLaunch, SessionCoordinationError};
+use crate::session::PreparedSessionLaunch;
 
 // ---------------------------------------------------------------------------
 // Launcher seam
@@ -122,6 +122,15 @@ pub(crate) struct RunningForegroundExecution {
     source_name: String,
 }
 
+enum WaitRecoveryState {
+    WaitFailed,
+    ChildAlreadyExited,
+    TerminationRequested,
+    TerminationObserved,
+    Reaped,
+    OwnershipUncertain,
+}
+
 impl RunningForegroundExecution {
     /// Wait for the child to exit and reconcile the session.
     ///
@@ -130,42 +139,15 @@ impl RunningForegroundExecution {
     pub(crate) fn wait_and_reconcile(
         mut self,
     ) -> Result<ForegroundDataOutcome, ForegroundDataExecutionError> {
-        // Wait loop: retry on EINTR, recover on other errors.
         let termination = loop {
             match self.child.wait() {
                 Ok(status) => break observe_termination(status),
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                    // Retry: do not release ownership.
-                    continue;
-                }
-                Err(wait_err) => {
-                    return self.handle_wait_error(wait_err);
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(wait_err) => return self.handle_wait_error(wait_err),
             }
         };
 
-        // The prepared record is needed for validation.
-        let prepared_record = self.prepared.record().clone();
-        let operation = self.operation;
-        let source_name = self.source_name.clone();
-        let project_name = self.project_name.clone();
-        let operation_root = self.prepared.operation_root().to_path_buf();
-
-        // Lease is still held via self.prepared; drop self (releasing the lease) only after
-        // reconciliation below.
-        let coordinator_store_path = operation_root.clone();
-
-        // Reconcile and build outcome; lease is released when self is dropped at end of
-        // this scope (or when fail_running_session consumes prepared).
-        reconcile_termination_with_lease(
-            termination,
-            self,
-            &prepared_record,
-            &coordinator_store_path,
-            operation,
-            &source_name,
-            &project_name,
-        )
+        reconcile_terminal_execution(self, termination)
     }
 
     /// Recovery path when `child.wait()` fails with a non-Interrupted error.
@@ -175,51 +157,145 @@ impl RunningForegroundExecution {
         mut self,
         wait_err: std::io::Error,
     ) -> Result<ForegroundDataOutcome, ForegroundDataExecutionError> {
+        let mut _state = WaitRecoveryState::WaitFailed;
+        let mut try_wait_error: Option<std::io::Error> = None;
         let mut kill_error: Option<std::io::Error> = None;
         let mut reap_error: Option<std::io::Error> = None;
-        let mut reconciliation_error: Option<SessionCoordinationError> = None;
 
-        // Attempt kill.
-        if let Err(e) = self.child.kill() {
-            kill_error = Some(e);
-        }
-
-        // Attempt reap.
-        match self.child.wait() {
-            Ok(_) => {}
-            Err(e) => {
-                reap_error = Some(e);
+        let termination = match self.child.try_wait() {
+            Ok(Some(status)) => {
+                _state = WaitRecoveryState::ChildAlreadyExited;
+                Some(observe_termination(status))
             }
-        }
+            Ok(None) => {
+                let mut observed_after_kill_failure: Option<ObservedChildTermination> = None;
+                match self.child.kill() {
+                    Ok(()) => {
+                        _state = WaitRecoveryState::TerminationRequested;
+                    }
+                    Err(err) => {
+                        kill_error = Some(err);
+                        match self.child.try_wait() {
+                            Ok(Some(status)) => {
+                                _state = WaitRecoveryState::TerminationObserved;
+                                observed_after_kill_failure = Some(observe_termination(status));
+                            }
+                            Ok(None) => {
+                                _state = WaitRecoveryState::OwnershipUncertain;
+                                return Err(self.ownership_uncertain(wait_err, try_wait_error, kill_error, reap_error));
+                            }
+                            Err(err) => {
+                                try_wait_error = Some(err);
+                                _state = WaitRecoveryState::OwnershipUncertain;
+                                return Err(self.ownership_uncertain(wait_err, try_wait_error, kill_error, reap_error));
+                            }
+                        }
+                    }
+                }
 
-        // Inspect durable session state and reconcile to Failed if non-terminal.
-        let operation_root = self.prepared.operation_root().to_path_buf();
-        let session_id = self.prepared.session().clone();
-        if let Ok(record) = load_terminal_session(&operation_root, &session_id) {
-            if matches!(record.state(), SessionState::Prepared | SessionState::Running) {
-                if let Err(e) = persist_abnormal_termination(
-                    &operation_root,
-                    &session_id,
-                    record.revision(),
-                    SessionFailureCode::AbnormalTermination,
-                    Some("wait error during foreground supervision".to_owned()),
-                ) {
-                    reconciliation_error = Some(e);
+                if let Some(termination) = observed_after_kill_failure {
+                    _state = WaitRecoveryState::Reaped;
+                    Some(termination)
+                } else {
+                    loop {
+                        match self.child.wait() {
+                            Ok(status) => {
+                                _state = WaitRecoveryState::Reaped;
+                                break Some(observe_termination(status));
+                            }
+                            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(err) => {
+                                reap_error = Some(err);
+                                match self.child.try_wait() {
+                                    Ok(Some(status)) => {
+                                        _state = WaitRecoveryState::Reaped;
+                                        break Some(observe_termination(status));
+                                    }
+                                    Ok(None) => {
+                                        _state = WaitRecoveryState::OwnershipUncertain;
+                                        return Err(self.ownership_uncertain(wait_err, try_wait_error, kill_error, reap_error));
+                                    }
+                                    Err(err) => {
+                                        try_wait_error = Some(err);
+                                        _state = WaitRecoveryState::OwnershipUncertain;
+                                        return Err(self.ownership_uncertain(wait_err, try_wait_error, kill_error, reap_error));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
-        }
+            Err(err) => {
+                try_wait_error = Some(err);
+                _state = WaitRecoveryState::OwnershipUncertain;
+                return Err(self.ownership_uncertain(wait_err, try_wait_error, kill_error, reap_error));
+            }
+        };
 
-        // Release lease (via drop of self.prepared and self.child).
-        drop(self);
+        let Some(termination) = termination else {
+            _state = WaitRecoveryState::OwnershipUncertain;
+            return Err(self.ownership_uncertain(wait_err, try_wait_error, kill_error, reap_error));
+        };
+
+        let final_state = match reconcile_wait_recovery_session_state(&mut self, &termination) {
+            Ok(state) => Some(state),
+            Err(session_error) => {
+                let (session_load_error, session_reconciliation_error) = match session_error {
+                    ForegroundDataExecutionError::MissingTerminalSession(_)
+                    | ForegroundDataExecutionError::CorruptTerminalSession(_)
+                    | ForegroundDataExecutionError::SessionIdentityDisagreement(_) => {
+                        (Some(Box::new(session_error)), None)
+                    }
+                    _ => (None, Some(Box::new(session_error))),
+                };
+                return Err(ForegroundDataExecutionError::ProcessWaitRecovery(Box::new(
+                    WaitRecoveryFailure {
+                        wait_error: wait_err,
+                        kill_error,
+                        try_wait_error,
+                        reap_error,
+                        session_load_error,
+                        session_reconciliation_error,
+                        final_state: None,
+                    },
+                )));
+            }
+        };
 
         Err(ForegroundDataExecutionError::ProcessWaitRecovery(Box::new(
             WaitRecoveryFailure {
                 wait_error: wait_err,
                 kill_error,
+                try_wait_error,
                 reap_error,
-                reconciliation_error,
+                session_load_error: None,
+                session_reconciliation_error: None,
+                final_state,
             },
         )))
+    }
+
+    fn ownership_uncertain(
+        mut self,
+        wait_error: std::io::Error,
+        try_wait_error: Option<std::io::Error>,
+        kill_error: Option<std::io::Error>,
+        reap_error: Option<std::io::Error>,
+    ) -> ForegroundDataExecutionError {
+        let (session_load_error, session_reconciliation_error) =
+            best_effort_reconcile_when_ownership_uncertain(&mut self);
+
+        ForegroundDataExecutionError::ChildOwnershipUncertain(Box::new(
+            ChildOwnershipUncertainError {
+                wait_error,
+                try_wait_error,
+                kill_error,
+                reap_error,
+                session_load_error,
+                session_reconciliation_error,
+            },
+        ))
     }
 }
 
@@ -406,11 +482,8 @@ fn preparation_error_to_execution_error(cause: ForegroundPreparationError) -> Fo
         ForegroundPreparationError::InvocationEncoding(e) => {
             ForegroundDataExecutionError::InvocationEncoding(e)
         }
-        ForegroundPreparationError::ExecutableIntegrityChanged { path, detail } => {
-            ForegroundDataExecutionError::ExecutableIntegrityChanged { path, detail }
-        }
-        ForegroundPreparationError::ExecutableIntegrityCheck(e) => {
-            ForegroundDataExecutionError::ExecutableIntegrityCheck(e)
+        ForegroundPreparationError::ExecutableIntegrity(e) => {
+            ForegroundDataExecutionError::ExecutableIntegrity(e)
         }
         ForegroundPreparationError::ProcessSpawn(e) => {
             ForegroundDataExecutionError::ProcessSpawn { source: e, persistence_failure: None }
@@ -453,16 +526,7 @@ fn build_invocation_envelope(
 fn recheck_executable_integrity_typed(
     admitted: &AdmittedBundle,
 ) -> Result<(), ForegroundPreparationError> {
-    match recheck_executable_integrity(admitted) {
-        Ok(()) => Ok(()),
-        Err(ForegroundDataExecutionError::ExecutableIntegrityChanged { path, detail }) => {
-            Err(ForegroundPreparationError::ExecutableIntegrityChanged { path, detail })
-        }
-        Err(ForegroundDataExecutionError::ExecutableIntegrityCheck(e)) => {
-            Err(ForegroundPreparationError::ExecutableIntegrityCheck(e))
-        }
-        Err(_) => unreachable!("recheck_executable_integrity only returns these two variants"),
-    }
+    recheck_executable_integrity(admitted).map_err(ForegroundPreparationError::ExecutableIntegrity)
 }
 
 // ---------------------------------------------------------------------------
@@ -490,52 +554,68 @@ fn observe_termination(status: std::process::ExitStatus) -> ObservedChildTermina
 // Termination reconciliation (lease still held via `running`)
 // ---------------------------------------------------------------------------
 
-fn reconcile_termination_with_lease(
-    termination: ObservedChildTermination,
+pub fn reconcile_terminal_execution(
     running: RunningForegroundExecution,
-    prepared_record: &SessionRecordV1,
-    operation_root: &std::path::Path,
-    operation: DataOperation,
-    source_name: &str,
-    project_name: &str,
+    termination: ObservedChildTermination,
 ) -> Result<ForegroundDataOutcome, ForegroundDataExecutionError> {
+    let prepared_record = running.prepared.record().clone();
+    let operation_root = running.prepared.operation_root().to_path_buf();
+    let operation = running.operation;
+    let source_name = running.source_name.clone();
+    let project_name = running.project_name.clone();
     let execution_mode = prepared_record.execution_mode();
-    let session_id = prepared_record.session().clone();
 
+    let op_root = lexicon_core::session::SessionOperationRoot::new(operation_root.clone())
+        .map_err(ForegroundDataExecutionError::StaleSessionReconciliation)?;
+    let store = lexicon_core::session::SessionStore::open(op_root)
+        .map_err(ForegroundDataExecutionError::MissingTerminalSession)?;
+
+    let record = load_and_validate_terminal_session(&operation_root, &prepared_record)?;
     match termination {
-        ObservedChildTermination::ExitCode(0) => {
-            reconcile_zero_exit(
-                running,
-                prepared_record,
-                operation_root,
-                operation,
-                source_name,
-                project_name,
-                execution_mode,
-            )
-        }
-        ObservedChildTermination::ExitCode(code) => {
-            reconcile_nonzero_exit(
-                code,
-                running,
-                prepared_record,
-                operation_root,
-                operation,
-                source_name,
-            )
-        }
-        ObservedChildTermination::Signaled { signal } => {
-            reconcile_signal(ObservedChildTermination::Signaled { signal }, running, prepared_record, operation_root, operation, source_name)
-        }
-        ObservedChildTermination::UnknownAbnormalTermination => {
-            reconcile_signal(ObservedChildTermination::UnknownAbnormalTermination, running, prepared_record, operation_root, operation, source_name)
-        }
+        ObservedChildTermination::ExitCode(0) => reconcile_zero_exit(
+            record,
+            &prepared_record,
+            &store,
+            &operation_root,
+            operation,
+            &source_name,
+            &project_name,
+            execution_mode,
+        ),
+        ObservedChildTermination::ExitCode(exit_code) => reconcile_nonzero_exit(
+            record,
+            &prepared_record,
+            &store,
+            &operation_root,
+            operation,
+            &source_name,
+            exit_code,
+        ),
+        ObservedChildTermination::Signaled { signal } => reconcile_abnormal_termination(
+            record,
+            &prepared_record,
+            &store,
+            &operation_root,
+            operation,
+            &source_name,
+            ObservedChildTermination::Signaled { signal },
+        ),
+        ObservedChildTermination::UnknownAbnormalTermination => reconcile_abnormal_termination(
+            record,
+            &prepared_record,
+            &store,
+            &operation_root,
+            operation,
+            &source_name,
+            ObservedChildTermination::UnknownAbnormalTermination,
+        ),
     }
 }
 
 fn reconcile_zero_exit(
-    running: RunningForegroundExecution,
+    record: SessionRecordV1,
     prepared_record: &SessionRecordV1,
+    store: &lexicon_core::session::SessionStore,
     operation_root: &std::path::Path,
     operation: DataOperation,
     source_name: &str,
@@ -543,51 +623,10 @@ fn reconcile_zero_exit(
     execution_mode: RuntimeExecutionMode,
 ) -> Result<ForegroundDataOutcome, ForegroundDataExecutionError> {
     let session_id = prepared_record.session().clone();
-
-    // Load and validate the detailed record identity.
-    let record = load_and_validate_terminal_session(operation_root, prepared_record)?;
-
     match record.state() {
         SessionState::Succeeded => {
-            // Validate root summary; attempt rebuild if missing/stale.
-            let op_root = lexicon_core::session::SessionOperationRoot::new(operation_root.to_path_buf())
-                .map_err(ForegroundDataExecutionError::StaleSessionReconciliation)?;
-            let store = lexicon_core::session::SessionStore::open(op_root)
-                .map_err(ForegroundDataExecutionError::MissingTerminalSession)?;
-
-            match validate_root_summary_against_record(&store, &record) {
-                Ok(()) => {}
-                Err(detail) => {
-                    // Attempt rebuild.
-                    match store.rebuild_status_from_record(&session_id) {
-                        Ok(_) => {
-                            // Reload and re-validate.
-                            match validate_root_summary_against_record(&store, &record) {
-                                Ok(()) => {}
-                                Err(detail2) => {
-                                    // Lease released when running is dropped.
-                                    drop(running);
-                                    return Err(ForegroundDataExecutionError::RootSummaryReconciliationFailed {
-                                        detail: detail2,
-                                        rebuild_error: None,
-                                    });
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            drop(running);
-                            return Err(ForegroundDataExecutionError::RootSummaryReconciliationFailed {
-                                detail,
-                                rebuild_error: Some(e),
-                            });
-                        }
-                    }
-                }
-            }
-
-            // Release lease.
-            drop(running);
-
+            validate_or_rebuild_root_summary(store, &record)
+                .map_err(ForegroundDataExecutionError::RootSummaryReconciliationFailed)?;
             Ok(ForegroundDataOutcome {
                 project: project_name.to_owned(),
                 source: source_name.to_owned(),
@@ -597,13 +636,13 @@ fn reconcile_zero_exit(
             })
         }
         SessionState::Failed => {
+            validate_or_rebuild_root_summary(store, &record)
+                .map_err(ForegroundDataExecutionError::RootSummaryReconciliationFailed)?;
             let failure = record.failure().cloned();
-            // Release lease.
-            drop(running);
             Err(ForegroundDataExecutionError::ChildFailed {
-                operation: operation.display_name().to_owned(),
+                operation,
                 source: source_name.to_owned(),
-                session: session_id.id().to_owned(),
+                session: session_id,
                 failure_kind: failure
                     .as_ref()
                     .map(|f| f.kind())
@@ -612,66 +651,55 @@ fn reconcile_zero_exit(
                     .as_ref()
                     .map(|f| f.code())
                     .unwrap_or(SessionFailureCode::AbnormalTermination),
-                exit_code: 0,
+                exit_code: Some(0),
             })
         }
         SessionState::Prepared | SessionState::Running => {
-            // Abnormal: zero exit without completion; transition to Failed while holding lease.
-            let revision = record.revision();
-            match persist_abnormal_termination(
+            let transitioned = persist_abnormal_termination(
                 operation_root,
                 &session_id,
-                revision,
+                record.revision(),
                 SessionFailureCode::ZeroExitWithoutCompletion,
                 Some("child exited zero without completing the session".to_owned()),
-            ) {
-                Ok(_) => {
-                    drop(running);
-                    Err(ForegroundDataExecutionError::ZeroExitSessionIncomplete {
-                        session: session_id.id().to_owned(),
-                        operation: operation.display_name().to_owned(),
-                    })
-                }
-                Err(e) => {
-                    drop(running);
-                    Err(ForegroundDataExecutionError::AbnormalTerminationPersistence {
-                        termination: ObservedChildTermination::ExitCode(0),
-                        persistence_failure: e,
-                    })
-                }
-            }
-        }
-        SessionState::Abandoned => {
-            drop(running);
-            Err(ForegroundDataExecutionError::ExitSessionDisagreement {
+            )
+            .map_err(|persistence_failure| ForegroundDataExecutionError::AbnormalTerminationPersistence {
                 termination: ObservedChildTermination::ExitCode(0),
-                durable_state: SessionState::Abandoned,
+                persistence_failure,
+            })?;
+            validate_terminal_session_identity(prepared_record, &transitioned)?;
+            validate_or_rebuild_root_summary(store, &transitioned)
+                .map_err(ForegroundDataExecutionError::RootSummaryReconciliationFailed)?;
+            Err(ForegroundDataExecutionError::ZeroExitSessionIncomplete {
+                session: session_id,
+                operation,
             })
         }
+        SessionState::Abandoned => Err(ForegroundDataExecutionError::ExitSessionDisagreement {
+            termination: ObservedChildTermination::ExitCode(0),
+            durable_state: SessionState::Abandoned,
+        }),
     }
 }
 
 fn reconcile_nonzero_exit(
-    exit_code: i32,
-    running: RunningForegroundExecution,
+    record: SessionRecordV1,
     prepared_record: &SessionRecordV1,
+    store: &lexicon_core::session::SessionStore,
     operation_root: &std::path::Path,
     operation: DataOperation,
     source_name: &str,
+    exit_code: i32,
 ) -> Result<ForegroundDataOutcome, ForegroundDataExecutionError> {
     let session_id = prepared_record.session().clone();
-    let record = load_and_validate_terminal_session(operation_root, prepared_record)?;
-
     match record.state() {
         SessionState::Failed => {
+            validate_or_rebuild_root_summary(store, &record)
+                .map_err(ForegroundDataExecutionError::RootSummaryReconciliationFailed)?;
             let failure = record.failure().cloned();
-            // Validate or rebuild root summary while lease is held.
-            let _ = validate_or_rebuild_summary_if_needed(operation_root, &session_id, &record);
-            drop(running);
             Err(ForegroundDataExecutionError::ChildFailed {
-                operation: operation.display_name().to_owned(),
+                operation,
                 source: source_name.to_owned(),
-                session: session_id.id().to_owned(),
+                session: session_id,
                 failure_kind: failure
                     .as_ref()
                     .map(|f| f.kind())
@@ -680,133 +708,183 @@ fn reconcile_nonzero_exit(
                     .as_ref()
                     .map(|f| f.code())
                     .unwrap_or(SessionFailureCode::NonzeroExitWithoutFailureRecord),
-                exit_code,
-            })
-        }
-        SessionState::Succeeded => {
-            drop(running);
-            Err(ForegroundDataExecutionError::ExitSessionDisagreement {
-                termination: ObservedChildTermination::ExitCode(exit_code),
-                durable_state: SessionState::Succeeded,
+                exit_code: Some(exit_code),
             })
         }
         SessionState::Prepared | SessionState::Running => {
-            let revision = record.revision();
-            match persist_abnormal_termination(
+            let transitioned = persist_abnormal_termination(
                 operation_root,
                 &session_id,
-                revision,
+                record.revision(),
                 SessionFailureCode::NonzeroExitWithoutFailureRecord,
                 None,
-            ) {
-                Ok(_) => {
-                    drop(running);
-                    Err(ForegroundDataExecutionError::AbnormalTermination {
-                        operation: operation.display_name().to_owned(),
-                        source: source_name.to_owned(),
-                        session: session_id.id().to_owned(),
-                        signal: None,
-                    })
-                }
-                Err(e) => {
-                    drop(running);
-                    Err(ForegroundDataExecutionError::AbnormalExitPersistence {
-                        exit_code,
-                        persistence_failure: e,
-                    })
-                }
-            }
-        }
-        SessionState::Abandoned => {
-            drop(running);
-            Err(ForegroundDataExecutionError::ExitSessionDisagreement {
-                termination: ObservedChildTermination::ExitCode(exit_code),
-                durable_state: SessionState::Abandoned,
+            )
+            .map_err(|persistence_failure| ForegroundDataExecutionError::AbnormalExitPersistence {
+                exit_code,
+                persistence_failure,
+            })?;
+            validate_terminal_session_identity(prepared_record, &transitioned)?;
+            validate_or_rebuild_root_summary(store, &transitioned)
+                .map_err(ForegroundDataExecutionError::RootSummaryReconciliationFailed)?;
+            Err(ForegroundDataExecutionError::AbnormalTermination {
+                operation,
+                source: source_name.to_owned(),
+                session: session_id,
+                signal: None,
             })
         }
+        SessionState::Succeeded => Err(ForegroundDataExecutionError::ExitSessionDisagreement {
+            termination: ObservedChildTermination::ExitCode(exit_code),
+            durable_state: SessionState::Succeeded,
+        }),
+        SessionState::Abandoned => Err(ForegroundDataExecutionError::ExitSessionDisagreement {
+            termination: ObservedChildTermination::ExitCode(exit_code),
+            durable_state: SessionState::Abandoned,
+        }),
     }
 }
 
-fn reconcile_signal(
-    termination: ObservedChildTermination,
-    running: RunningForegroundExecution,
+fn reconcile_abnormal_termination(
+    record: SessionRecordV1,
     prepared_record: &SessionRecordV1,
+    store: &lexicon_core::session::SessionStore,
     operation_root: &std::path::Path,
     operation: DataOperation,
     source_name: &str,
+    termination: ObservedChildTermination,
 ) -> Result<ForegroundDataOutcome, ForegroundDataExecutionError> {
     let session_id = prepared_record.session().clone();
-    // Extract optional signal number for error construction.
-    let signal = match &termination {
-        ObservedChildTermination::Signaled { signal } => *signal,
+    let signal = match termination {
+        ObservedChildTermination::Signaled { signal } => signal,
         _ => None,
     };
 
-    if let Ok(record) = load_terminal_session(operation_root, &session_id) {
-        match record.state() {
-            SessionState::Succeeded | SessionState::Failed => {
-                // Preserve the existing terminal record; validate/rebuild root summary.
-                let _ = validate_or_rebuild_summary_if_needed(operation_root, &session_id, &record);
-            }
-            SessionState::Abandoned => {
-                // Do not mutate an Abandoned record; return a typed state disagreement.
-                drop(running);
-                return Err(ForegroundDataExecutionError::ExitSessionDisagreement {
-                    termination,
-                    durable_state: SessionState::Abandoned,
-                });
-            }
-            SessionState::Prepared | SessionState::Running => {
-                let revision = record.revision();
-                if let Err(persist_err) = persist_abnormal_termination(
-                    operation_root,
-                    &session_id,
-                    revision,
-                    SessionFailureCode::AbnormalTermination,
-                    signal.map(|s| format!("terminated by signal {s}")),
-                ) {
-                    drop(running);
-                    return Err(ForegroundDataExecutionError::AbnormalTerminationPersistence {
-                        termination,
-                        persistence_failure: persist_err,
-                    });
-                }
-                // Validate root summary after successful transition.
-                let _ = validate_or_rebuild_summary_if_needed(operation_root, &session_id, &record);
-            }
+    match record.state() {
+        SessionState::Prepared | SessionState::Running => {
+            let transitioned = persist_abnormal_termination(
+                operation_root,
+                &session_id,
+                record.revision(),
+                SessionFailureCode::AbnormalTermination,
+                signal.map(|s| format!("terminated by signal {s}")),
+            )
+            .map_err(|persistence_failure| ForegroundDataExecutionError::AbnormalTerminationPersistence {
+                termination: termination.clone(),
+                persistence_failure,
+            })?;
+            validate_terminal_session_identity(prepared_record, &transitioned)?;
+            validate_or_rebuild_root_summary(store, &transitioned)
+                .map_err(ForegroundDataExecutionError::RootSummaryReconciliationFailed)?;
+            Err(ForegroundDataExecutionError::AbnormalTermination {
+                operation,
+                source: source_name.to_owned(),
+                session: session_id,
+                signal,
+            })
         }
+        SessionState::Failed => {
+            validate_or_rebuild_root_summary(store, &record)
+                .map_err(ForegroundDataExecutionError::RootSummaryReconciliationFailed)?;
+            let failure = record.failure().cloned();
+            Err(ForegroundDataExecutionError::ChildFailed {
+                operation,
+                source: source_name.to_owned(),
+                session: session_id,
+                failure_kind: failure
+                    .as_ref()
+                    .map(|f| f.kind())
+                    .unwrap_or(SessionFailureKind::AbnormalTermination),
+                failure_code: failure
+                    .as_ref()
+                    .map(|f| f.code())
+                    .unwrap_or(SessionFailureCode::AbnormalTermination),
+                exit_code: None,
+            })
+        }
+        SessionState::Succeeded => {
+            validate_or_rebuild_root_summary(store, &record)
+                .map_err(ForegroundDataExecutionError::RootSummaryReconciliationFailed)?;
+            Err(ForegroundDataExecutionError::ExitSessionDisagreement {
+                termination,
+                durable_state: SessionState::Succeeded,
+            })
+        }
+        SessionState::Abandoned => Err(ForegroundDataExecutionError::ExitSessionDisagreement {
+            termination,
+            durable_state: SessionState::Abandoned,
+        }),
     }
-
-    drop(running);
-
-    Err(ForegroundDataExecutionError::AbnormalTermination {
-        operation: operation.display_name().to_owned(),
-        source: source_name.to_owned(),
-        session: session_id.id().to_owned(),
-        signal,
-    })
 }
 
-// ---------------------------------------------------------------------------
-// Root summary helpers
-// ---------------------------------------------------------------------------
+fn reconcile_wait_recovery_session_state(
+    running: &mut RunningForegroundExecution,
+    termination: &ObservedChildTermination,
+) -> Result<SessionState, ForegroundDataExecutionError> {
+    let prepared_record = running.prepared.record().clone();
+    let operation_root = running.prepared.operation_root().to_path_buf();
+    let op_root = lexicon_core::session::SessionOperationRoot::new(operation_root.clone())
+        .map_err(ForegroundDataExecutionError::StaleSessionReconciliation)?;
+    let store = lexicon_core::session::SessionStore::open(op_root)
+        .map_err(ForegroundDataExecutionError::MissingTerminalSession)?;
+    let record = load_and_validate_terminal_session(&operation_root, &prepared_record)?;
 
-fn validate_or_rebuild_summary_if_needed(
-    operation_root: &std::path::Path,
-    session_id: &SessionIdentity,
-    record: &SessionRecordV1,
-) -> Result<(), ()> {
-    let op_root = match lexicon_core::session::SessionOperationRoot::new(operation_root.to_path_buf()) {
-        Ok(r) => r,
-        Err(_) => return Err(()),
+    let final_record = match record.state() {
+        SessionState::Prepared | SessionState::Running => persist_abnormal_termination(
+            &operation_root,
+            prepared_record.session(),
+            record.revision(),
+            SessionFailureCode::AbnormalTermination,
+            Some("wait recovery terminated the runtime process".to_owned()),
+        )
+        .map_err(|persistence_failure| ForegroundDataExecutionError::AbnormalTerminationPersistence {
+            termination: termination.clone(),
+            persistence_failure,
+        })?,
+        _ => record,
+    };
+    validate_terminal_session_identity(&prepared_record, &final_record)?;
+    validate_or_rebuild_root_summary(&store, &final_record)
+        .map_err(ForegroundDataExecutionError::RootSummaryReconciliationFailed)?;
+    Ok(final_record.state())
+}
+
+fn best_effort_reconcile_when_ownership_uncertain(
+    running: &mut RunningForegroundExecution,
+) -> (
+    Option<Box<ForegroundDataExecutionError>>,
+    Option<Box<ForegroundDataExecutionError>>,
+) {
+    let prepared_record = running.prepared.record().clone();
+    let operation_root = running.prepared.operation_root().to_path_buf();
+    let op_root = match lexicon_core::session::SessionOperationRoot::new(operation_root.clone()) {
+        Ok(root) => root,
+        Err(err) => {
+            return (
+                Some(Box::new(ForegroundDataExecutionError::StaleSessionReconciliation(err))),
+                None,
+            );
+        }
     };
     let store = match lexicon_core::session::SessionStore::open(op_root) {
-        Ok(s) => s,
-        Err(_) => return Err(()),
+        Ok(store) => store,
+        Err(err) => {
+            return (
+                Some(Box::new(ForegroundDataExecutionError::MissingTerminalSession(err))),
+                None,
+            );
+        }
     };
-    if validate_root_summary_against_record(&store, record).is_ok() {
-        return Ok(());
+    match load_and_validate_terminal_session(&operation_root, &prepared_record) {
+        Ok(record) => {
+            if record.state().is_terminal() {
+                if let Err(err) = validate_or_rebuild_root_summary(&store, &record)
+                    .map_err(ForegroundDataExecutionError::RootSummaryReconciliationFailed)
+                {
+                    return (None, Some(Box::new(err)));
+                }
+            }
+            (None, None)
+        }
+        Err(err) => (Some(Box::new(err)), None),
     }
-    store.rebuild_status_from_record(session_id).map(|_| ()).map_err(|_| ())
 }
-
