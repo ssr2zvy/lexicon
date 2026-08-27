@@ -627,7 +627,12 @@ fn generate_source_scaffold(
         ),
         (
             "http/get-raw-data/lexicon-runner/Cargo.toml",
-            format_runner_cargo_toml(&get_runner_name, &get_binary_name, "../get-raw-data-impl"),
+            format_runner_cargo_toml(
+                &get_runner_name,
+                &get_binary_name,
+                &get_name,
+                "../get-raw-data-impl",
+            ),
         ),
         (
             "http/get-raw-data/lexicon-runner/src/main.rs",
@@ -658,6 +663,7 @@ fn generate_source_scaffold(
             format_runner_cargo_toml(
                 &process_runner_name,
                 &process_binary_name,
+                &process_name,
                 "../process-data-impl",
             ),
         ),
@@ -884,13 +890,13 @@ fn build_source(
     })?;
 
     let get_bundle = crate::build::stage_verified_http_runtime_bundle(
-        &get_runtime_dir,
+        &get_workspace,
         &format!("{source_name}-get-raw-data"),
         &get_verified,
     )
     .map_err(ManagedSourceBuildError::AcquisitionStaging)?;
     let process_bundle = crate::build::stage_verified_processing_runtime_bundle(
-        &process_runtime_dir,
+        &process_workspace,
         &format!("{source_name}-process-data"),
         &process_verified,
     )
@@ -1670,6 +1676,7 @@ fn format_implementation_cargo_toml(package_name: &str) -> String {
 fn format_runner_cargo_toml(
     package_name: &str,
     binary_name: &str,
+    implementation_package_name: &str,
     implementation_path: &str,
 ) -> String {
     let mut out = String::new();
@@ -1682,7 +1689,7 @@ fn format_runner_cargo_toml(
     out.push_str("path = \"src/main.rs\"\n\n");
     out.push_str("[dependencies]\n");
     out.push_str(&format!(
-        "source_implementation = {{ path = \"{implementation_path}\" }}\n"
+        "source_implementation = {{ package = \"{implementation_package_name}\", path = \"{implementation_path}\" }}\n"
     ));
     out.push_str("lexicon_core = { workspace = true }\n");
     out
@@ -2501,6 +2508,18 @@ fn validate_managed_workspace_layout(
             operation_name
         )));
     }
+    if runner_implementation_dependency
+        .get("package")
+        .and_then(toml::Value::as_str)
+        != Some(expected_impl_name)
+    {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(
+            format!(
+                "managed {} runner manifest must rename source_implementation from package '{}'",
+                operation_name, expected_impl_name
+            ),
+        ));
+    }
 
     Ok(())
 }
@@ -2665,6 +2684,7 @@ mod tests {
             format_runner_cargo_toml(
                 &runner_name,
                 &binary_name,
+                &impl_name,
                 &format!("../{operation_name}-impl"),
             ),
         )
