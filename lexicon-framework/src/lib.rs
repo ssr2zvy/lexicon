@@ -252,6 +252,7 @@ impl std::error::Error for ManagedSourceBuildError {
 
 #[derive(Debug, Deserialize)]
 struct CargoMetadataDocument {
+    workspace_members: Vec<String>,
     packages: Vec<CargoMetadataPackage>,
 }
 
@@ -259,6 +260,15 @@ struct CargoMetadataDocument {
 struct CargoMetadataPackage {
     id: String,
     name: String,
+    manifest_path: PathBuf,
+    targets: Vec<CargoMetadataTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadataTarget {
+    name: String,
+    kind: Vec<String>,
+    src_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -721,6 +731,14 @@ fn build_source(
         &format!("{source_name}-get-raw-data"),
     )
     .map_err(ManagedSourceBuildError::WorkspaceValidation)?;
+    validate_managed_workspace_metadata(
+        &get_workspace,
+        "get-raw-data",
+        &format!("{source_name}-get-raw-data"),
+        &format!("{source_name}-get-raw-data-runner"),
+        &format!("{source_name}-get-raw-data"),
+    )
+    .map_err(ManagedSourceBuildError::Metadata)?;
     validate_managed_workspace_layout(
         &process_workspace,
         source_name,
@@ -730,6 +748,14 @@ fn build_source(
         &format!("{source_name}-process-data"),
     )
     .map_err(ManagedSourceBuildError::WorkspaceValidation)?;
+    validate_managed_workspace_metadata(
+        &process_workspace,
+        "process-data",
+        &format!("{source_name}-process-data"),
+        &format!("{source_name}-process-data-runner"),
+        &format!("{source_name}-process-data"),
+    )
+    .map_err(ManagedSourceBuildError::Metadata)?;
 
     let get_lockfile = get_workspace.join("Cargo.lock");
     let process_lockfile = process_workspace.join("Cargo.lock");
@@ -873,10 +899,9 @@ fn ensure_lockfile_unchanged(lockfile: &Path, original: &[u8]) -> Result<(), Man
     Ok(())
 }
 
-fn resolve_managed_package_id(
+fn load_managed_workspace_metadata(
     workspace_manifest: &Path,
-    package_name: &str,
-) -> Result<String, ManagedRunnerArtifactSelectionError> {
+) -> Result<CargoMetadataDocument, ManagedWorkspaceMetadataError> {
     let output = Command::new("cargo")
         .arg("metadata")
         .arg("--manifest-path")
@@ -887,26 +912,163 @@ fn resolve_managed_package_id(
         .arg("1")
         .output()
         .map_err(|error| {
-            ManagedRunnerArtifactSelectionError::MetadataCommand(format!(
+            ManagedWorkspaceMetadataError::CommandFailed(format!(
                 "failed to run cargo metadata for {}: {error}",
                 workspace_manifest.display()
             ))
         })?;
 
     if !output.status.success() {
-        return Err(ManagedRunnerArtifactSelectionError::MetadataCommand(format!(
+        return Err(ManagedWorkspaceMetadataError::CommandFailed(format!(
             "cargo metadata failed for {}: {}",
             workspace_manifest.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
 
-    let metadata: CargoMetadataDocument = serde_json::from_slice(&output.stdout).map_err(|error| {
-        ManagedRunnerArtifactSelectionError::MetadataOutput(format!(
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        ManagedWorkspaceMetadataError::OutputInvalid(format!(
             "failed to parse cargo metadata for {}: {error}",
             workspace_manifest.display()
         ))
-    })?;
+    })
+}
+
+fn target_has_kind(target: &CargoMetadataTarget, expected_kind: &str) -> bool {
+    target.kind.iter().any(|kind| kind == expected_kind)
+}
+
+fn validate_managed_workspace_metadata(
+    workspace_root: &Path,
+    operation_name: &str,
+    expected_impl_name: &str,
+    expected_runner_name: &str,
+    expected_binary_name: &str,
+) -> Result<(), ManagedWorkspaceMetadataError> {
+    let metadata = load_managed_workspace_metadata(&workspace_root.join("Cargo.toml"))?;
+    if metadata.packages.len() != 2 {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} workspace metadata must contain exactly two packages, found {}",
+            metadata.packages.len()
+        )));
+    }
+
+    let implementation = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == expected_impl_name)
+        .ok_or_else(|| ManagedWorkspaceMetadataError::PackageNotFound {
+            name: expected_impl_name.to_owned(),
+        })?;
+    let runner = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == expected_runner_name)
+        .ok_or_else(|| ManagedWorkspaceMetadataError::PackageNotFound {
+            name: expected_runner_name.to_owned(),
+        })?;
+
+    let mut expected_members = vec![implementation.id.clone(), runner.id.clone()];
+    expected_members.sort();
+    let mut actual_members = metadata.workspace_members;
+    actual_members.sort();
+    if actual_members != expected_members {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} workspace metadata has incorrect members: expected {:?}, found {:?}",
+            expected_members, actual_members
+        )));
+    }
+
+    let expected_impl_manifest = workspace_root.join(format!("{operation_name}-impl/Cargo.toml"));
+    if implementation.manifest_path != expected_impl_manifest {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} implementation manifest path mismatch: expected {}, found {}",
+            expected_impl_manifest.display(),
+            implementation.manifest_path.display()
+        )));
+    }
+    let expected_runner_manifest = workspace_root.join("lexicon-runner/Cargo.toml");
+    if runner.manifest_path != expected_runner_manifest {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} runner manifest path mismatch: expected {}, found {}",
+            expected_runner_manifest.display(),
+            runner.manifest_path.display()
+        )));
+    }
+
+    let implementation_lib = implementation
+        .targets
+        .iter()
+        .find(|target| target_has_kind(target, "lib"))
+        .ok_or_else(|| {
+            ManagedWorkspaceMetadataError::OutputInvalid(format!(
+                "managed {operation_name} implementation metadata has no library target"
+            ))
+        })?;
+    if implementation_lib.src_path != workspace_root.join(format!("{operation_name}-impl/src/lib.rs")) {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} implementation library target path mismatch: expected {}, found {}",
+            workspace_root
+                .join(format!("{operation_name}-impl/src/lib.rs"))
+                .display(),
+            implementation_lib.src_path.display()
+        )));
+    }
+    if implementation
+        .targets
+        .iter()
+        .any(|target| target_has_kind(target, "bin"))
+    {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} implementation metadata unexpectedly exposes a binary target"
+        )));
+    }
+
+    let runner_bins: Vec<&CargoMetadataTarget> = runner
+        .targets
+        .iter()
+        .filter(|target| target_has_kind(target, "bin"))
+        .collect();
+    if runner_bins.len() != 1 {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} runner metadata must expose exactly one binary target, found {}",
+            runner_bins.len()
+        )));
+    }
+    let runner_bin = runner_bins[0];
+    if runner_bin.name != expected_binary_name {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} runner metadata binary mismatch: expected '{expected_binary_name}', found '{}'",
+            runner_bin.name
+        )));
+    }
+    if runner_bin.src_path != workspace_root.join("lexicon-runner/src/main.rs") {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} runner binary target path mismatch: expected {}, found {}",
+            workspace_root.join("lexicon-runner/src/main.rs").display(),
+            runner_bin.src_path.display()
+        )));
+    }
+
+    Ok(())
+}
+
+fn resolve_managed_package_id(
+    workspace_manifest: &Path,
+    package_name: &str,
+) -> Result<String, ManagedRunnerArtifactSelectionError> {
+    let metadata =
+        load_managed_workspace_metadata(workspace_manifest).map_err(|error| match error {
+            ManagedWorkspaceMetadataError::CommandFailed(message) => {
+                ManagedRunnerArtifactSelectionError::MetadataCommand(message)
+            }
+            ManagedWorkspaceMetadataError::OutputInvalid(message) => {
+                ManagedRunnerArtifactSelectionError::MetadataOutput(message)
+            }
+            ManagedWorkspaceMetadataError::PackageNotFound { name } => {
+                ManagedRunnerArtifactSelectionError::PackageNotFound { name }
+            }
+        })?;
 
     metadata
         .packages
@@ -932,9 +1094,11 @@ fn select_artifact_from_cargo_output(
             continue;
         }
 
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
+        let value = serde_json::from_str::<serde_json::Value>(trimmed).map_err(|_| {
+            ManagedRunnerArtifactSelectionError::MalformedJsonLine {
+                line: trimmed.to_owned(),
+            }
+        })?;
         if value.get("reason").and_then(|item| item.as_str()) != Some("compiler-artifact") {
             continue;
         }
@@ -1761,6 +1925,7 @@ fn validate_managed_workspace_layout(
     let impl_manifest = workspace_root.join(format!("{operation_name}-impl/Cargo.toml"));
     let runner_manifest = workspace_root.join("lexicon-runner/Cargo.toml");
     let impl_lib = workspace_root.join(format!("{operation_name}-impl/src/lib.rs"));
+    let impl_main = workspace_root.join(format!("{operation_name}-impl/src/main.rs"));
     let runner_main = workspace_root.join("lexicon-runner/src/main.rs");
 
     if !impl_manifest.is_file() {
@@ -1782,6 +1947,13 @@ fn validate_managed_workspace_layout(
         return Err(ManagedWorkspaceValidationError::MissingRunnerSource(
             operation_name.to_owned(),
         ));
+    }
+    if impl_main.is_file() {
+        return Err(ManagedWorkspaceValidationError::LegacyLayout(format!(
+            "managed {} implementation still includes a source-owned main entrypoint at {}",
+            operation_name,
+            impl_main.display()
+        )));
     }
 
     let impl_doc: toml::Value = toml::from_str(&fs::read_to_string(&impl_manifest).map_err(|error| {
@@ -1809,6 +1981,50 @@ fn validate_managed_workspace_layout(
             expected: expected_impl_name.to_owned(),
             found: impl_name.to_owned(),
         });
+    }
+    let impl_lib_path = impl_doc
+        .get("lib")
+        .and_then(|value| value.get("path"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} implementation manifest has no library target path",
+            operation_name
+        )))?;
+    if impl_lib_path != "src/lib.rs" {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} implementation library path mismatch: expected 'src/lib.rs', found '{}'",
+            operation_name, impl_lib_path
+        )));
+    }
+    if impl_doc
+        .get("bin")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+    {
+        return Err(ManagedWorkspaceValidationError::LegacyLayout(format!(
+            "managed {} implementation manifest unexpectedly exposes a binary target",
+            operation_name
+        )));
+    }
+    let impl_dependencies = impl_doc
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} implementation manifest has no dependencies table",
+            operation_name
+        )))?;
+    let impl_lexicon_core = impl_dependencies
+        .get("lexicon_core")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} implementation manifest must depend on workspace lexicon_core",
+            operation_name
+        )))?;
+    if impl_lexicon_core.get("workspace").and_then(toml::Value::as_bool) != Some(true) {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} implementation manifest must resolve lexicon_core through the workspace dependency",
+            operation_name
+        )));
     }
 
     let runner_doc: toml::Value = toml::from_str(&fs::read_to_string(&runner_manifest).map_err(|error| {
@@ -1838,13 +2054,25 @@ fn validate_managed_workspace_layout(
         });
     }
 
-    let bin_name = runner_doc
+    let bins = runner_doc
         .get("bin")
         .and_then(|array| array.as_array())
-        .and_then(|items| items.iter().find(|entry| entry.get("path").is_some()))
-        .and_then(|entry| entry.get("name").and_then(toml::Value::as_str))
         .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
             "managed {} runner manifest has no binary target",
+            operation_name
+        )))?;
+    if bins.len() != 1 {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} runner manifest must define exactly one binary target",
+            operation_name
+        )));
+    }
+    let runner_bin = &bins[0];
+    let bin_name = runner_bin
+        .get("name")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} runner manifest has no binary target name",
             operation_name
         )))?;
     if bin_name != expected_binary_name {
@@ -1852,6 +2080,71 @@ fn validate_managed_workspace_layout(
             expected: expected_binary_name.to_owned(),
             found: bin_name.to_owned(),
         });
+    }
+    let runner_bin_path = runner_bin
+        .get("path")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} runner manifest has no binary target path",
+            operation_name
+        )))?;
+    if runner_bin_path != "src/main.rs" {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} runner binary path mismatch: expected 'src/main.rs', found '{}'",
+            operation_name, runner_bin_path
+        )));
+    }
+    let runner_dependencies = runner_doc
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} runner manifest has no dependencies table",
+            operation_name
+        )))?;
+    let runner_implementation_dependency = runner_dependencies
+        .get("source_implementation")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} runner manifest must depend on source_implementation",
+            operation_name
+        )))?;
+    let expected_implementation_path = format!("../{operation_name}-impl");
+    if runner_implementation_dependency
+        .get("path")
+        .and_then(toml::Value::as_str)
+        != Some(expected_implementation_path.as_str())
+    {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} runner manifest must depend on the implementation at '{}'",
+            operation_name, expected_implementation_path
+        )));
+    }
+    let runner_lexicon_core = runner_dependencies
+        .get("lexicon_core")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} runner manifest must depend on workspace lexicon_core",
+            operation_name
+        )))?;
+    if runner_lexicon_core.get("workspace").and_then(toml::Value::as_bool) != Some(true) {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} runner manifest must resolve lexicon_core through the workspace dependency",
+            operation_name
+        )));
+    }
+    let workspace_dependencies = parsed
+        .get("workspace")
+        .and_then(|value| value.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} workspace manifest has no workspace dependencies table",
+            operation_name
+        )))?;
+    if !workspace_dependencies.contains_key("lexicon_core") {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+            "managed {} workspace manifest must define workspace dependency lexicon_core",
+            operation_name
+        )));
     }
 
     let runner_src = fs::read_to_string(&runner_main).map_err(|error| {
@@ -1876,20 +2169,14 @@ fn validate_managed_workspace_layout(
             operation_name, MANAGED_RUNNER_TEMPLATE_VERSION
         )));
     }
-    let expected_identity_fragment = if operation_name == "get-raw-data" {
-        format!(
-            "RuntimeIdentity::http_acquisition(\"{source_name}\", HttpSourceContractV1::CONTRACT_VERSION)"
-        )
+    let expected_runner_src = if operation_name == "get-raw-data" {
+        format_http_managed_runner_main(source_name)
     } else {
-        format!(
-            "RuntimeIdentity::http_processing(\"{source_name}\", ProcessingSourceContractV1::CONTRACT_VERSION)"
-        )
+        format_processing_managed_runner_main(source_name)
     };
-    if !runner_src.contains("source_implementation::SOURCE")
-        || !runner_src.contains(&expected_identity_fragment)
-    {
-        return Err(ManagedWorkspaceValidationError::LegacyLayout(format!(
-            "managed {} runner does not reference the expected source implementation and identity",
+    if runner_src != expected_runner_src {
+        return Err(ManagedWorkspaceValidationError::InvalidRunnerTemplate(format!(
+            "managed {} runner template content differs from the managed canonical template",
             operation_name
         )));
     }
