@@ -3,7 +3,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::ProcessingSourceContractV1;
-use crate::runtime::{OwnedRuntimeIdentity, RuntimeIdentifierError, RuntimeIdentity, RuntimeOperation, RuntimeProtocol};
+use crate::runtime::{
+    OwnedRuntimeIdentity, RuntimeIdentifierError, RuntimeIdentity, RuntimeOperation,
+    RuntimeProtocol,
+};
 
 pub const PROCESSING_RUNTIME_INFORMATION_SCHEMA_VERSION: u32 = 1;
 
@@ -296,7 +299,10 @@ impl ProcessingRuntimeInformationV1 {
         Ok(())
     }
 
-    pub fn validate_compatibility_owned(&self, expected: &OwnedRuntimeIdentity) -> Result<(), String> {
+    pub fn validate_compatibility_owned(
+        &self,
+        expected: &OwnedRuntimeIdentity,
+    ) -> Result<(), String> {
         let actual = self.identity();
         if actual.source_name() != expected.source_name()
             || actual.protocol() != expected.protocol()

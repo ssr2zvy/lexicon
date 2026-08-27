@@ -342,19 +342,22 @@ pub fn verify_http_runtime_candidate_owned(
     executable: &Path,
     expected: &OwnedRuntimeIdentity,
 ) -> Result<VerifiedHttpRuntime, HttpRuntimeVerificationError> {
-    let initial_hash = hash_runtime_executable(executable)
-        .map_err(HttpRuntimeVerificationError::InitialHash)?;
+    let initial_hash =
+        hash_runtime_executable(executable).map_err(HttpRuntimeVerificationError::InitialHash)?;
     let information = probe_http_runtime_information_owned(executable, expected)
         .map_err(HttpRuntimeVerificationError::Probe)?;
-    let final_hash = hash_runtime_executable(executable)
-        .map_err(HttpRuntimeVerificationError::FinalHash)?;
+    let final_hash =
+        hash_runtime_executable(executable).map_err(HttpRuntimeVerificationError::FinalHash)?;
     if initial_hash != final_hash {
         return Err(HttpRuntimeVerificationError::ArtifactChangedDuringProbe {
             before: initial_hash,
             after: final_hash,
         });
     }
-    Ok(VerifiedHttpRuntime { artifact: final_hash, information })
+    Ok(VerifiedHttpRuntime {
+        artifact: final_hash,
+        information,
+    })
 }
 
 pub(crate) fn verify_processing_runtime_candidate_with<FHash, FProbe>(
@@ -414,12 +417,17 @@ pub fn verify_processing_runtime_candidate_owned(
     let final_hash = hash_runtime_executable(executable)
         .map_err(ProcessingRuntimeVerificationError::FinalHash)?;
     if initial_hash != final_hash {
-        return Err(ProcessingRuntimeVerificationError::ArtifactChangedDuringProbe {
-            before: initial_hash,
-            after: final_hash,
-        });
+        return Err(
+            ProcessingRuntimeVerificationError::ArtifactChangedDuringProbe {
+                before: initial_hash,
+                after: final_hash,
+            },
+        );
     }
-    Ok(VerifiedProcessingRuntime { artifact: final_hash, information })
+    Ok(VerifiedProcessingRuntime {
+        artifact: final_hash,
+        information,
+    })
 }
 
 #[cfg(test)]

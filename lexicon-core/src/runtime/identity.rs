@@ -129,7 +129,6 @@ impl RuntimeIdentity {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedRuntimeIdentity {
     source_name: String,

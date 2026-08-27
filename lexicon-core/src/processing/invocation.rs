@@ -108,24 +108,30 @@ pub fn admit_processing_runtime_invocation(
     source: &ProcessingSourceContractV1,
 ) -> Result<AdmittedProcessingRuntimeInvocation, ProcessingRuntimeInvocationAdmissionError> {
     if compiled_identity.protocol() != RuntimeProtocol::Http {
-        return Err(ProcessingRuntimeInvocationAdmissionError::WrongCompiledProtocol {
-            actual: compiled_identity.protocol(),
-        });
+        return Err(
+            ProcessingRuntimeInvocationAdmissionError::WrongCompiledProtocol {
+                actual: compiled_identity.protocol(),
+            },
+        );
     }
 
     if compiled_identity.operation() != RuntimeOperation::Processing {
-        return Err(ProcessingRuntimeInvocationAdmissionError::WrongCompiledOperation {
-            actual: compiled_identity.operation(),
-        });
+        return Err(
+            ProcessingRuntimeInvocationAdmissionError::WrongCompiledOperation {
+                actual: compiled_identity.operation(),
+            },
+        );
     }
 
     let (envelope, source_arguments) = parsed.into_parts();
 
     if envelope.runtime() != compiled_identity {
-        return Err(ProcessingRuntimeInvocationAdmissionError::IdentityMismatch {
-            compiled: compiled_identity,
-            envelope: envelope.runtime(),
-        });
+        return Err(
+            ProcessingRuntimeInvocationAdmissionError::IdentityMismatch {
+                compiled: compiled_identity,
+                envelope: envelope.runtime(),
+            },
+        );
     }
 
     if compiled_identity.source_contract_version() != ProcessingSourceContractV1::CONTRACT_VERSION {
@@ -222,7 +228,10 @@ mod tests {
             admitted.handler().execution_mode(),
             RuntimeExecutionMode::Run
         );
-        assert_eq!(admitted.envelope().supervision_mode(), RuntimeSupervisionMode::Foreground);
+        assert_eq!(
+            admitted.envelope().supervision_mode(),
+            RuntimeSupervisionMode::Foreground
+        );
     }
 
     #[test]

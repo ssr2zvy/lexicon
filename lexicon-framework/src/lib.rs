@@ -20,14 +20,26 @@ const MAX_MANAGED_RUNNER_ERROR_DISPLAY_BYTES: usize = 4096;
 pub enum ManagedWorkspaceValidationError {
     MissingManifest(String),
     ManifestParseFailed(String),
-    InvalidMembers { expected: Vec<String>, found: Vec<String> },
+    InvalidMembers {
+        expected: Vec<String>,
+        found: Vec<String>,
+    },
     MissingImplementation(String),
     MissingRunner(String),
     MissingLibrarySource(String),
     MissingRunnerSource(String),
-    ImplNameMismatch { expected: String, found: String },
-    RunnerNameMismatch { expected: String, found: String },
-    BinaryNameMismatch { expected: String, found: String },
+    ImplNameMismatch {
+        expected: String,
+        found: String,
+    },
+    RunnerNameMismatch {
+        expected: String,
+        found: String,
+    },
+    BinaryNameMismatch {
+        expected: String,
+        found: String,
+    },
     InvalidRunnerTemplate(String),
     LegacyLayout(String),
     ExtraWorkspaceMembers(Vec<String>),
@@ -43,17 +55,22 @@ impl fmt::Display for ManagedWorkspaceValidationError {
             Self::InvalidMembers { expected, found } => write!(
                 formatter,
                 "managed workspace has incorrect members: expected {:?}, found {:?}",
-                expected,
-                found
+                expected, found
             ),
             Self::MissingImplementation(operation) => {
-                write!(formatter, "missing managed {operation} implementation manifest")
+                write!(
+                    formatter,
+                    "missing managed {operation} implementation manifest"
+                )
             }
             Self::MissingRunner(operation) => {
                 write!(formatter, "missing managed {operation} runner manifest")
             }
             Self::MissingLibrarySource(operation) => {
-                write!(formatter, "missing managed {operation} implementation library")
+                write!(
+                    formatter,
+                    "missing managed {operation} implementation library"
+                )
             }
             Self::MissingRunnerSource(operation) => {
                 write!(formatter, "missing managed {operation} runner source")
@@ -107,11 +124,24 @@ impl std::error::Error for ManagedWorkspaceMetadataError {}
 pub enum ManagedRunnerArtifactSelectionError {
     MetadataCommand(String),
     MetadataOutput(String),
-    PackageNotFound { name: String },
-    NoMatchingArtifact { package_id: String, binary_name: String },
-    MultipleMatchingArtifacts { package_id: String, binary_name: String },
-    MissingExecutablePath { package_id: String, binary_name: String },
-    MalformedJsonLine { line: String },
+    PackageNotFound {
+        name: String,
+    },
+    NoMatchingArtifact {
+        package_id: String,
+        binary_name: String,
+    },
+    MultipleMatchingArtifacts {
+        package_id: String,
+        binary_name: String,
+    },
+    MissingExecutablePath {
+        package_id: String,
+        binary_name: String,
+    },
+    MalformedJsonLine {
+        line: String,
+    },
 }
 
 impl fmt::Display for ManagedRunnerArtifactSelectionError {
@@ -121,7 +151,10 @@ impl fmt::Display for ManagedRunnerArtifactSelectionError {
                 formatter.write_str(message)
             }
             Self::PackageNotFound { name } => {
-                write!(formatter, "workspace package not found for managed runner build: {name}")
+                write!(
+                    formatter,
+                    "workspace package not found for managed runner build: {name}"
+                )
             }
             Self::NoMatchingArtifact {
                 package_id,
@@ -172,13 +205,19 @@ fn managed_runner_stderr_excerpt(stderr: &[u8]) -> String {
 impl fmt::Display for ManagedRunnerBuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ArtifactSelection(error) => write!(formatter, "managed runner artifact selection failed: {error}"),
+            Self::ArtifactSelection(error) => write!(
+                formatter,
+                "managed runner artifact selection failed: {error}"
+            ),
             Self::CommandFailed { operation, stderr } => {
                 let rendered = managed_runner_stderr_excerpt(stderr);
                 if rendered.trim().is_empty() {
                     write!(formatter, "{operation} managed runner build failed")
                 } else {
-                    write!(formatter, "{operation} managed runner build failed: {rendered}")
+                    write!(
+                        formatter,
+                        "{operation} managed runner build failed: {rendered}"
+                    )
                 }
             }
             Self::ExecutableNotFile(path) => write!(
@@ -216,19 +255,41 @@ pub enum ManagedSourceBuildError {
 impl fmt::Display for ManagedSourceBuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::WorkspaceValidation(error) => write!(formatter, "managed workspace validation failed: {error}"),
-            Self::Metadata(error) => write!(formatter, "managed workspace metadata failed: {error}"),
+            Self::WorkspaceValidation(error) => {
+                write!(formatter, "managed workspace validation failed: {error}")
+            }
+            Self::Metadata(error) => {
+                write!(formatter, "managed workspace metadata failed: {error}")
+            }
             Self::CargoBuild(error) => write!(formatter, "managed runner build failed: {error}"),
-            Self::AcquisitionVerification(error) => write!(formatter, "HTTP runtime verification failed: {error}"),
-            Self::ProcessingVerification(error) => write!(formatter, "processing runtime verification failed: {error}"),
-            Self::AcquisitionStaging(error) => write!(formatter, "HTTP bundle staging failed: {error}"),
-            Self::ProcessingStaging(error) => write!(formatter, "processing bundle staging failed: {error}"),
-            Self::Publication(error) => write!(formatter, "paired runtime publication failed: {error}"),
+            Self::AcquisitionVerification(error) => {
+                write!(formatter, "HTTP runtime verification failed: {error}")
+            }
+            Self::ProcessingVerification(error) => {
+                write!(formatter, "processing runtime verification failed: {error}")
+            }
+            Self::AcquisitionStaging(error) => {
+                write!(formatter, "HTTP bundle staging failed: {error}")
+            }
+            Self::ProcessingStaging(error) => {
+                write!(formatter, "processing bundle staging failed: {error}")
+            }
+            Self::Publication(error) => {
+                write!(formatter, "paired runtime publication failed: {error}")
+            }
             Self::MissingLockfile(path) => {
-                write!(formatter, "missing Cargo.lock for managed workspace: {}", path.display())
+                write!(
+                    formatter,
+                    "missing Cargo.lock for managed workspace: {}",
+                    path.display()
+                )
             }
             Self::LockfileModified(path) => {
-                write!(formatter, "managed workspace lockfile changed during build: {}", path.display())
+                write!(
+                    formatter,
+                    "managed workspace lockfile changed during build: {}",
+                    path.display()
+                )
             }
         }
     }
@@ -252,6 +313,7 @@ impl std::error::Error for ManagedSourceBuildError {
 
 #[derive(Debug, Deserialize)]
 struct CargoMetadataDocument {
+    workspace_members: Vec<String>,
     packages: Vec<CargoMetadataPackage>,
 }
 
@@ -259,6 +321,15 @@ struct CargoMetadataDocument {
 struct CargoMetadataPackage {
     id: String,
     name: String,
+    manifest_path: PathBuf,
+    targets: Vec<CargoMetadataTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadataTarget {
+    name: String,
+    kind: Vec<String>,
+    src_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -525,7 +596,10 @@ fn generate_source_scaffold(
     let process_binary_name = format!("{source_name}-process-data");
 
     let files = [
-        ("http/source.toml", format_source_toml(source_name, protocol)),
+        (
+            "http/source.toml",
+            format_source_toml(source_name, protocol),
+        ),
         ("http/discovery.md", format_discovery_markdown(source_name)),
         (
             "http/data/raw/.gitkeep",
@@ -553,7 +627,12 @@ fn generate_source_scaffold(
         ),
         (
             "http/get-raw-data/lexicon-runner/Cargo.toml",
-            format_runner_cargo_toml(&get_runner_name, &get_binary_name, "../get-raw-data-impl"),
+            format_runner_cargo_toml(
+                &get_runner_name,
+                &get_binary_name,
+                &get_name,
+                "../get-raw-data-impl",
+            ),
         ),
         (
             "http/get-raw-data/lexicon-runner/src/main.rs",
@@ -581,7 +660,12 @@ fn generate_source_scaffold(
         ),
         (
             "http/process-data/lexicon-runner/Cargo.toml",
-            format_runner_cargo_toml(&process_runner_name, &process_binary_name, "../process-data-impl"),
+            format_runner_cargo_toml(
+                &process_runner_name,
+                &process_binary_name,
+                &process_name,
+                "../process-data-impl",
+            ),
         ),
         (
             "http/process-data/lexicon-runner/src/main.rs",
@@ -687,11 +771,12 @@ fn build_source(
     }
 
     let source_toml = protocol_root.join("source.toml");
-    let _source_doc = load_source_metadata(&source_toml, source_name, protocol).map_err(|error| {
-        ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
-            error,
-        ))
-    })?;
+    let _source_doc =
+        load_source_metadata(&source_toml, source_name, protocol).map_err(|error| {
+            ManagedSourceBuildError::WorkspaceValidation(
+                ManagedWorkspaceValidationError::LegacyLayout(error),
+            )
+        })?;
 
     let get_workspace = protocol_root.join("get-raw-data");
     let process_workspace = protocol_root.join("process-data");
@@ -721,6 +806,14 @@ fn build_source(
         &format!("{source_name}-get-raw-data"),
     )
     .map_err(ManagedSourceBuildError::WorkspaceValidation)?;
+    validate_managed_workspace_metadata(
+        &get_workspace,
+        "get-raw-data",
+        &format!("{source_name}-get-raw-data"),
+        &format!("{source_name}-get-raw-data-runner"),
+        &format!("{source_name}-get-raw-data"),
+    )
+    .map_err(ManagedSourceBuildError::Metadata)?;
     validate_managed_workspace_layout(
         &process_workspace,
         source_name,
@@ -730,6 +823,14 @@ fn build_source(
         &format!("{source_name}-process-data"),
     )
     .map_err(ManagedSourceBuildError::WorkspaceValidation)?;
+    validate_managed_workspace_metadata(
+        &process_workspace,
+        "process-data",
+        &format!("{source_name}-process-data"),
+        &format!("{source_name}-process-data-runner"),
+        &format!("{source_name}-process-data"),
+    )
+    .map_err(ManagedSourceBuildError::Metadata)?;
 
     let get_lockfile = get_workspace.join("Cargo.lock");
     let process_lockfile = process_workspace.join("Cargo.lock");
@@ -781,18 +882,21 @@ fn build_source(
     })?;
     fs::create_dir_all(&process_runtime_dir).map_err(|error| {
         ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
-            format!("failed to create {}: {error}", process_runtime_dir.display()),
+            format!(
+                "failed to create {}: {error}",
+                process_runtime_dir.display()
+            ),
         ))
     })?;
 
     let get_bundle = crate::build::stage_verified_http_runtime_bundle(
-        &get_runtime_dir,
+        &get_workspace,
         &format!("{source_name}-get-raw-data"),
         &get_verified,
     )
     .map_err(ManagedSourceBuildError::AcquisitionStaging)?;
     let process_bundle = crate::build::stage_verified_processing_runtime_bundle(
-        &process_runtime_dir,
+        &process_workspace,
         &format!("{source_name}-process-data"),
         &process_verified,
     )
@@ -856,7 +960,9 @@ impl BuiltManagedRunner {
 
 fn read_lockfile_snapshot(lockfile: &Path) -> Result<Vec<u8>, ManagedSourceBuildError> {
     if !lockfile.is_file() {
-        return Err(ManagedSourceBuildError::MissingLockfile(lockfile.to_path_buf()));
+        return Err(ManagedSourceBuildError::MissingLockfile(
+            lockfile.to_path_buf(),
+        ));
     }
     fs::read(lockfile).map_err(|error| {
         ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
@@ -865,18 +971,22 @@ fn read_lockfile_snapshot(lockfile: &Path) -> Result<Vec<u8>, ManagedSourceBuild
     })
 }
 
-fn ensure_lockfile_unchanged(lockfile: &Path, original: &[u8]) -> Result<(), ManagedSourceBuildError> {
+fn ensure_lockfile_unchanged(
+    lockfile: &Path,
+    original: &[u8],
+) -> Result<(), ManagedSourceBuildError> {
     let current = read_lockfile_snapshot(lockfile)?;
     if current != original {
-        return Err(ManagedSourceBuildError::LockfileModified(lockfile.to_path_buf()));
+        return Err(ManagedSourceBuildError::LockfileModified(
+            lockfile.to_path_buf(),
+        ));
     }
     Ok(())
 }
 
-fn resolve_managed_package_id(
+fn load_managed_workspace_metadata(
     workspace_manifest: &Path,
-    package_name: &str,
-) -> Result<String, ManagedRunnerArtifactSelectionError> {
+) -> Result<CargoMetadataDocument, ManagedWorkspaceMetadataError> {
     let output = Command::new("cargo")
         .arg("metadata")
         .arg("--manifest-path")
@@ -887,26 +997,165 @@ fn resolve_managed_package_id(
         .arg("1")
         .output()
         .map_err(|error| {
-            ManagedRunnerArtifactSelectionError::MetadataCommand(format!(
+            ManagedWorkspaceMetadataError::CommandFailed(format!(
                 "failed to run cargo metadata for {}: {error}",
                 workspace_manifest.display()
             ))
         })?;
 
     if !output.status.success() {
-        return Err(ManagedRunnerArtifactSelectionError::MetadataCommand(format!(
+        return Err(ManagedWorkspaceMetadataError::CommandFailed(format!(
             "cargo metadata failed for {}: {}",
             workspace_manifest.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
 
-    let metadata: CargoMetadataDocument = serde_json::from_slice(&output.stdout).map_err(|error| {
-        ManagedRunnerArtifactSelectionError::MetadataOutput(format!(
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        ManagedWorkspaceMetadataError::OutputInvalid(format!(
             "failed to parse cargo metadata for {}: {error}",
             workspace_manifest.display()
         ))
-    })?;
+    })
+}
+
+fn target_has_kind(target: &CargoMetadataTarget, expected_kind: &str) -> bool {
+    target.kind.iter().any(|kind| kind == expected_kind)
+}
+
+fn validate_managed_workspace_metadata(
+    workspace_root: &Path,
+    operation_name: &str,
+    expected_impl_name: &str,
+    expected_runner_name: &str,
+    expected_binary_name: &str,
+) -> Result<(), ManagedWorkspaceMetadataError> {
+    let metadata = load_managed_workspace_metadata(&workspace_root.join("Cargo.toml"))?;
+    if metadata.packages.len() != 2 {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} workspace metadata must contain exactly two packages, found {}",
+            metadata.packages.len()
+        )));
+    }
+
+    let implementation = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == expected_impl_name)
+        .ok_or_else(|| ManagedWorkspaceMetadataError::PackageNotFound {
+            name: expected_impl_name.to_owned(),
+        })?;
+    let runner = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == expected_runner_name)
+        .ok_or_else(|| ManagedWorkspaceMetadataError::PackageNotFound {
+            name: expected_runner_name.to_owned(),
+        })?;
+
+    let mut expected_members = vec![implementation.id.clone(), runner.id.clone()];
+    expected_members.sort();
+    let mut actual_members = metadata.workspace_members;
+    actual_members.sort();
+    if actual_members != expected_members {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} workspace metadata has incorrect members: expected {:?}, found {:?}",
+            expected_members, actual_members
+        )));
+    }
+
+    let expected_impl_manifest = workspace_root.join(format!("{operation_name}-impl/Cargo.toml"));
+    if implementation.manifest_path != expected_impl_manifest {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} implementation manifest path mismatch: expected {}, found {}",
+            expected_impl_manifest.display(),
+            implementation.manifest_path.display()
+        )));
+    }
+    let expected_runner_manifest = workspace_root.join("lexicon-runner/Cargo.toml");
+    if runner.manifest_path != expected_runner_manifest {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} runner manifest path mismatch: expected {}, found {}",
+            expected_runner_manifest.display(),
+            runner.manifest_path.display()
+        )));
+    }
+
+    let implementation_lib = implementation
+        .targets
+        .iter()
+        .find(|target| target_has_kind(target, "lib"))
+        .ok_or_else(|| {
+            ManagedWorkspaceMetadataError::OutputInvalid(format!(
+                "managed {operation_name} implementation metadata has no library target"
+            ))
+        })?;
+    if implementation_lib.src_path
+        != workspace_root.join(format!("{operation_name}-impl/src/lib.rs"))
+    {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} implementation library target path mismatch: expected {}, found {}",
+            workspace_root
+                .join(format!("{operation_name}-impl/src/lib.rs"))
+                .display(),
+            implementation_lib.src_path.display()
+        )));
+    }
+    if implementation
+        .targets
+        .iter()
+        .any(|target| target_has_kind(target, "bin"))
+    {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} implementation metadata unexpectedly exposes a binary target"
+        )));
+    }
+
+    let runner_bins: Vec<&CargoMetadataTarget> = runner
+        .targets
+        .iter()
+        .filter(|target| target_has_kind(target, "bin"))
+        .collect();
+    if runner_bins.len() != 1 {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} runner metadata must expose exactly one binary target, found {}",
+            runner_bins.len()
+        )));
+    }
+    let runner_bin = runner_bins[0];
+    if runner_bin.name != expected_binary_name {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} runner metadata binary mismatch: expected '{expected_binary_name}', found '{}'",
+            runner_bin.name
+        )));
+    }
+    if runner_bin.src_path != workspace_root.join("lexicon-runner/src/main.rs") {
+        return Err(ManagedWorkspaceMetadataError::OutputInvalid(format!(
+            "managed {operation_name} runner binary target path mismatch: expected {}, found {}",
+            workspace_root.join("lexicon-runner/src/main.rs").display(),
+            runner_bin.src_path.display()
+        )));
+    }
+
+    Ok(())
+}
+
+fn resolve_managed_package_id(
+    workspace_manifest: &Path,
+    package_name: &str,
+) -> Result<String, ManagedRunnerArtifactSelectionError> {
+    let metadata =
+        load_managed_workspace_metadata(workspace_manifest).map_err(|error| match error {
+            ManagedWorkspaceMetadataError::CommandFailed(message) => {
+                ManagedRunnerArtifactSelectionError::MetadataCommand(message)
+            }
+            ManagedWorkspaceMetadataError::OutputInvalid(message) => {
+                ManagedRunnerArtifactSelectionError::MetadataOutput(message)
+            }
+            ManagedWorkspaceMetadataError::PackageNotFound { name } => {
+                ManagedRunnerArtifactSelectionError::PackageNotFound { name }
+            }
+        })?;
 
     metadata
         .packages
@@ -932,9 +1181,11 @@ fn select_artifact_from_cargo_output(
             continue;
         }
 
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
+        let value = serde_json::from_str::<serde_json::Value>(trimmed).map_err(|_| {
+            ManagedRunnerArtifactSelectionError::MalformedJsonLine {
+                line: trimmed.to_owned(),
+            }
+        })?;
         if value.get("reason").and_then(|item| item.as_str()) != Some("compiler-artifact") {
             continue;
         }
@@ -961,21 +1212,23 @@ fn select_artifact_from_cargo_output(
     }
 
     match matches.len() {
-        0 if missing_executable_path => Err(
-            ManagedRunnerArtifactSelectionError::MissingExecutablePath {
+        0 if missing_executable_path => {
+            Err(ManagedRunnerArtifactSelectionError::MissingExecutablePath {
                 package_id: expected_package_id.to_owned(),
                 binary_name: expected_binary_name.to_owned(),
-            },
-        ),
+            })
+        }
         0 => Err(ManagedRunnerArtifactSelectionError::NoMatchingArtifact {
             package_id: expected_package_id.to_owned(),
             binary_name: expected_binary_name.to_owned(),
         }),
         1 => Ok(matches.remove(0)),
-        _ => Err(ManagedRunnerArtifactSelectionError::MultipleMatchingArtifacts {
-            package_id: expected_package_id.to_owned(),
-            binary_name: expected_binary_name.to_owned(),
-        }),
+        _ => Err(
+            ManagedRunnerArtifactSelectionError::MultipleMatchingArtifacts {
+                package_id: expected_package_id.to_owned(),
+                binary_name: expected_binary_name.to_owned(),
+            },
+        ),
     }
 }
 
@@ -1362,7 +1615,9 @@ fn format_discovery_markdown(source_name: &str) -> String {
 fn current_lexicon_git_rev() -> Result<String, String> {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .ok_or_else(|| "failed to resolve workspace root for generated dependency pin".to_owned())?;
+        .ok_or_else(|| {
+            "failed to resolve workspace root for generated dependency pin".to_owned()
+        })?;
 
     let output = Command::new("git")
         .arg("-C")
@@ -1373,7 +1628,9 @@ fn current_lexicon_git_rev() -> Result<String, String> {
         .map_err(|error| format!("failed to resolve the repository revision: {error}"))?;
 
     if !output.status.success() {
-        return Err("failed to resolve the repository revision for generated Cargo manifests".to_owned());
+        return Err(
+            "failed to resolve the repository revision for generated Cargo manifests".to_owned(),
+        );
     }
 
     String::from_utf8(output.stdout)
@@ -1394,7 +1651,9 @@ fn format_workspace_cargo_toml(operation_name: &str, members: &[&str]) -> String
     }
     out.push_str("]\n\n");
     out.push_str("[workspace.dependencies]\n");
-    out.push_str("lexicon_core = { git = \"https://github.com/ssr2zvy/lexicon\", rev = \"");
+    out.push_str(
+        "lexicon_core = { package = \"lexicon-core\", git = \"https://github.com/ssr2zvy/lexicon\", rev = \"",
+    );
     out.push_str(&rev);
     out.push_str("\" }\n");
     let _ = operation_name;
@@ -1414,7 +1673,12 @@ fn format_implementation_cargo_toml(package_name: &str) -> String {
     out
 }
 
-fn format_runner_cargo_toml(package_name: &str, binary_name: &str, implementation_path: &str) -> String {
+fn format_runner_cargo_toml(
+    package_name: &str,
+    binary_name: &str,
+    implementation_package_name: &str,
+    implementation_path: &str,
+) -> String {
     let mut out = String::new();
     out.push_str("[package]\n");
     out.push_str(&format!("name = \"{package_name}\"\n"));
@@ -1424,7 +1688,9 @@ fn format_runner_cargo_toml(package_name: &str, binary_name: &str, implementatio
     out.push_str(&format!("name = \"{binary_name}\"\n"));
     out.push_str("path = \"src/main.rs\"\n\n");
     out.push_str("[dependencies]\n");
-    out.push_str(&format!("source_implementation = {{ path = \"{implementation_path}\" }}\n"));
+    out.push_str(&format!(
+        "source_implementation = {{ package = \"{implementation_package_name}\", path = \"{implementation_path}\" }}\n"
+    ));
     out.push_str("lexicon_core = { workspace = true }\n");
     out
 }
@@ -1473,35 +1739,59 @@ fn format_processing_implementation_library(source_name: &str) -> String {
 
 fn format_http_managed_runner_main(source_name: &str) -> String {
     let mut out = String::new();
-    out.push_str("use std::env;
-");
-    out.push_str("use std::ffi::OsString;
-");
-    out.push_str("use std::io::{self, Write};
-");
-    out.push_str("use std::process::ExitCode;
+    out.push_str(
+        "use std::env;
+",
+    );
+    out.push_str(
+        "use std::ffi::OsString;
+",
+    );
+    out.push_str(
+        "use std::io::{self, Write};
+",
+    );
+    out.push_str(
+        "use std::process::ExitCode;
 
-");
-    out.push_str("use lexicon_core::http::{
-");
-    out.push_str("    HttpAcquisitionContext,
-");
-    out.push_str("    HttpCapabilitySet,
-");
-    out.push_str("    HttpSourceContractV1,
-");
-    out.push_str("    RuntimeInformationProbeOutcome,
-");
-    out.push_str("};
-");
+",
+    );
+    out.push_str(
+        "use lexicon_core::http::{
+",
+    );
+    out.push_str(
+        "    HttpAcquisitionContext,
+",
+    );
+    out.push_str(
+        "    HttpCapabilitySet,
+",
+    );
+    out.push_str(
+        "    HttpSourceContractV1,
+",
+    );
+    out.push_str(
+        "    RuntimeInformationProbeOutcome,
+",
+    );
+    out.push_str(
+        "};
+",
+    );
     out.push_str("use lexicon_core::protocols::http::runner::{run_http_runtime_invocation, try_write_runtime_information_probe};
 ");
-    out.push_str("use lexicon_core::runtime::RuntimeIdentity;
+    out.push_str(
+        "use lexicon_core::runtime::RuntimeIdentity;
 
-");
-    out.push_str("use source_implementation::SOURCE;
+",
+    );
+    out.push_str(
+        "use source_implementation::SOURCE;
 
-");
+",
+    );
     out.push_str(&format!(
         "const IDENTITY: RuntimeIdentity = RuntimeIdentity::http_acquisition(\"{source_name}\", HttpSourceContractV1::CONTRACT_VERSION);\n"
     ));
@@ -1509,95 +1799,167 @@ fn format_http_managed_runner_main(source_name: &str) -> String {
         "const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = {};\n\n",
         MANAGED_RUNNER_TEMPLATE_VERSION
     ));
-    out.push_str("fn main() -> ExitCode {
-");
-    out.push_str("    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
-");
-    out.push_str("    let stdout = io::stdout();
-");
-    out.push_str("    let mut stdout = stdout.lock();
-");
-    out.push_str("    let stderr = io::stderr();
-");
-    out.push_str("    let mut stderr = stderr.lock();
-");
+    out.push_str(
+        "fn main() -> ExitCode {
+",
+    );
+    out.push_str(
+        "    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
+",
+    );
+    out.push_str(
+        "    let stdout = io::stdout();
+",
+    );
+    out.push_str(
+        "    let mut stdout = stdout.lock();
+",
+    );
+    out.push_str(
+        "    let stderr = io::stderr();
+",
+    );
+    out.push_str(
+        "    let mut stderr = stderr.lock();
+",
+    );
     out.push_str("    match try_write_runtime_information_probe(IDENTITY, &SOURCE, HttpCapabilitySet::empty(), &arguments, &mut stdout) {
 ");
-    out.push_str("        Ok(RuntimeInformationProbeOutcome::Written) => return ExitCode::SUCCESS,
-");
-    out.push_str("        Ok(RuntimeInformationProbeOutcome::NotRequested) => {}
-");
-    out.push_str("        Err(error) => {
-");
-    out.push_str("            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
-");
-    out.push_str("            return ExitCode::FAILURE;
-");
-    out.push_str("        }
-");
-    out.push_str("    }
+    out.push_str(
+        "        Ok(RuntimeInformationProbeOutcome::Written) => return ExitCode::SUCCESS,
+",
+    );
+    out.push_str(
+        "        Ok(RuntimeInformationProbeOutcome::NotRequested) => {}
+",
+    );
+    out.push_str(
+        "        Err(error) => {
+",
+    );
+    out.push_str(
+        "            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
+",
+    );
+    out.push_str(
+        "            return ExitCode::FAILURE;
+",
+    );
+    out.push_str(
+        "        }
+",
+    );
+    out.push_str(
+        "    }
 
-");
-    out.push_str("    let mut context = match HttpAcquisitionContext::from_env() {
-");
-    out.push_str("        Ok(context) => context,
-");
-    out.push_str("        Err(error) => {
-");
-    out.push_str("            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
-");
-    out.push_str("            return ExitCode::FAILURE;
-");
-    out.push_str("        }
-");
-    out.push_str("    };
+",
+    );
+    out.push_str(
+        "    let mut context = match HttpAcquisitionContext::from_env() {
+",
+    );
+    out.push_str(
+        "        Ok(context) => context,
+",
+    );
+    out.push_str(
+        "        Err(error) => {
+",
+    );
+    out.push_str(
+        "            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
+",
+    );
+    out.push_str(
+        "            return ExitCode::FAILURE;
+",
+    );
+    out.push_str(
+        "        }
+",
+    );
+    out.push_str(
+        "    };
 
-");
+",
+    );
     out.push_str("    if let Err(error) = run_http_runtime_invocation(&arguments, IDENTITY, &SOURCE, HttpCapabilitySet::empty(), &mut context) {
 ");
-    out.push_str("        let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
-");
-    out.push_str("        return ExitCode::FAILURE;
-");
-    out.push_str("    }
+    out.push_str(
+        "        let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
+",
+    );
+    out.push_str(
+        "        return ExitCode::FAILURE;
+",
+    );
+    out.push_str(
+        "    }
 
-");
-    out.push_str("    ExitCode::SUCCESS
-");
-    out.push_str("}
-");
+",
+    );
+    out.push_str(
+        "    ExitCode::SUCCESS
+",
+    );
+    out.push_str(
+        "}
+",
+    );
     out
 }
 
 fn format_processing_managed_runner_main(source_name: &str) -> String {
     let mut out = String::new();
-    out.push_str("use std::env;
-");
-    out.push_str("use std::ffi::OsString;
-");
-    out.push_str("use std::io::{self, Write};
-");
-    out.push_str("use std::process::ExitCode;
+    out.push_str(
+        "use std::env;
+",
+    );
+    out.push_str(
+        "use std::ffi::OsString;
+",
+    );
+    out.push_str(
+        "use std::io::{self, Write};
+",
+    );
+    out.push_str(
+        "use std::process::ExitCode;
 
-");
-    out.push_str("use lexicon_core::processing::{
-");
-    out.push_str("    ProcessingContext,
-");
-    out.push_str("    ProcessingSourceContractV1,
-");
-    out.push_str("    ProcessingRuntimeInformationProbeOutcome,
-");
-    out.push_str("};
-");
+",
+    );
+    out.push_str(
+        "use lexicon_core::processing::{
+",
+    );
+    out.push_str(
+        "    ProcessingContext,
+",
+    );
+    out.push_str(
+        "    ProcessingSourceContractV1,
+",
+    );
+    out.push_str(
+        "    ProcessingRuntimeInformationProbeOutcome,
+",
+    );
+    out.push_str(
+        "};
+",
+    );
     out.push_str("use lexicon_core::processing::runner::{run_processing_runtime_invocation, try_write_runtime_information_probe};
 ");
-    out.push_str("use lexicon_core::runtime::RuntimeIdentity;
+    out.push_str(
+        "use lexicon_core::runtime::RuntimeIdentity;
 
-");
-    out.push_str("use source_implementation::SOURCE;
+",
+    );
+    out.push_str(
+        "use source_implementation::SOURCE;
 
-");
+",
+    );
     out.push_str(&format!(
         "const IDENTITY: RuntimeIdentity = RuntimeIdentity::http_processing(\"{source_name}\", ProcessingSourceContractV1::CONTRACT_VERSION);\n"
     ));
@@ -1605,50 +1967,88 @@ fn format_processing_managed_runner_main(source_name: &str) -> String {
         "const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = {};\n\n",
         MANAGED_RUNNER_TEMPLATE_VERSION
     ));
-    out.push_str("fn main() -> ExitCode {
-");
-    out.push_str("    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
-");
-    out.push_str("    let stdout = io::stdout();
-");
-    out.push_str("    let mut stdout = stdout.lock();
-");
-    out.push_str("    let stderr = io::stderr();
-");
-    out.push_str("    let mut stderr = stderr.lock();
-");
+    out.push_str(
+        "fn main() -> ExitCode {
+",
+    );
+    out.push_str(
+        "    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
+",
+    );
+    out.push_str(
+        "    let stdout = io::stdout();
+",
+    );
+    out.push_str(
+        "    let mut stdout = stdout.lock();
+",
+    );
+    out.push_str(
+        "    let stderr = io::stderr();
+",
+    );
+    out.push_str(
+        "    let mut stderr = stderr.lock();
+",
+    );
     out.push_str("    match try_write_runtime_information_probe(IDENTITY, &SOURCE, &arguments, &mut stdout) {
 ");
-    out.push_str("        Ok(ProcessingRuntimeInformationProbeOutcome::Written) => return ExitCode::SUCCESS,
-");
-    out.push_str("        Ok(ProcessingRuntimeInformationProbeOutcome::NotRequested) => {}
-");
-    out.push_str("        Err(error) => {
-");
-    out.push_str("            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
-");
-    out.push_str("            return ExitCode::FAILURE;
-");
-    out.push_str("        }
-");
-    out.push_str("    }
+    out.push_str(
+        "        Ok(ProcessingRuntimeInformationProbeOutcome::Written) => return ExitCode::SUCCESS,
+",
+    );
+    out.push_str(
+        "        Ok(ProcessingRuntimeInformationProbeOutcome::NotRequested) => {}
+",
+    );
+    out.push_str(
+        "        Err(error) => {
+",
+    );
+    out.push_str(
+        "            let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
+",
+    );
+    out.push_str(
+        "            return ExitCode::FAILURE;
+",
+    );
+    out.push_str(
+        "        }
+",
+    );
+    out.push_str(
+        "    }
 
-");
-    out.push_str("    let mut context = ProcessingContext::default();
-");
+",
+    );
+    out.push_str(
+        "    let mut context = ProcessingContext::default();
+",
+    );
     out.push_str("    if let Err(error) = run_processing_runtime_invocation(&arguments, IDENTITY, &SOURCE, &mut context) {
 ");
-    out.push_str("        let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
-");
-    out.push_str("        return ExitCode::FAILURE;
-");
-    out.push_str("    }
+    out.push_str(
+        "        let _ = writeln!(stderr, \"[lexicon] ERROR: {error}\");
+",
+    );
+    out.push_str(
+        "        return ExitCode::FAILURE;
+",
+    );
+    out.push_str(
+        "    }
 
-");
-    out.push_str("    ExitCode::SUCCESS
-");
-    out.push_str("}
-");
+",
+    );
+    out.push_str(
+        "    ExitCode::SUCCESS
+",
+    );
+    out.push_str(
+        "}
+",
+    );
     out
 }
 
@@ -1733,14 +2133,20 @@ fn validate_managed_workspace_layout(
         .and_then(|value| value.get("members"))
         .and_then(toml::Value::as_array)
         .ok_or_else(|| ManagedWorkspaceValidationError::InvalidMembers {
-            expected: vec![format!("{operation_name}-impl"), "lexicon-runner".to_string()],
+            expected: vec![
+                format!("{operation_name}-impl"),
+                "lexicon-runner".to_string(),
+            ],
             found: Vec::new(),
         })?;
     let member_names: Vec<String> = members
         .iter()
         .filter_map(|value| value.as_str().map(str::to_owned))
         .collect();
-    let expected_members = vec![format!("{operation_name}-impl"), "lexicon-runner".to_string()];
+    let expected_members = vec![
+        format!("{operation_name}-impl"),
+        "lexicon-runner".to_string(),
+    ];
     let extra_members: Vec<String> = member_names
         .iter()
         .filter(|member| !expected_members.contains(member))
@@ -1761,6 +2167,7 @@ fn validate_managed_workspace_layout(
     let impl_manifest = workspace_root.join(format!("{operation_name}-impl/Cargo.toml"));
     let runner_manifest = workspace_root.join("lexicon-runner/Cargo.toml");
     let impl_lib = workspace_root.join(format!("{operation_name}-impl/src/lib.rs"));
+    let impl_main = workspace_root.join(format!("{operation_name}-impl/src/main.rs"));
     let runner_main = workspace_root.join("lexicon-runner/src/main.rs");
 
     if !impl_manifest.is_file() {
@@ -1783,54 +2190,125 @@ fn validate_managed_workspace_layout(
             operation_name.to_owned(),
         ));
     }
+    if impl_main.is_file() {
+        return Err(ManagedWorkspaceValidationError::LegacyLayout(format!(
+            "managed {} implementation still includes a source-owned main entrypoint at {}",
+            operation_name,
+            impl_main.display()
+        )));
+    }
 
-    let impl_doc: toml::Value = toml::from_str(&fs::read_to_string(&impl_manifest).map_err(|error| {
-        ManagedWorkspaceValidationError::ManifestParseFailed(format!(
-            "failed to read {}: {error}",
-            impl_manifest.display()
-        ))
-    })?)
-    .map_err(|error| {
-        ManagedWorkspaceValidationError::ManifestParseFailed(format!(
-            "failed to parse {}: {error}",
-            impl_manifest.display()
-        ))
-    })?;
+    let impl_doc: toml::Value =
+        toml::from_str(&fs::read_to_string(&impl_manifest).map_err(|error| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "failed to read {}: {error}",
+                impl_manifest.display()
+            ))
+        })?)
+        .map_err(|error| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "failed to parse {}: {error}",
+                impl_manifest.display()
+            ))
+        })?;
     let impl_name = impl_doc
         .get("package")
         .and_then(|value| value.get("name"))
         .and_then(toml::Value::as_str)
-        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
-            "managed {} implementation manifest has no package name",
-            operation_name
-        )))?;
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} implementation manifest has no package name",
+                operation_name
+            ))
+        })?;
     if impl_name != expected_impl_name {
         return Err(ManagedWorkspaceValidationError::ImplNameMismatch {
             expected: expected_impl_name.to_owned(),
             found: impl_name.to_owned(),
         });
     }
+    let impl_lib_path = impl_doc
+        .get("lib")
+        .and_then(|value| value.get("path"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} implementation manifest has no library target path",
+                operation_name
+            ))
+        })?;
+    if impl_lib_path != "src/lib.rs" {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(
+            format!(
+                "managed {} implementation library path mismatch: expected 'src/lib.rs', found '{}'",
+                operation_name, impl_lib_path
+            ),
+        ));
+    }
+    if impl_doc
+        .get("bin")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+    {
+        return Err(ManagedWorkspaceValidationError::LegacyLayout(format!(
+            "managed {} implementation manifest unexpectedly exposes a binary target",
+            operation_name
+        )));
+    }
+    let impl_dependencies = impl_doc
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} implementation manifest has no dependencies table",
+                operation_name
+            ))
+        })?;
+    let impl_lexicon_core = impl_dependencies
+        .get("lexicon_core")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} implementation manifest must depend on workspace lexicon_core",
+                operation_name
+            ))
+        })?;
+    if impl_lexicon_core
+        .get("workspace")
+        .and_then(toml::Value::as_bool)
+        != Some(true)
+    {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(
+            format!(
+                "managed {} implementation manifest must resolve lexicon_core through the workspace dependency",
+                operation_name
+            ),
+        ));
+    }
 
-    let runner_doc: toml::Value = toml::from_str(&fs::read_to_string(&runner_manifest).map_err(|error| {
-        ManagedWorkspaceValidationError::ManifestParseFailed(format!(
-            "failed to read {}: {error}",
-            runner_manifest.display()
-        ))
-    })?)
-    .map_err(|error| {
-        ManagedWorkspaceValidationError::ManifestParseFailed(format!(
-            "failed to parse {}: {error}",
-            runner_manifest.display()
-        ))
-    })?;
+    let runner_doc: toml::Value =
+        toml::from_str(&fs::read_to_string(&runner_manifest).map_err(|error| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "failed to read {}: {error}",
+                runner_manifest.display()
+            ))
+        })?)
+        .map_err(|error| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "failed to parse {}: {error}",
+                runner_manifest.display()
+            ))
+        })?;
     let runner_name = runner_doc
         .get("package")
         .and_then(|value| value.get("name"))
         .and_then(toml::Value::as_str)
-        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
-            "managed {} runner manifest has no package name",
-            operation_name
-        )))?;
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} runner manifest has no package name",
+                operation_name
+            ))
+        })?;
     if runner_name != expected_runner_name {
         return Err(ManagedWorkspaceValidationError::RunnerNameMismatch {
             expected: expected_runner_name.to_owned(),
@@ -1838,20 +2316,146 @@ fn validate_managed_workspace_layout(
         });
     }
 
-    let bin_name = runner_doc
+    let bins = runner_doc
         .get("bin")
         .and_then(|array| array.as_array())
-        .and_then(|items| items.iter().find(|entry| entry.get("path").is_some()))
-        .and_then(|entry| entry.get("name").and_then(toml::Value::as_str))
-        .ok_or_else(|| ManagedWorkspaceValidationError::ManifestParseFailed(format!(
-            "managed {} runner manifest has no binary target",
-            operation_name
-        )))?;
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} runner manifest has no binary target",
+                operation_name
+            ))
+        })?;
+    if bins.len() != 1 {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(
+            format!(
+                "managed {} runner manifest must define exactly one binary target",
+                operation_name
+            ),
+        ));
+    }
+    let runner_bin = &bins[0];
+    let bin_name = runner_bin
+        .get("name")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} runner manifest has no binary target name",
+                operation_name
+            ))
+        })?;
     if bin_name != expected_binary_name {
         return Err(ManagedWorkspaceValidationError::BinaryNameMismatch {
             expected: expected_binary_name.to_owned(),
             found: bin_name.to_owned(),
         });
+    }
+    let runner_bin_path = runner_bin
+        .get("path")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} runner manifest has no binary target path",
+                operation_name
+            ))
+        })?;
+    if runner_bin_path != "src/main.rs" {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(
+            format!(
+                "managed {} runner binary path mismatch: expected 'src/main.rs', found '{}'",
+                operation_name, runner_bin_path
+            ),
+        ));
+    }
+    let runner_dependencies = runner_doc
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} runner manifest has no dependencies table",
+                operation_name
+            ))
+        })?;
+    let runner_implementation_dependency = runner_dependencies
+        .get("source_implementation")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} runner manifest must depend on source_implementation",
+                operation_name
+            ))
+        })?;
+    let expected_implementation_path = format!("../{operation_name}-impl");
+    if runner_implementation_dependency
+        .get("path")
+        .and_then(toml::Value::as_str)
+        != Some(expected_implementation_path.as_str())
+    {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(
+            format!(
+                "managed {} runner manifest must depend on the implementation at '{}'",
+                operation_name, expected_implementation_path
+            ),
+        ));
+    }
+    let runner_lexicon_core = runner_dependencies
+        .get("lexicon_core")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} runner manifest must depend on workspace lexicon_core",
+                operation_name
+            ))
+        })?;
+    if runner_lexicon_core
+        .get("workspace")
+        .and_then(toml::Value::as_bool)
+        != Some(true)
+    {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(
+            format!(
+                "managed {} runner manifest must resolve lexicon_core through the workspace dependency",
+                operation_name
+            ),
+        ));
+    }
+    let workspace_dependencies = parsed
+        .get("workspace")
+        .and_then(|value| value.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} workspace manifest has no workspace dependencies table",
+                operation_name
+            ))
+        })?;
+    if !workspace_dependencies.contains_key("lexicon_core") {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(
+            format!(
+                "managed {} workspace manifest must define workspace dependency lexicon_core",
+                operation_name
+            ),
+        ));
+    }
+    let workspace_lexicon_core = workspace_dependencies
+        .get("lexicon_core")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| {
+            ManagedWorkspaceValidationError::ManifestParseFailed(format!(
+                "managed {} workspace dependency lexicon_core must be a table",
+                operation_name
+            ))
+        })?;
+    if workspace_lexicon_core
+        .get("package")
+        .and_then(toml::Value::as_str)
+        != Some("lexicon-core")
+    {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(
+            format!(
+                "managed {} workspace dependency lexicon_core must target package 'lexicon-core'",
+                operation_name
+            ),
+        ));
     }
 
     let runner_src = fs::read_to_string(&runner_main).map_err(|error| {
@@ -1865,33 +2469,33 @@ fn validate_managed_workspace_layout(
         MANAGED_RUNNER_TEMPLATE_VERSION
     );
     if !runner_src.contains("const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 =") {
-        return Err(ManagedWorkspaceValidationError::InvalidRunnerTemplate(format!(
-            "managed {} runner is missing the template version marker",
-            operation_name
-        )));
+        return Err(ManagedWorkspaceValidationError::InvalidRunnerTemplate(
+            format!(
+                "managed {} runner is missing the template version marker",
+                operation_name
+            ),
+        ));
     }
     if !runner_src.contains(&expected_template_marker) {
-        return Err(ManagedWorkspaceValidationError::InvalidRunnerTemplate(format!(
-            "managed {} runner template version mismatch: expected {}",
-            operation_name, MANAGED_RUNNER_TEMPLATE_VERSION
-        )));
+        return Err(ManagedWorkspaceValidationError::InvalidRunnerTemplate(
+            format!(
+                "managed {} runner template version mismatch: expected {}",
+                operation_name, MANAGED_RUNNER_TEMPLATE_VERSION
+            ),
+        ));
     }
-    let expected_identity_fragment = if operation_name == "get-raw-data" {
-        format!(
-            "RuntimeIdentity::http_acquisition(\"{source_name}\", HttpSourceContractV1::CONTRACT_VERSION)"
-        )
+    let expected_runner_src = if operation_name == "get-raw-data" {
+        format_http_managed_runner_main(source_name)
     } else {
-        format!(
-            "RuntimeIdentity::http_processing(\"{source_name}\", ProcessingSourceContractV1::CONTRACT_VERSION)"
-        )
+        format_processing_managed_runner_main(source_name)
     };
-    if !runner_src.contains("source_implementation::SOURCE")
-        || !runner_src.contains(&expected_identity_fragment)
-    {
-        return Err(ManagedWorkspaceValidationError::LegacyLayout(format!(
-            "managed {} runner does not reference the expected source implementation and identity",
-            operation_name
-        )));
+    if runner_src != expected_runner_src {
+        return Err(ManagedWorkspaceValidationError::InvalidRunnerTemplate(
+            format!(
+                "managed {} runner template content differs from the managed canonical template",
+                operation_name
+            ),
+        ));
     }
 
     if impl_manifest.exists()
@@ -1903,6 +2507,18 @@ fn validate_managed_workspace_layout(
             "managed {} implementation manifest still references a source-owned main entrypoint",
             operation_name
         )));
+    }
+    if runner_implementation_dependency
+        .get("package")
+        .and_then(toml::Value::as_str)
+        != Some(expected_impl_name)
+    {
+        return Err(ManagedWorkspaceValidationError::ManifestParseFailed(
+            format!(
+                "managed {} runner manifest must rename source_implementation from package '{}'",
+                operation_name, expected_impl_name
+            ),
+        ));
     }
 
     Ok(())
@@ -2003,14 +2619,14 @@ mod tests {
 
     use super::commands::{init, source_create};
     use super::{
-        BuiltManagedRunner, ManagedRunnerArtifactSelectionError, ManagedRunnerBuildError,
-        ManagedSourceBuildError, ManagedWorkspaceMetadataError, ManagedWorkspaceValidationError,
-        MANAGED_RUNNER_TEMPLATE_VERSION, configured_sources_directory, finalize_source_staging,
+        BuiltManagedRunner, MANAGED_RUNNER_TEMPLATE_VERSION, ManagedRunnerArtifactSelectionError,
+        ManagedRunnerBuildError, ManagedSourceBuildError, ManagedWorkspaceMetadataError,
+        ManagedWorkspaceValidationError, configured_sources_directory, finalize_source_staging,
         find_descendant_project_root, find_project_root, format_http_managed_runner_main,
-        format_processing_managed_runner_main, format_source_toml, format_workspace_cargo_toml,
-        format_implementation_cargo_toml, format_runner_cargo_toml,
-        select_artifact_from_cargo_output, validate_managed_workspace_layout, validate_protocol,
-        validate_source_name,
+        format_implementation_cargo_toml, format_processing_managed_runner_main,
+        format_runner_cargo_toml, format_source_toml, format_workspace_cargo_toml,
+        select_artifact_from_cargo_output, validate_managed_workspace_layout,
+        validate_managed_workspace_metadata, validate_protocol, validate_source_name,
     };
 
     static TEST_CWD_LOCK: Mutex<()> = Mutex::new(());
@@ -2046,7 +2662,10 @@ mod tests {
         fs::create_dir_all(&runner_dir).unwrap();
         fs::write(
             root.join("Cargo.toml"),
-            format_workspace_cargo_toml(operation_name, &[&format!("{operation_name}-impl"), "lexicon-runner"]),
+            format_workspace_cargo_toml(
+                operation_name,
+                &[&format!("{operation_name}-impl"), "lexicon-runner"],
+            ),
         )
         .unwrap();
         fs::write(root.join("Cargo.lock"), "# lockfile\n").unwrap();
@@ -2062,7 +2681,12 @@ mod tests {
         .unwrap();
         fs::write(
             root.join("lexicon-runner/Cargo.toml"),
-            format_runner_cargo_toml(&runner_name, &binary_name, &format!("../{operation_name}-impl")),
+            format_runner_cargo_toml(
+                &runner_name,
+                &binary_name,
+                &impl_name,
+                &format!("../{operation_name}-impl"),
+            ),
         )
         .unwrap();
         let main = if operation_name == "get-raw-data" {
@@ -2137,6 +2761,16 @@ mod tests {
             "const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = {};",
             MANAGED_RUNNER_TEMPLATE_VERSION
         )));
+    }
+
+    #[test]
+    fn workspace_manifest_uses_exact_lexicon_core_package_name() {
+        let manifest =
+            format_workspace_cargo_toml("get-raw-data", &["get-raw-data-impl", "lexicon-runner"]);
+
+        assert!(manifest.contains(
+            "lexicon_core = { package = \"lexicon-core\", git = \"https://github.com/ssr2zvy/lexicon\", rev = \""
+        ));
     }
 
     #[test]
@@ -2339,6 +2973,16 @@ mod tests {
     }
 
     #[test]
+    fn select_managed_runner_executable_rejects_malformed_json_line() {
+        let result = select_artifact_from_cargo_output("{", "expected 0.1.0", "expected-bin");
+
+        assert!(matches!(
+            result,
+            Err(ManagedRunnerArtifactSelectionError::MalformedJsonLine { .. })
+        ));
+    }
+
+    #[test]
     fn owned_runtime_identity_http_acquisition_has_correct_fields() {
         let identity = OwnedRuntimeIdentity::http_acquisition("test-source", 1);
 
@@ -2490,7 +3134,9 @@ mod tests {
             "const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = {};\n\n",
             MANAGED_RUNNER_TEMPLATE_VERSION
         );
-        let source = fs::read_to_string(&runner_main).unwrap().replace(&marker, "");
+        let source = fs::read_to_string(&runner_main)
+            .unwrap()
+            .replace(&marker, "");
         fs::write(&runner_main, source).unwrap();
 
         let result = validate_managed_workspace_layout(
@@ -2526,6 +3172,72 @@ mod tests {
     }
 
     #[test]
+    fn workspace_validation_rejects_modified_runner_template_content() {
+        let root_dir = unique_test_dir("lexicon-workspace-modified-template-");
+        write_valid_managed_workspace(root_dir.path(), "example-source", "get-raw-data");
+        let runner_main = root_dir.path().join("lexicon-runner/src/main.rs");
+        let source = fs::read_to_string(&runner_main)
+            .unwrap()
+            .replace("ExitCode::SUCCESS", "ExitCode::from(0)");
+        fs::write(&runner_main, source).unwrap();
+
+        let result = validate_managed_workspace_layout(
+            root_dir.path(),
+            "example-source",
+            "get-raw-data",
+            "example-source-get-raw-data",
+            "example-source-get-raw-data-runner",
+            "example-source-get-raw-data",
+        );
+
+        assert!(matches!(
+            result,
+            Err(ManagedWorkspaceValidationError::InvalidRunnerTemplate(_))
+        ));
+    }
+
+    #[test]
+    fn workspace_validation_rejects_source_owned_main_entrypoint_file() {
+        let root_dir = unique_test_dir("lexicon-workspace-legacy-main-file-");
+        write_valid_managed_workspace(root_dir.path(), "example-source", "get-raw-data");
+        fs::write(
+            root_dir.path().join("get-raw-data-impl/src/main.rs"),
+            "fn main() {}\n",
+        )
+        .unwrap();
+
+        let result = validate_managed_workspace_layout(
+            root_dir.path(),
+            "example-source",
+            "get-raw-data",
+            "example-source-get-raw-data",
+            "example-source-get-raw-data-runner",
+            "example-source-get-raw-data",
+        );
+
+        assert!(matches!(
+            result,
+            Err(ManagedWorkspaceValidationError::LegacyLayout(_))
+        ));
+    }
+
+    #[test]
+    fn workspace_metadata_validation_accepts_valid_workspace() {
+        let root_dir = unique_test_dir("lexicon-workspace-metadata-valid-");
+        write_valid_managed_workspace(root_dir.path(), "example-source", "get-raw-data");
+
+        let result = validate_managed_workspace_metadata(
+            root_dir.path(),
+            "get-raw-data",
+            "example-source-get-raw-data",
+            "example-source-get-raw-data-runner",
+            "example-source-get-raw-data",
+        );
+
+        assert!(result.is_ok(), "result: {result:?}");
+    }
+
+    #[test]
     fn managed_runner_build_error_captures_stderr() {
         let error = ManagedRunnerBuildError::CommandFailed {
             operation: "get-raw-data".to_owned(),
@@ -2549,7 +3261,11 @@ mod tests {
 
         let rendered = error.to_string();
 
-        assert!(rendered.len() <= 4200, "display too long: {}", rendered.len());
+        assert!(
+            rendered.len() <= 4200,
+            "display too long: {}",
+            rendered.len()
+        );
         assert!(rendered.contains("get-raw-data managed runner build failed"));
     }
 
