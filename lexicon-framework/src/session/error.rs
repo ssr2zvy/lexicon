@@ -1,6 +1,8 @@
 use std::fmt;
 
-use lexicon_core::session::{SessionLeaseError, SessionStoreError};
+use lexicon_core::session::{
+    RuntimeContextError, SessionLeaseError, SessionStoreError,
+};
 
 /// Errors arising from session coordination operations.
 #[derive(Debug)]
@@ -20,9 +22,9 @@ pub enum SessionCoordinationError {
     /// The session targeted for abandonment is in a state that cannot be abandoned.
     AbandonmentUnavailable { reason: &'static str },
     /// Failed to encode the runtime context document.
-    ContextEncoding(String),
+    ContextEncoding(RuntimeContextError),
     /// Session operation root could not be derived from the given paths.
-    InvalidOperationRoot(String),
+    InvalidOperationRoot(RuntimeContextError),
 }
 
 impl fmt::Display for SessionCoordinationError {
@@ -45,11 +47,11 @@ impl fmt::Display for SessionCoordinationError {
             Self::AbandonmentUnavailable { reason } => {
                 write!(f, "session abandonment unavailable: {reason}")
             }
-            Self::ContextEncoding(msg) => {
-                write!(f, "runtime context encoding error: {msg}")
+            Self::ContextEncoding(err) => {
+                write!(f, "runtime context encoding error: {err}")
             }
-            Self::InvalidOperationRoot(msg) => {
-                write!(f, "invalid session operation root: {msg}")
+            Self::InvalidOperationRoot(err) => {
+                write!(f, "invalid session operation root: {err}")
             }
         }
     }
@@ -65,8 +67,8 @@ impl std::error::Error for SessionCoordinationError {
             | Self::ResumeUnavailable
             | Self::ResumeNotSupportedForOperation
             | Self::AbandonmentUnavailable { .. }
-            | Self::ContextEncoding(_)
-            | Self::InvalidOperationRoot(_) => None,
+            Self::ContextEncoding(err) => Some(err),
+            Self::InvalidOperationRoot(err) => Some(err),
         }
     }
 }

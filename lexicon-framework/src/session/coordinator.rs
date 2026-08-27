@@ -1,9 +1,6 @@
-use std::path::PathBuf;
-
 use lexicon_core::session::{
-    NewSessionRecord, ProjectIdentity, RuntimeContextError, RuntimeContextPaths,
-    SessionFailureKind, SessionIdentity, SessionLease, SessionLeaseError, SessionOperation,
-    SessionOperationRoot, SessionRecordV1, SessionState, SessionStore, SessionStoreError,
+    NewSessionRecord, ProjectIdentity, RuntimeContextPaths, SafeSessionFailure, SessionIdentity,
+    SessionLease, SessionOperation, SessionOperationRoot, SessionRecordV1, SessionStore,
     SessionTransition, encode_runtime_context,
 };
 use lexicon_core::runtime::{OwnedRuntimeIdentity, RuntimeExecutionMode, RuntimeSupervisionMode};
@@ -53,15 +50,15 @@ impl PreparedSessionLaunch {
     pub fn fail_launch(
         self,
         store: &SessionStore,
-        kind: SessionFailureKind,
-        summary: Option<String>,
+        failure: SafeSessionFailure,
     ) -> Result<SessionRecordV1, SessionCoordinationError> {
         let session_id = self.record.session().clone();
         let revision = self.record.revision();
-        drop(self.lease);
-        store
-            .transition(&session_id, revision, SessionTransition::ToFailed { kind, summary })
-            .map_err(SessionCoordinationError::Store)
+        let transition_result = store
+            .transition(&session_id, revision, SessionTransition::ToFailed { failure })
+            .map_err(SessionCoordinationError::Store);
+        drop(self);
+        transition_result
     }
 }
 
@@ -237,7 +234,6 @@ impl SessionCoordinator {
         let input = NewSessionRecord {
             project: self.project.clone(),
             runtime: self.runtime.clone(),
-            session: placeholder_session_identity(), // will be replaced by store.create_prepared
             operation: self.operation,
             execution_mode,
             supervision_mode: supervision,
@@ -257,7 +253,7 @@ impl SessionCoordinator {
 
         // Build context paths scoped to this session.
         let session_paths = build_session_paths(&self.context_paths, &session_id, self.operation)
-            .map_err(|e| SessionCoordinationError::InvalidOperationRoot(e.to_string()))?;
+            .map_err(SessionCoordinationError::InvalidOperationRoot)?;
 
         let context_document = encode_runtime_context(
             &self.project,
@@ -265,7 +261,7 @@ impl SessionCoordinator {
             &session_id,
             &session_paths,
         )
-        .map_err(|e| SessionCoordinationError::ContextEncoding(e.to_string()))?;
+        .map_err(SessionCoordinationError::ContextEncoding)?;
 
         Ok(PreparedSessionLaunch {
             record: prepared.into_record(),
@@ -279,26 +275,12 @@ impl SessionCoordinator {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Temporary placeholder session identity used before `create_prepared` generates
-/// the real one internally. The store ignores the session field and generates its own.
-fn placeholder_session_identity() -> SessionIdentity {
-    // The session identity provided here is overridden by store.create_prepared,
-    // which generates a new identity internally via NewSessionRecord { session, ..input }.
-    //
-    // SAFETY: generate_session_id() always produces a valid session identifier.
-    use lexicon_core::session::generate_session_id;
-    SessionIdentity::new(generate_session_id())
-        .expect("generate_session_id always produces a valid session identity")
-}
-
 /// Build `RuntimeContextPaths` scoped to a specific session within the coordinator's paths.
 fn build_session_paths(
     coordinator_paths: &RuntimeContextPaths,
     session: &lexicon_core::session::SessionIdentity,
     operation: SessionOperation,
 ) -> Result<RuntimeContextPaths, lexicon_core::session::RuntimeContextError> {
-    use lexicon_core::runtime::RuntimeOperation;
-
     let op = operation.to_runtime_operation();
     let session_directory = coordinator_paths
         .operation_root()

@@ -615,10 +615,6 @@ fn generate_source_scaffold(
             format_workspace_cargo_toml("get-raw-data", &["get-raw-data-impl", "lexicon-runner"]),
         ),
         (
-            "http/get-raw-data/session_status.json",
-            format_session_status_json(source_name, "get-raw-data"),
-        ),
-        (
             "http/get-raw-data/get-raw-data-impl/Cargo.toml",
             format_implementation_cargo_toml(&get_name),
         ),
@@ -646,10 +642,6 @@ fn generate_source_scaffold(
         (
             "http/process-data/Cargo.toml",
             format_workspace_cargo_toml("process-data", &["process-data-impl", "lexicon-runner"]),
-        ),
-        (
-            "http/process-data/session_status.json",
-            format_session_status_json(source_name, "process-data"),
         ),
         (
             "http/process-data/process-data-impl/Cargo.toml",
@@ -2555,18 +2547,6 @@ fn build_managed_runner(
         executable: artifact,
         target_directory: tempdir,
     })
-}
-
-fn format_session_status_json(source_name: &str, stage: &str) -> String {
-    let mut out = String::new();
-    out.push_str("{\n");
-    out.push_str("  \"schema_version\": 1,\n");
-    out.push_str(&format!("  \"source_id\": \"{source_name}\",\n"));
-    out.push_str(&format!("  \"stage\": \"{stage}\",\n"));
-    out.push_str("  \"status\": \"initialized\",\n");
-    out.push_str("  \"last_updated\": null\n");
-    out.push_str("}\n");
-    out
 }
 
 #[cfg(test)]

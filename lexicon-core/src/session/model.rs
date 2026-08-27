@@ -172,6 +172,60 @@ pub enum SessionFailureKind {
     StaleOwnership,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionFailureCode {
+    SourceReturnedError,
+    RuntimeInitializationFailed,
+    RuntimeContextInvalid,
+    HandlerStateUnavailable,
+    LaunchFailed,
+    AbnormalTermination,
+    StaleOwnership,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeSessionFailure {
+    kind: SessionFailureKind,
+    code: SessionFailureCode,
+    diagnostic: Option<String>,
+}
+
+impl SafeSessionFailure {
+    pub fn new(
+        kind: SessionFailureKind,
+        code: SessionFailureCode,
+        diagnostic: Option<String>,
+    ) -> Self {
+        let diagnostic = diagnostic.map(|s| truncate_to_bytes(s, MAX_FAILURE_SUMMARY_BYTES));
+        Self {
+            kind,
+            code,
+            diagnostic,
+        }
+    }
+
+    pub fn source_failure() -> Self {
+        Self::new(
+            SessionFailureKind::Source,
+            SessionFailureCode::SourceReturnedError,
+            Some("source handler returned an error".to_string()),
+        )
+    }
+
+    pub fn runtime_failure(code: SessionFailureCode, diagnostic: Option<String>) -> Self {
+        Self::new(SessionFailureKind::Runtime, code, diagnostic)
+    }
+
+    pub fn stale_ownership_failure() -> Self {
+        Self::new(
+            SessionFailureKind::StaleOwnership,
+            SessionFailureCode::StaleOwnership,
+            Some("stale session ownership: prior process terminated without completing".to_string()),
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SessionFailureV1
 // ---------------------------------------------------------------------------
@@ -179,22 +233,39 @@ pub enum SessionFailureKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionFailureV1 {
     kind: SessionFailureKind,
-    /// Concise sanitized failure summary, bounded by `MAX_FAILURE_SUMMARY_BYTES`.
-    summary: Option<String>,
+    code: SessionFailureCode,
+    /// Concise Core-authored diagnostic, bounded by `MAX_FAILURE_SUMMARY_BYTES`.
+    diagnostic: Option<String>,
 }
 
 impl SessionFailureV1 {
-    pub fn new(kind: SessionFailureKind, summary: Option<String>) -> Self {
-        let summary = summary.map(|s| truncate_to_bytes(s, MAX_FAILURE_SUMMARY_BYTES));
-        Self { kind, summary }
+    pub fn new(
+        kind: SessionFailureKind,
+        code: SessionFailureCode,
+        diagnostic: Option<String>,
+    ) -> Self {
+        let diagnostic = diagnostic.map(|s| truncate_to_bytes(s, MAX_FAILURE_SUMMARY_BYTES));
+        Self {
+            kind,
+            code,
+            diagnostic,
+        }
+    }
+
+    pub fn from_safe(failure: SafeSessionFailure) -> Self {
+        Self::new(failure.kind, failure.code, failure.diagnostic)
     }
 
     pub fn kind(&self) -> SessionFailureKind {
         self.kind
     }
 
-    pub fn summary(&self) -> Option<&str> {
-        self.summary.as_deref()
+    pub fn code(&self) -> SessionFailureCode {
+        self.code
+    }
+
+    pub fn diagnostic(&self) -> Option<&str> {
+        self.diagnostic.as_deref()
     }
 }
 
@@ -239,8 +310,7 @@ pub enum SessionTransition {
     ToRunning,
     ToSucceeded,
     ToFailed {
-        kind: SessionFailureKind,
-        summary: Option<String>,
+        failure: SafeSessionFailure,
     },
     ToAbandoned,
 }
@@ -264,7 +334,6 @@ impl SessionTransition {
 pub struct NewSessionRecord {
     pub project: ProjectIdentity,
     pub runtime: OwnedRuntimeIdentity,
-    pub session: SessionIdentity,
     pub operation: SessionOperation,
     pub execution_mode: RuntimeExecutionMode,
     pub supervision_mode: RuntimeSupervisionMode,
@@ -350,13 +419,17 @@ pub struct SessionRecordV1 {
 }
 
 impl SessionRecordV1 {
-    pub(crate) fn new_prepared(input: NewSessionRecord, clock: &dyn SessionClock) -> Self {
+    pub(crate) fn new_prepared(
+        input: NewSessionRecord,
+        session: SessionIdentity,
+        clock: &dyn SessionClock,
+    ) -> Self {
         let now = clock.now();
         Self {
             schema_version: SESSION_SCHEMA_VERSION,
             project: input.project,
             runtime: input.runtime,
-            session: input.session,
+            session,
             operation: input.operation,
             execution_mode: input.execution_mode,
             supervision_mode: input.supervision_mode,
