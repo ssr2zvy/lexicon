@@ -1,18 +1,22 @@
 use std::fmt;
 
+use lexicon_core::runtime::{OwnedRuntimeIdentity, RuntimeExecutionMode, RuntimeSupervisionMode};
 use lexicon_core::runtime::invocation::{
     RuntimeInvocationConstructionError, RuntimeInvocationValueError,
 };
 use lexicon_core::runtime::invocation_transport::RuntimeInvocationTransportEncodingError;
 use lexicon_core::session::{
-    SessionFailureCode, SessionFailureKind, SessionState, SessionStoreError,
+    ProjectIdentity, SessionFailureCode, SessionFailureKind, SessionIdentity, SessionOperation,
+    SessionState, SessionStoreError,
 };
 
 use crate::build::{
     ProcessingRuntimeBundleAdmissionError, RuntimeArtifactHashError, RuntimeBundleAdmissionError,
 };
 use crate::data::outcome::ObservedChildTermination;
+use crate::data::request::DataOperation;
 use crate::session::SessionCoordinationError;
+use crate::{ProjectConfigLoadError, ProjectRootDiscoveryError};
 
 // ---------------------------------------------------------------------------
 // Typed sub-errors for project discovery and layout validation
@@ -24,14 +28,14 @@ pub enum ProjectDiscoveryError {
     /// Failed to read the current working directory.
     CurrentDirectory(std::io::Error),
     /// `find_project_root` failed: no `lexicon.toml` found, or nested project.
-    FindRoot(String),
+    FindRoot(ProjectRootDiscoveryError),
 }
 
 impl fmt::Display for ProjectDiscoveryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CurrentDirectory(e) => write!(f, "failed to determine current directory: {e}"),
-            Self::FindRoot(msg) => write!(f, "{msg}"),
+            Self::FindRoot(err) => write!(f, "{err}"),
         }
     }
 }
@@ -40,7 +44,7 @@ impl std::error::Error for ProjectDiscoveryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::CurrentDirectory(e) => Some(e),
-            Self::FindRoot(_) => None,
+            Self::FindRoot(err) => Some(err),
         }
     }
 }
@@ -56,8 +60,8 @@ pub enum ProjectConfigurationError {
     Schema(String),
     /// The resolved project identity is invalid.
     Identity(String),
-    /// Catch-all for other configuration errors.
-    Other(String),
+    /// Typed project-config loading error.
+    Load(ProjectConfigLoadError),
 }
 
 impl fmt::Display for ProjectConfigurationError {
@@ -67,7 +71,7 @@ impl fmt::Display for ProjectConfigurationError {
             Self::TomlDecode(msg) => write!(f, "failed to parse lexicon.toml: {msg}"),
             Self::Schema(msg) => write!(f, "invalid project schema: {msg}"),
             Self::Identity(msg) => write!(f, "invalid project identity: {msg}"),
-            Self::Other(msg) => write!(f, "{msg}"),
+            Self::Load(err) => write!(f, "{err}"),
         }
     }
 }
@@ -76,6 +80,7 @@ impl std::error::Error for ProjectConfigurationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Read(e) => Some(e),
+            Self::Load(err) => Some(err),
             _ => None,
         }
     }
@@ -295,11 +300,7 @@ impl std::error::Error for ForegroundInvocationConstructionError {
 pub enum ForegroundPreparationError {
     InvocationConstruction(ForegroundInvocationConstructionError),
     InvocationEncoding(RuntimeInvocationTransportEncodingError),
-    ExecutableIntegrityChanged {
-        path: std::path::PathBuf,
-        detail: String,
-    },
-    ExecutableIntegrityCheck(RuntimeArtifactHashError),
+    ExecutableIntegrity(ExecutableIntegrityError),
     ProcessSpawn(std::io::Error),
 }
 
@@ -308,14 +309,7 @@ impl fmt::Display for ForegroundPreparationError {
         match self {
             Self::InvocationConstruction(e) => write!(f, "{e}"),
             Self::InvocationEncoding(e) => write!(f, "invocation transport encoding failed: {e}"),
-            Self::ExecutableIntegrityChanged { path, detail } => write!(
-                f,
-                "runtime executable changed after admission at {}: {detail}",
-                path.display()
-            ),
-            Self::ExecutableIntegrityCheck(e) => {
-                write!(f, "pre-launch executable integrity check failed: {e}")
-            }
+            Self::ExecutableIntegrity(e) => write!(f, "{e}"),
             Self::ProcessSpawn(e) => write!(f, "failed to launch runtime process: {e}"),
         }
     }
@@ -326,9 +320,8 @@ impl std::error::Error for ForegroundPreparationError {
         match self {
             Self::InvocationConstruction(e) => Some(e),
             Self::InvocationEncoding(e) => Some(e),
-            Self::ExecutableIntegrityCheck(e) => Some(e),
+            Self::ExecutableIntegrity(e) => Some(e),
             Self::ProcessSpawn(e) => Some(e),
-            Self::ExecutableIntegrityChanged { .. } => None,
         }
     }
 }
@@ -344,10 +337,16 @@ pub struct WaitRecoveryFailure {
     pub wait_error: std::io::Error,
     /// Error from `Child::kill()`, if kill was attempted.
     pub kill_error: Option<std::io::Error>,
+    /// Error from `Child::try_wait()`, if a probe failed.
+    pub try_wait_error: Option<std::io::Error>,
     /// Error from the reap `wait()` after kill, if attempted.
     pub reap_error: Option<std::io::Error>,
+    /// Error while loading the durable session record during recovery, if attempted.
+    pub session_load_error: Option<Box<ForegroundDataExecutionError>>,
     /// Error from session reconciliation during recovery, if attempted.
-    pub reconciliation_error: Option<SessionCoordinationError>,
+    pub session_reconciliation_error: Option<Box<ForegroundDataExecutionError>>,
+    /// Final durable state when recovery reached reconciliation.
+    pub final_state: Option<SessionState>,
 }
 
 impl fmt::Display for WaitRecoveryFailure {
@@ -356,11 +355,20 @@ impl fmt::Display for WaitRecoveryFailure {
         if let Some(e) = &self.kill_error {
             write!(f, "; kill failed: {e}")?;
         }
+        if let Some(e) = &self.try_wait_error {
+            write!(f, "; try_wait failed: {e}")?;
+        }
         if let Some(e) = &self.reap_error {
             write!(f, "; reap failed: {e}")?;
         }
-        if let Some(e) = &self.reconciliation_error {
+        if let Some(e) = &self.session_load_error {
+            write!(f, "; session load failed: {e}")?;
+        }
+        if let Some(e) = &self.session_reconciliation_error {
             write!(f, "; session reconciliation failed: {e}")?;
+        }
+        if let Some(state) = self.final_state {
+            write!(f, "; final durable state: {state:?}")?;
         }
         Ok(())
     }
@@ -370,6 +378,186 @@ impl std::error::Error for WaitRecoveryFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.wait_error)
     }
+}
+
+#[derive(Debug)]
+pub enum ExecutableIntegrityError {
+    Changed {
+        path: std::path::PathBuf,
+        expected: crate::build::HashedRuntimeArtifact,
+        actual: crate::build::HashedRuntimeArtifact,
+    },
+    Inspection(RuntimeArtifactHashError),
+}
+
+impl fmt::Display for ExecutableIntegrityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Changed { path, expected, actual } => write!(
+                f,
+                "runtime executable changed after admission at {}: expected size/hash ({}, {}), found ({}, {})",
+                path.display(),
+                expected.size(),
+                expected.sha256(),
+                actual.size(),
+                actual.sha256()
+            ),
+            Self::Inspection(err) => write!(f, "pre-launch executable integrity check failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for ExecutableIntegrityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Inspection(err) => Some(err),
+            Self::Changed { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum TerminalSessionIdentityMismatch {
+    Project {
+        expected: ProjectIdentity,
+        actual: ProjectIdentity,
+    },
+    Runtime {
+        expected: OwnedRuntimeIdentity,
+        actual: OwnedRuntimeIdentity,
+    },
+    Session {
+        expected: SessionIdentity,
+        actual: SessionIdentity,
+    },
+    Operation {
+        expected: SessionOperation,
+        actual: SessionOperation,
+    },
+    ExecutionMode {
+        expected: RuntimeExecutionMode,
+        actual: RuntimeExecutionMode,
+    },
+    SupervisionMode {
+        expected: RuntimeSupervisionMode,
+        actual: RuntimeSupervisionMode,
+    },
+}
+
+#[derive(Debug)]
+pub enum RootSummaryValidationError {
+    Missing,
+    Load(SessionStoreError),
+    SchemaVersionMismatch { expected: u32, actual: u32 },
+    ProjectMismatch,
+    RuntimeMismatch,
+    OperationMismatch,
+    MissingCurrentSession,
+    SessionMismatch,
+    MissingCurrentState,
+    StateMismatch { expected: SessionState, actual: SessionState },
+    RevisionMismatch { expected: u64, actual: u64 },
+}
+
+impl fmt::Display for RootSummaryValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing => f.write_str("root session_status.json is missing"),
+            Self::Load(err) => write!(f, "failed to load root session_status.json: {err}"),
+            Self::SchemaVersionMismatch { expected, actual } => {
+                write!(f, "summary schema_version mismatch: expected {expected}, found {actual}")
+            }
+            Self::ProjectMismatch => f.write_str("summary project does not match detailed record"),
+            Self::RuntimeMismatch => f.write_str("summary runtime does not match detailed record"),
+            Self::OperationMismatch => f.write_str("summary operation does not match detailed record"),
+            Self::MissingCurrentSession => f.write_str("summary current_session is missing"),
+            Self::SessionMismatch => f.write_str("summary current_session does not match record"),
+            Self::MissingCurrentState => f.write_str("summary current_state is missing"),
+            Self::StateMismatch { expected, actual } => {
+                write!(f, "summary current_state mismatch: expected {expected:?}, found {actual:?}")
+            }
+            Self::RevisionMismatch { expected, actual } => {
+                write!(f, "summary revision mismatch: expected {expected}, found {actual}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RootSummaryValidationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Load(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum RootSummaryReconciliationError {
+    Validation(RootSummaryValidationError),
+    Rebuild(SessionStoreError),
+    ValidationAfterRebuild(RootSummaryValidationError),
+}
+
+impl fmt::Display for RootSummaryReconciliationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation(err) => write!(f, "root summary validation failed: {err}"),
+            Self::Rebuild(err) => write!(f, "failed to rebuild root summary: {err}"),
+            Self::ValidationAfterRebuild(err) => {
+                write!(f, "root summary still invalid after rebuild: {err}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RootSummaryReconciliationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Validation(err) => Some(err),
+            Self::Rebuild(err) => Some(err),
+            Self::ValidationAfterRebuild(err) => Some(err),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ChildOwnershipUncertainError {
+    pub wait_error: std::io::Error,
+    pub try_wait_error: Option<std::io::Error>,
+    pub kill_error: Option<std::io::Error>,
+    pub reap_error: Option<std::io::Error>,
+    pub session_load_error: Option<Box<ForegroundDataExecutionError>>,
+    pub session_reconciliation_error: Option<Box<ForegroundDataExecutionError>>,
+}
+
+impl fmt::Display for ChildOwnershipUncertainError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cannot prove child termination after wait failure: {}", self.wait_error)?;
+        if let Some(e) = &self.try_wait_error {
+            write!(f, "; try_wait failed: {e}")?;
+        }
+        if let Some(e) = &self.kill_error {
+            write!(f, "; kill failed: {e}")?;
+        }
+        if let Some(e) = &self.reap_error {
+            write!(f, "; reap failed: {e}")?;
+        }
+        if let Some(e) = &self.session_load_error {
+            write!(f, "; session load failed: {e}")?;
+        }
+        if let Some(e) = &self.session_reconciliation_error {
+            write!(f, "; session reconciliation failed: {e}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ChildOwnershipUncertainError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.wait_error)
+    }
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -415,10 +603,8 @@ pub enum ForegroundDataExecutionError {
     InvocationConstruction(ForegroundInvocationConstructionError),
     /// Invocation transport encoding failed, and the session was transitioned to Failed.
     InvocationEncoding(RuntimeInvocationTransportEncodingError),
-    /// Pre-launch executable integrity recheck detected a change after admission.
-    ExecutableIntegrityChanged { path: std::path::PathBuf, detail: String },
-    /// Pre-launch executable integrity recheck encountered an I/O or hash error.
-    ExecutableIntegrityCheck(RuntimeArtifactHashError),
+    /// Pre-launch executable integrity recheck failed.
+    ExecutableIntegrity(ExecutableIntegrityError),
     /// Process spawn failed; the session was transitioned to Failed.
     ProcessSpawn {
         source: std::io::Error,
@@ -433,6 +619,8 @@ pub enum ForegroundDataExecutionError {
     },
     /// Waiting for the child process failed and the recovery path also encountered errors.
     ProcessWaitRecovery(Box<WaitRecoveryFailure>),
+    /// Waiting/recovery failed and process ownership could not be proven.
+    ChildOwnershipUncertain(Box<ChildOwnershipUncertainError>),
     /// The child exited with zero but the session record was not in a terminal state, and
     /// transitioning it to Failed also failed.
     AbnormalTerminationPersistence {
@@ -450,37 +638,29 @@ pub enum ForegroundDataExecutionError {
     /// The durable session record is present but cannot be decoded.
     CorruptTerminalSession(SessionStoreError),
     /// The detailed session record's identity fields do not match the prepared invocation.
-    SessionIdentityDisagreement {
-        field: &'static str,
-        expected: String,
-        actual: String,
-    },
-    /// The root session summary disagrees with the detailed record after successful termination,
-    /// and rebuilding the summary also failed.
-    RootSummaryReconciliationFailed {
-        detail: String,
-        rebuild_error: Option<SessionStoreError>,
-    },
+    SessionIdentityDisagreement(TerminalSessionIdentityMismatch),
+    /// Root-summary validation/rebuild failed.
+    RootSummaryReconciliationFailed(RootSummaryReconciliationError),
     /// The child exited zero but the session remained in a non-terminal state (Prepared or
     /// Running), which was subsequently transitioned to Failed.
     ZeroExitSessionIncomplete {
-        session: String,
-        operation: String,
+        session: SessionIdentity,
+        operation: DataOperation,
     },
     /// The child exited with a nonzero code.
     ChildFailed {
-        operation: String,
+        operation: DataOperation,
         source: String,
-        session: String,
+        session: SessionIdentity,
         failure_kind: SessionFailureKind,
         failure_code: SessionFailureCode,
-        exit_code: i32,
+        exit_code: Option<i32>,
     },
     /// The child terminated abnormally (signal, abort, etc.).
     AbnormalTermination {
-        operation: String,
+        operation: DataOperation,
         source: String,
-        session: String,
+        session: SessionIdentity,
         signal: Option<i32>,
     },
     /// The child's exit status and durable session state disagree.
@@ -548,14 +728,7 @@ impl fmt::Display for ForegroundDataExecutionError {
             Self::InvocationEncoding(e) => {
                 write!(f, "invocation transport encoding failed: {e}")
             }
-            Self::ExecutableIntegrityChanged { path, detail } => write!(
-                f,
-                "runtime executable changed after admission at {}: {detail}",
-                path.display()
-            ),
-            Self::ExecutableIntegrityCheck(err) => {
-                write!(f, "pre-launch executable integrity check failed: {err}")
-            }
+            Self::ExecutableIntegrity(err) => write!(f, "{err}"),
             Self::ProcessSpawn { source, persistence_failure: None } => {
                 write!(f, "failed to launch runtime process: {source}")
             }
@@ -572,6 +745,9 @@ impl fmt::Display for ForegroundDataExecutionError {
             Self::ProcessWaitRecovery(e) => {
                 write!(f, "runtime process wait failed with incomplete recovery: {e}")
             }
+            Self::ChildOwnershipUncertain(e) => {
+                write!(f, "fatal supervision failure: child ownership uncertain: {e}")
+            }
             Self::AbnormalTerminationPersistence { termination, persistence_failure } => write!(
                 f,
                 "runtime terminated abnormally ({termination:?}) and session failure persistence also failed: {persistence_failure}"
@@ -586,19 +762,58 @@ impl fmt::Display for ForegroundDataExecutionError {
             Self::CorruptTerminalSession(err) => {
                 write!(f, "session record corrupt after child termination: {err}")
             }
-            Self::SessionIdentityDisagreement { field, expected, actual } => write!(
-                f,
-                "session identity disagreement after termination: field '{field}' expected '{expected}', found '{actual}'"
-            ),
-            Self::RootSummaryReconciliationFailed { detail, rebuild_error: None } => {
-                write!(f, "root session summary disagreement: {detail}")
-            }
-            Self::RootSummaryReconciliationFailed { detail, rebuild_error: Some(e) } => {
-                write!(f, "root session summary disagreement: {detail}; rebuild also failed: {e}")
+            Self::SessionIdentityDisagreement(mismatch) => match mismatch {
+                TerminalSessionIdentityMismatch::Project { expected, actual } => write!(
+                    f,
+                    "session identity disagreement after termination: project expected '{}', found '{}'",
+                    expected.name(),
+                    actual.name()
+                ),
+                TerminalSessionIdentityMismatch::Runtime { expected, actual } => write!(
+                    f,
+                    "session identity disagreement after termination: runtime expected '{}:{}:{}@{}', found '{}:{}:{}@{}'",
+                    expected.source_name(),
+                    expected.protocol().identifier(),
+                    expected.operation().identifier(),
+                    expected.source_contract_version(),
+                    actual.source_name(),
+                    actual.protocol().identifier(),
+                    actual.operation().identifier(),
+                    actual.source_contract_version()
+                ),
+                TerminalSessionIdentityMismatch::Session { expected, actual } => write!(
+                    f,
+                    "session identity disagreement after termination: session expected '{}', found '{}'",
+                    expected.id(),
+                    actual.id()
+                ),
+                TerminalSessionIdentityMismatch::Operation { expected, actual } => write!(
+                    f,
+                    "session identity disagreement after termination: operation expected '{}', found '{}'",
+                    expected.identifier(),
+                    actual.identifier()
+                ),
+                TerminalSessionIdentityMismatch::ExecutionMode { expected, actual } => write!(
+                    f,
+                    "session identity disagreement after termination: execution mode expected '{}', found '{}'",
+                    expected.identifier(),
+                    actual.identifier()
+                ),
+                TerminalSessionIdentityMismatch::SupervisionMode { expected, actual } => write!(
+                    f,
+                    "session identity disagreement after termination: supervision mode expected '{}', found '{}'",
+                    expected.identifier(),
+                    actual.identifier()
+                ),
+            },
+            Self::RootSummaryReconciliationFailed(err) => {
+                write!(f, "{err}")
             }
             Self::ZeroExitSessionIncomplete { session, operation } => write!(
                 f,
-                "{operation} session {session} exited zero but did not reach a terminal state; treated as abnormal"
+                "{} session {} exited zero but did not reach a terminal state; treated as abnormal",
+                operation.display_name(),
+                session.id()
             ),
             Self::ChildFailed {
                 operation,
@@ -609,20 +824,27 @@ impl fmt::Display for ForegroundDataExecutionError {
                 exit_code,
             } => write!(
                 f,
-                "{operation} failed for source '{source}' (session {session}): kind={}, code={}, exit={exit_code}",
+                "{} failed for source '{source}' (session {}): kind={}, code={}{}",
+                operation.display_name(),
+                session.id(),
                 failure_kind.identifier(),
                 failure_code.identifier(),
+                exit_code.map(|code| format!(", exit={code}")).unwrap_or_default(),
             ),
             Self::AbnormalTermination { operation, source, session, signal } => {
                 if let Some(sig) = signal {
                     write!(
                         f,
-                        "{operation} for source '{source}' (session {session}) terminated by signal {sig}"
+                        "{} for source '{source}' (session {}) terminated by signal {sig}",
+                        operation.display_name(),
+                        session.id()
                     )
                 } else {
                     write!(
                         f,
-                        "{operation} for source '{source}' (session {session}) terminated abnormally"
+                        "{} for source '{source}' (session {}) terminated abnormally",
+                        operation.display_name(),
+                        session.id()
                     )
                 }
             }
@@ -650,10 +872,11 @@ impl std::error::Error for ForegroundDataExecutionError {
             Self::SessionPreparation(err) => Some(err),
             Self::InvocationConstruction(e) => Some(e),
             Self::InvocationEncoding(e) => Some(e),
-            Self::ExecutableIntegrityCheck(err) => Some(err),
+            Self::ExecutableIntegrity(err) => Some(err),
             Self::ProcessSpawn { source, .. } => Some(source),
             Self::PreparationFailureAndPersistenceFailure { preparation, .. } => Some(preparation),
             Self::ProcessWaitRecovery(e) => Some(e.as_ref()),
+            Self::ChildOwnershipUncertain(e) => Some(e.as_ref()),
             Self::AbnormalTerminationPersistence { persistence_failure, .. } => {
                 Some(persistence_failure)
             }
@@ -662,6 +885,7 @@ impl std::error::Error for ForegroundDataExecutionError {
             }
             Self::MissingTerminalSession(err) => Some(err),
             Self::CorruptTerminalSession(err) => Some(err),
+            Self::RootSummaryReconciliationFailed(err) => Some(err),
             _ => None,
         }
     }

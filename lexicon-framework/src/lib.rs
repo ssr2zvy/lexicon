@@ -358,6 +358,106 @@ struct ProjectSection {
     sources_directory: Option<String>,
 }
 
+#[derive(Debug)]
+pub enum ProjectRootDiscoveryError {
+    CurrentDirectoryMetadata {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    ParentTraversal,
+    ProjectNotFound,
+    NestedProjectConflict {
+        outer: PathBuf,
+        nested: PathBuf,
+    },
+}
+
+impl fmt::Display for ProjectRootDiscoveryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CurrentDirectoryMetadata { path, source } => {
+                write!(formatter, "failed to read {}: {source}", path.display())
+            }
+            Self::ParentTraversal => {
+                formatter.write_str("failed to traverse project ancestors")
+            }
+            Self::ProjectNotFound => formatter.write_str(
+                "No Lexicon project found. The current directory is not inside a Lexicon project.",
+            ),
+            Self::NestedProjectConflict { outer, nested } => write!(
+                formatter,
+                "Nested Lexicon project detected.\nOuter project: {}\nNested project: {}\nMove the nested project outside the outer project, or remove its lexicon.toml if it should belong to the outer project, then rerun.\nNo changes were made.",
+                outer.display(),
+                nested.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProjectRootDiscoveryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CurrentDirectoryMetadata { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ProjectConfigLoadError {
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    DecodeToml {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    UnsupportedSchemaVersion {
+        actual: u32,
+    },
+    InvalidProjectIdentity(lexicon_core::runtime::invocation::RuntimeInvocationValueError),
+    InvalidSourcesDirectory,
+    SourcesDirectoryTraversal,
+}
+
+impl fmt::Display for ProjectConfigLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read { path, source } => {
+                write!(formatter, "failed to read {}: {source}", path.display())
+            }
+            Self::DecodeToml { path, source } => {
+                write!(formatter, "failed to parse {}: {source}", path.display())
+            }
+            Self::UnsupportedSchemaVersion { actual } => write!(
+                formatter,
+                "unsupported schema_version in lexicon.toml: expected 1 but found {actual}"
+            ),
+            Self::InvalidProjectIdentity(err) => {
+                write!(formatter, "invalid project.name in lexicon.toml: {err}")
+            }
+            Self::InvalidSourcesDirectory => formatter.write_str(
+                "invalid sources_directory in lexicon.toml: must be a relative path",
+            ),
+            Self::SourcesDirectoryTraversal => formatter.write_str(
+                "invalid sources_directory in lexicon.toml: must remain within the project root",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProjectConfigLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read { source, .. } => Some(source),
+            Self::DecodeToml { source, .. } => Some(source),
+            Self::InvalidProjectIdentity(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
 pub mod commands {
     use super::*;
     use std::path::{Path, PathBuf};
@@ -544,8 +644,9 @@ fn generate_source_scaffold(
     let project_root = find_project_root(
         &env::current_dir()
             .map_err(|error| format!("failed to determine current directory: {error}"))?,
-    )?;
-    let source_root = configured_sources_directory(&project_root)?;
+    )
+    .map_err(|error| error.to_string())?;
+    let source_root = configured_sources_directory(&project_root).map_err(|error| error.to_string())?;
     let source_dir = source_root.join(source_name);
     let protocol_dir = source_dir.join(protocol);
 
@@ -736,12 +837,12 @@ fn build_source(
     })?;
     let project_root = find_project_root(&current_dir).map_err(|error| {
         ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
-            error,
+            error.to_string(),
         ))
     })?;
     let sources_root = configured_sources_directory(&project_root).map_err(|error| {
         ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
-            error,
+            error.to_string(),
         ))
     })?;
     let source_root = sources_root.join(source_name);
@@ -1322,7 +1423,7 @@ fn validate_protocol(protocol: &str) -> Result<(), String> {
     }
 }
 
-pub(crate) fn find_project_root(start_dir: &Path) -> Result<PathBuf, String> {
+pub(crate) fn find_project_root(start_dir: &Path) -> Result<PathBuf, ProjectRootDiscoveryError> {
     let mut current = start_dir.to_path_buf();
     let mut ancestors = Vec::new();
 
@@ -1339,10 +1440,7 @@ pub(crate) fn find_project_root(start_dir: &Path) -> Result<PathBuf, String> {
     }
 
     if ancestors.is_empty() {
-        return Err(
-            "No Lexicon project found. The current directory is not inside a Lexicon project."
-                .to_string(),
-        );
+        return Err(ProjectRootDiscoveryError::ProjectNotFound);
     }
 
     if ancestors.len() > 1 {
@@ -1354,27 +1452,25 @@ pub(crate) fn find_project_root(start_dir: &Path) -> Result<PathBuf, String> {
             .first()
             .cloned()
             .expect("ancestor list should at least contain one project root");
-        return Err(format!(
-            "Nested Lexicon project detected.\nOuter project: {}\nNested project: {}\nMove the nested project outside the outer project, or remove its lexicon.toml if it should belong to the outer project, then rerun.\nNo changes were made.",
-            outer.display(),
-            nested.display()
-        ));
+        return Err(ProjectRootDiscoveryError::NestedProjectConflict {
+            outer,
+            nested,
+        });
     }
 
     let root = ancestors[0].clone();
     let descendant = find_descendant_project_root(&root)?;
     if let Some(nested_root) = descendant {
-        return Err(format!(
-            "Nested Lexicon project detected.\nOuter project: {}\nNested project: {}\nMove the nested project outside the outer project, or remove its lexicon.toml if it should belong to the outer project, then rerun.\nNo changes were made.",
-            root.display(),
-            nested_root.display()
-        ));
+        return Err(ProjectRootDiscoveryError::NestedProjectConflict {
+            outer: root.clone(),
+            nested: nested_root,
+        });
     }
 
     Ok(root)
 }
 
-fn find_descendant_project_root(root: &Path) -> Result<Option<PathBuf>, String> {
+fn find_descendant_project_root(root: &Path) -> Result<Option<PathBuf>, ProjectRootDiscoveryError> {
     let mut found = None;
     visit_descendants(root, &mut found, root)?;
     Ok(found)
@@ -1407,15 +1503,16 @@ fn visit_descendants(
     root: &Path,
     found: &mut Option<PathBuf>,
     current: &Path,
-) -> Result<(), String> {
+) -> Result<(), ProjectRootDiscoveryError> {
     let mut entries = fs::read_dir(current)
-        .map_err(|error| format!("failed to read {}: {error}", current.display()))?
+        .map_err(|source| ProjectRootDiscoveryError::CurrentDirectoryMetadata {
+            path: current.to_path_buf(),
+            source,
+        })?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            format!(
-                "failed to read directory entry in {}: {error}",
-                current.display()
-            )
+        .map_err(|source| ProjectRootDiscoveryError::CurrentDirectoryMetadata {
+            path: current.to_path_buf(),
+            source,
         })?;
     entries.sort_by_key(|entry| entry.file_name());
 
@@ -1511,66 +1608,8 @@ fn resolve_project_directory(project_root: &Path, configured: &str) -> Result<Pa
     Ok(resolved)
 }
 
-fn configured_sources_directory(project_root: &Path) -> Result<PathBuf, String> {
-    let config_path = project_root.join("lexicon.toml");
-    let contents = fs::read_to_string(&config_path)
-        .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
-    let parsed: LexiconProjectConfig = toml::from_str(&contents)
-        .map_err(|error| format!("failed to parse {}: {error}", config_path.display()))?;
-
-    if parsed.schema_version != Some(1) {
-        return Err(format!(
-            "unsupported schema_version in {}: expected 1 but found {:?}",
-            config_path.display(),
-            parsed.schema_version
-        ));
-    }
-
-    let project = parsed
-        .project
-        .as_ref()
-        .ok_or_else(|| format!("missing [project] section in {}", config_path.display()))?;
-    let project_name = project
-        .name
-        .as_deref()
-        .ok_or_else(|| format!("missing project.name in {}", config_path.display()))?
-        .trim();
-    if project_name.is_empty()
-        || project_name == "."
-        || project_name == ".."
-        || project_name.contains(['/', '\\'])
-    {
-        return Err(format!(
-            "invalid project.name '{}' in {}",
-            project_name,
-            config_path.display()
-        ));
-    }
-
-    let configured = project.sources_directory.as_deref().unwrap_or("sources");
-
-    let path = Path::new(configured);
-    if path.is_absolute() {
-        return Err(format!(
-            "invalid sources_directory '{}' in {}: must be a relative path",
-            configured,
-            config_path.display()
-        ));
-    }
-    if path.components().any(|c| {
-        matches!(
-            c,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return Err(format!(
-            "invalid sources_directory '{}' in {}: must remain within the project root",
-            configured,
-            config_path.display()
-        ));
-    }
-
-    resolve_project_directory(project_root, configured)
+fn configured_sources_directory(project_root: &Path) -> Result<PathBuf, ProjectConfigLoadError> {
+    load_project_config(project_root).map(|config| config.sources_root)
 }
 
 /// Project configuration data loaded from `lexicon.toml`.
@@ -1585,51 +1624,58 @@ pub(crate) struct ProjectConfigData {
 ///
 /// Reuses the existing schema validation, name validation, and path resolution
 /// logic from `configured_sources_directory`.
-pub(crate) fn load_project_config(project_root: &Path) -> Result<ProjectConfigData, String> {
+pub(crate) fn load_project_config(
+    project_root: &Path,
+) -> Result<ProjectConfigData, ProjectConfigLoadError> {
     let config_path = project_root.join("lexicon.toml");
     let contents = fs::read_to_string(&config_path)
-        .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
-    let parsed: LexiconProjectConfig = toml::from_str(&contents)
-        .map_err(|error| format!("failed to parse {}: {error}", config_path.display()))?;
+        .map_err(|source| ProjectConfigLoadError::Read {
+            path: config_path.clone(),
+            source,
+        })?;
+    let parsed: LexiconProjectConfig =
+        toml::from_str(&contents).map_err(|source| ProjectConfigLoadError::DecodeToml {
+            path: config_path.clone(),
+            source,
+        })?;
 
     if parsed.schema_version != Some(1) {
-        return Err(format!(
-            "unsupported schema_version in {}: expected 1 but found {:?}",
-            config_path.display(),
-            parsed.schema_version
-        ));
+        return Err(ProjectConfigLoadError::UnsupportedSchemaVersion {
+            actual: parsed.schema_version.unwrap_or_default(),
+        });
     }
 
     let project = parsed
         .project
-        .as_ref()
-        .ok_or_else(|| format!("missing [project] section in {}", config_path.display()))?;
+        .as_ref();
+    let Some(project) = project else {
+        return Err(ProjectConfigLoadError::InvalidProjectIdentity(
+            lexicon_core::runtime::invocation::RuntimeInvocationValueError::invalid(
+                "project.name",
+                "missing [project] section",
+            ),
+        ));
+    };
     let project_name = project
         .name
         .as_deref()
-        .ok_or_else(|| format!("missing project.name in {}", config_path.display()))?
+        .ok_or_else(|| {
+            ProjectConfigLoadError::InvalidProjectIdentity(
+                lexicon_core::runtime::invocation::RuntimeInvocationValueError::invalid(
+                    "project.name",
+                    "missing project.name",
+                ),
+            )
+        })?
         .trim();
-    if project_name.is_empty()
-        || project_name == "."
-        || project_name == ".."
-        || project_name.contains(['/', '\\'])
-    {
-        return Err(format!(
-            "invalid project.name '{}' in {}",
-            project_name,
-            config_path.display()
-        ));
-    }
+    lexicon_core::runtime::invocation::ProjectInvocationIdentity::new(project_name.to_owned())
+        .map_err(ProjectConfigLoadError::InvalidProjectIdentity)?;
 
     let configured = project.sources_directory.as_deref().unwrap_or("sources");
 
     let path = Path::new(configured);
     if path.is_absolute() {
-        return Err(format!(
-            "invalid sources_directory '{}' in {}: must be a relative path",
-            configured,
-            config_path.display()
-        ));
+        return Err(ProjectConfigLoadError::InvalidSourcesDirectory);
     }
     if path.components().any(|c| {
         matches!(
@@ -1637,14 +1683,11 @@ pub(crate) fn load_project_config(project_root: &Path) -> Result<ProjectConfigDa
             Component::ParentDir | Component::RootDir | Component::Prefix(_)
         )
     }) {
-        return Err(format!(
-            "invalid sources_directory '{}' in {}: must remain within the project root",
-            configured,
-            config_path.display()
-        ));
+        return Err(ProjectConfigLoadError::SourcesDirectoryTraversal);
     }
 
-    let sources_root = resolve_project_directory(project_root, configured)?;
+    let sources_root = resolve_project_directory(project_root, configured)
+        .map_err(|_| ProjectConfigLoadError::InvalidSourcesDirectory)?;
 
     Ok(ProjectConfigData {
         name: project_name.to_owned(),
@@ -2856,7 +2899,7 @@ mod tests {
             result.is_err(),
             "nested descendant project should be rejected"
         );
-        let text = result.unwrap_err();
+        let text = result.unwrap_err().to_string();
         assert!(text.contains("Outer project:"));
         assert!(text.contains("Nested project:"));
     }

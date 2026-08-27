@@ -123,13 +123,13 @@ pub fn resolve_project_layout(
     })?;
 
     let project_root = find_project_root(&cwd)
-        .map_err(|msg| ForegroundDataExecutionError::ProjectDiscovery(
-            ProjectDiscoveryError::FindRoot(msg),
+        .map_err(|error| ForegroundDataExecutionError::ProjectDiscovery(
+            ProjectDiscoveryError::FindRoot(error),
         ))?;
 
     let config = load_project_config(&project_root)
-        .map_err(|msg| ForegroundDataExecutionError::ProjectConfiguration(
-            ProjectConfigurationError::Other(msg),
+        .map_err(|error| ForegroundDataExecutionError::ProjectConfiguration(
+            ProjectConfigurationError::Load(error),
         ))?;
 
     validate_sources_root_containment(&project_root, &config.sources_root)?;
