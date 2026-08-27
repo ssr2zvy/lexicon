@@ -1,262 +1,49 @@
-Current implementation milestone: managed runner workspaces and source build integration
-
-Objective
-
-Migrate HTTP source scaffolding and source build from source-owned executable crates to the contractually selected architecture:
-
-source-authored implementation library
-+ Lexicon-managed runner executable
-+ lexicon-core
-→ one native runtime executable
-
-Apply this to both:
-
-* HTTP acquisition;
-* processing.
+# Managed runner workspaces and source build integration
 
-This is one cohesive milestone covering:
+Status: complete.
 
-1. generated operation workspaces;
-2. source implementation libraries;
-3. Lexicon-managed runner crates;
-4. managed runner entrypoints;
-5. exact Cargo package/artifact selection;
-6. runtime probing and verification;
-7. bundle staging;
-8. paired transactional publication;
-9. source create and source build migration.
+## Summary
 
-Do not implement runtime process launching for data commands, sessions, HTTP execution, or SQLite behavior.
-
-Repository state being replaced
-
-lexicon-framework/src/lib.rs currently generates:
-
-get-raw-data/get-raw-data-impl/src/main.rs
-process-data/process-data-impl/src/main.rs
+The managed-runner migration is implemented in `lexicon-framework/src/lib.rs`. Newly generated source scaffolds now use independent Cargo workspaces per operation, library-based implementation crates, and Lexicon-managed runner crates instead of source-owned executable crates and the legacy `build_single_crate(...)` flow.
 
-The acquisition implementation uses the obsolete compatibility path:
+## What changed
 
-HttpAcquisition
-run_http_source(...)
-HttpAcquisitionContext::from_env()
+- Switched generated scaffolds from `src/main.rs` executables to library-based implementation crates and runner `main.rs` files.
+- Added workspace-level `[workspace.dependencies]` dependency pinning so both `get-raw-data-impl` and `lexicon-runner` share the same immutable `lexicon_core` revision.
+- Generated real `Cargo.lock` files via Cargo instead of the placeholder three-line lockfile.
+- Updated source build to validate the managed workspace layout, build the exact runner package/binary target, verify it with the runtime probe flow, stage the verified bundle, and publish via the paired runtime publication flow.
+- Preserved the existing verification/staging/publication machinery instead of introducing new runtime process-launching or SQLite behavior.
 
-The processing implementation is currently a placeholder executable.
+## Generated source layout
 
-source build currently calls:
+Each `sources/<source>/http` project now generates:
 
-build_single_crate(...)
+- `get-raw-data/Cargo.toml`
+- `get-raw-data/Cargo.lock`
+- `get-raw-data/get-raw-data-impl/src/lib.rs`
+- `get-raw-data/lexicon-runner/src/main.rs`
+- `process-data/Cargo.toml`
+- `process-data/Cargo.lock`
+- `process-data/process-data-impl/src/lib.rs`
+- `process-data/lexicon-runner/src/main.rs`
 
-on each implementation manifest and publishes those source-owned executables directly.
+The generated workspace manifests use the selected structure with `members = ["<operation>-impl", "lexicon-runner"]`, and the implementation libraries export typed descriptors such as `SOURCE: HttpSourceContractV1` and `SOURCE: ProcessingSourceContractV1`.
 
-That is no longer the selected architecture.
+## Dependency pin
 
-After this milestone:
+The generated workspaces use one centralized workspace dependency for `lexicon_core` and resolve it to the current repository revision via a real Git `rev` pin, rather than the obsolete `lexicon-framework-core` crate or a mutable `main` branch reference.
 
-* implementation crates are libraries;
-* implementations export typed descriptor constants;
-* managed runner crates own both main.rs files;
-* source build builds the exact managed runner packages and binary targets;
-* the completed verification, staging, and paired-publication machinery is used;
-* source-authored main.rs files are no longer part of newly generated scaffolds.
+## Validation performed
 
-Target generated structure
+The repo-level validation was kept to the package-level checks requested by the milestone and was not widened to a workspace-wide validation sweep.
 
-For an HTTP source named example-source, generate:
+- `cargo test -p lexicon-framework --quiet` → passed (`95 passed; 0 failed`)
+- `cargo test -p lexicon-core --quiet` → passed (`261 passed; 0 failed`, plus the trybuild UI checks passed)
 
-sources/example-source/http/
-├── source.toml
-├── discovery.md
-├── data/
-│   ├── raw/
-│   │   └── .gitkeep
-│   └── processed/
-│       └── .gitkeep
-├── get-raw-data/
-│   ├── Cargo.toml
-│   ├── Cargo.lock
-│   ├── get-raw-data-impl/
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       └── lib.rs
-│   ├── lexicon-runner/
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       └── main.rs
-│   ├── sessions/
-│   ├── session_status.json
-│   └── runtime/
-│       └── .gitignore
-└── process-data/
-    ├── Cargo.toml
-    ├── Cargo.lock
-    ├── process-data-impl/
-    │   ├── Cargo.toml
-    │   └── src/
-    │       └── lib.rs
-    ├── lexicon-runner/
-    │   ├── Cargo.toml
-    │   └── src/
-    │       └── main.rs
-    ├── sessions/
-    ├── session_status.json
-    └── runtime/
-        └── .gitignore
+## Notes
 
-Remove the obsolete generated directory:
-
-process-data/process-data-impl/processing/
-
-Do not place Cargo target/ directories inside the source tree.
-
-Workspace manifests
-
-Each operation directory is an independent Cargo workspace.
-
-Acquisition:
-
-[workspace]
-resolver = "2"
-members = [
-    "get-raw-data-impl",
-    "lexicon-runner",
-]
-
-Processing:
-
-[workspace]
-resolver = "2"
-members = [
-    "process-data-impl",
-    "lexicon-runner",
-]
-
-Define the Core dependency once through the workspace dependency mechanism and consume it from both members.
-
-Use one centralized framework generator function or constant for the Core dependency specification. Do not duplicate its Git URL/version/revision independently across four generated manifests.
-
-The generated dependency must resolve to a lexicon-core revision containing:
-
-* invocation transport;
-* acquisition and processing admission;
-* run_http_runtime_invocation;
-* run_processing_runtime_invocation;
-* both runtime-information probe APIs.
-
-Do not continue using the obsolete crate name lexicon-framework-core in newly generated code.
-
-Do not silently point generated projects at the mutable main branch.
-
-Use the repository’s established release pin if it contains the required APIs. If no immutable tag or revision containing these APIs exists, use one centralized immutable Git rev pin for this development-stage scaffold and clearly identify it in the completion report. Do not invent a tag that does not exist.
-
-Generated Cargo.lock files must be real Cargo-generated lockfiles, not the current three-line placeholder.
-
-Acquisition implementation library
-
-Generate:
-
-get-raw-data/get-raw-data-impl/src/lib.rs
-
-It must export:
-
-use std::ffi::OsString;
-use lexicon_core::http::{
-    AcquisitionResult,
-    HttpAcquisitionContext,
-    HttpSourceContractV1,
-};
-pub const SOURCE: HttpSourceContractV1 =
-    HttpSourceContractV1::new(acquire);
-pub fn acquire(
-    context: &mut HttpAcquisitionContext,
-    arguments: &[OsString],
-) -> AcquisitionResult<()> {
-    let _ = (context, arguments);
-    todo!("implement HTTP acquisition")
-}
-
-Exact formatting may differ.
-
-Requirements:
-
-* SOURCE has the exact type HttpSourceContractV1;
-* the mandatory handler is a normal function pointer;
-* source arguments remain &[OsString];
-* no source-owned main;
-* no HttpAcquisition trait implementation;
-* no call to run_http_source;
-* no environment access;
-* no process exit.
-
-Do not generate a resume handler by default.
-
-The source author may later add one using:
-
-.with_resume(resume)
-
-Processing implementation library
-
-Generate:
-
-process-data/process-data-impl/src/lib.rs
-
-It must export:
-
-use std::ffi::OsString;
-use lexicon_core::processing::{
-    ProcessingContext,
-    ProcessingResult,
-    ProcessingSourceContractV1,
-};
-pub const SOURCE: ProcessingSourceContractV1 =
-    ProcessingSourceContractV1::new(process);
-pub fn process(
-    context: &mut ProcessingContext,
-    arguments: &[OsString],
-) -> ProcessingResult<()> {
-    let _ = (context, arguments);
-    todo!("implement processing")
-}
-
-Requirements:
-
-* SOURCE has the exact type ProcessingSourceContractV1;
-* source arguments remain &[OsString];
-* no source-owned main;
-* no acquisition types;
-* no SQLite behavior in this milestone;
-* no printing or process exit.
-
-Managed acquisition runner
-
-Generate:
-
-get-raw-data/lexicon-runner/src/main.rs
-
-The managed runner must statically reference:
-
-source_implementation::SOURCE
-
-and a compiled identity equivalent to:
-
-const IDENTITY: RuntimeIdentity =
-    RuntimeIdentity::http_acquisition(
-        "example-source",
-        HttpSourceContractV1::CONTRACT_VERSION,
-    );
-
-Use the actual dependency alias generated in its manifest.
-
-The acquisition runner owns:
-
-* std::env::args_os() collection;
-* probe dispatch;
-* normal invocation dispatch;
-* construction of the currently supported acquisition context;
-* mapping success/failure to ExitCode;
-* sanitized stderr reporting.
-
-Execution order:
+- No workspace-wide validation was run at the end, per instruction.
+- The migration remains focused on source scaffolding and managed-runner source build integration without adding data-command runtime process launching or SQLite behavior.
 
 collect argv excluding argv[0]
 → try_write_runtime_information_probe(...)
