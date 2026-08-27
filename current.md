@@ -1,455 +1,488 @@
-# Managed runner workspaces and source build integration
+Current implementation milestone: managed runner integration closure
 
-Status: complete.
+Objective
 
-## Summary
+Correct and complete the managed-runner workspace and source build integration currently pushed to main.
 
-The managed-runner migration is implemented in `lexicon-framework/src/lib.rs`. Newly generated source scaffolds now use independent Cargo workspaces per operation, library-based implementation crates, and Lexicon-managed runner crates instead of source-owned executable crates and the legacy `build_single_crate(...)` flow.
+Do not begin sessions, data commands, HTTP transport, or processing behavior.
 
-## What changed
+The previous milestone changed the generated layout, but the resulting pipeline is not yet proven operational and contains defects that prevent a generated runtime from completing the existing build/probe/verification path.
 
-- Switched generated scaffolds from `src/main.rs` executables to library-based implementation crates and runner `main.rs` files.
-- Added workspace-level `[workspace.dependencies]` dependency pinning so both `get-raw-data-impl` and `lexicon-runner` share the same immutable `lexicon_core` revision.
-- Generated real `Cargo.lock` files via Cargo instead of the placeholder three-line lockfile.
-- Updated source build to validate the managed workspace layout, build the exact runner package/binary target, verify it with the runtime probe flow, stage the verified bundle, and publish via the paired runtime publication flow.
-- Preserved the existing verification/staging/publication machinery instead of introducing new runtime process-launching or SQLite behavior.
+This milestone closes those defects and proves this real sequence:
 
-## Generated source layout
+lexicon init
+→ lexicon source create
+→ generated locked acquisition workspace
+→ generated locked processing workspace
+→ exact managed runner builds
+→ acquisition probe on stdout
+→ processing probe on stdout
+→ verification
+→ staging
+→ paired publication
 
-Each `sources/<source>/http` project now generates:
+This is a corrective milestone, not a new architectural feature.
 
-- `get-raw-data/Cargo.toml`
-- `get-raw-data/Cargo.lock`
-- `get-raw-data/get-raw-data-impl/src/lib.rs`
-- `get-raw-data/lexicon-runner/src/main.rs`
-- `process-data/Cargo.toml`
-- `process-data/Cargo.lock`
-- `process-data/process-data-impl/src/lib.rs`
-- `process-data/lexicon-runner/src/main.rs`
+Repository-grounded defects to correct
 
-The generated workspace manifests use the selected structure with `members = ["<operation>-impl", "lexicon-runner"]`, and the implementation libraries export typed descriptors such as `SOURCE: HttpSourceContractV1` and `SOURCE: ProcessingSourceContractV1`.
+The current main implementation has the following concrete problems.
 
-## Dependency pin
+1. Probe output uses the wrong stream
 
-The generated workspaces use one centralized workspace dependency for `lexicon_core` and resolve it to the current repository revision via a real Git `rev` pin, rather than the obsolete `lexicon-framework-core` crate or a mutable `main` branch reference.
+Both generated managed runner templates currently create only:
 
-## Validation performed
+let mut stderr = io::stderr().lock();
 
-The repo-level validation was kept to the package-level checks requested by the milestone and was not widened to a workspace-wide validation sweep.
+and pass stderr to:
 
-- `cargo test -p lexicon-framework --quiet` → passed (`95 passed; 0 failed`)
-- `cargo test -p lexicon-core --quiet` → passed (`261 passed; 0 failed`, plus the trybuild UI checks passed)
+try_write_runtime_information_probe(...)
 
-## Notes
+The framework probe machinery reads runtime-information JSON from the child’s stdout and treats stderr as diagnostic output.
 
-- No workspace-wide validation was run at the end, per instruction.
-- The migration remains focused on source scaffolding and managed-runner source build integration without adding data-command runtime process launching or SQLite behavior.
+Therefore, generated runners must instead use:
+
+let stdout = io::stdout();
+let mut stdout = stdout.lock();
+let stderr = io::stderr();
+let mut stderr = stderr.lock();
+
+Pass &mut stdout to the probe writer.
+
+Use stderr only for diagnostics.
+
+Successful probe behavior must be:
+
+stdout: exactly one JSON document followed by one newline
+stderr: empty
+exit: success
+
+Do not change the established framework probe protocol to accommodate the incorrect generated runner.
+
+2. Built executable lifetime is invalid
+
+The current:
+
+fn build_managed_runner(...) -> Result<PathBuf, String>
+
+creates a local tempfile::TempDir, builds below it, returns only the executable path, and then drops the temporary directory when the function returns.
+
+That makes the returned executable path invalid before verification.
+
+Replace the return type with an owning value equivalent to:
+
+pub struct BuiltManagedRunner {
+    executable: PathBuf,
+    target_directory: tempfile::TempDir,
+}
+
+Provide accessors such as:
+
+impl BuiltManagedRunner {
+    pub fn executable(&self) -> &Path;
+}
+
+Keep the temporary directory alive through:
+
+* probing;
+* verification;
+* staging.
+
+It may be dropped only after the verified executable has been copied into a staged runtime bundle or after failure cleanup completes.
+
+Do not leak or persist temporary build directories.
+
+3. Artifact selection is not exact
+
+The current build path eventually calls:
+
+select_executable_from_cargo_json(
+    &cargo_json,
+    operation_name,
+)
+
+The existing selector accepts artifacts when the target or package identifier merely contains strings such as get-raw-data.
+
+This does not satisfy exact managed-runner selection.
+
+Implement a dedicated exact selector for managed runners.
+
+Representative API:
+
+pub fn select_managed_runner_executable(
+    cargo_output: &str,
+    expected_package_id: &str,
+    expected_binary_name: &str,
+) -> Result<
+    PathBuf,
+    ManagedRunnerArtifactSelectionError,
+>;
+
+Resolve the expected package ID from:
+
+cargo metadata
+--manifest-path <workspace/Cargo.toml>
+--locked
+--no-deps
+
+Match Cargo build JSON using:
+
+* exact Cargo package ID;
+* target kind containing bin;
+* exact target name;
+* non-null executable path.
+
+Do not determine package identity using substring matching.
+
+Reject:
+
+* no exact artifact;
+* multiple exact artifacts;
+* a matching target from the wrong package;
+* a matching package with the wrong binary target;
+* a compiler artifact with no executable;
+* malformed relevant Cargo JSON.
+
+Unrelated compiler messages and artifacts may be ignored.
+
+Preserve the old selector only if another still-supported legacy API genuinely uses it. It must not be used by managed runner builds.
+
+4. Dynamic source identity currently leaks memory
+
+build_source currently does:
+
+Box::leak(source_name.to_string().into_boxed_str())
+
+twice to satisfy RuntimeIdentity’s static source-name representation.
+
+Remove these leaks.
+
+Do not replace them with another leaked allocation or a global cache.
+
+Use one of these bounded approaches:
+
+1. Add a framework-side expected-identity representation that borrows or owns the dynamic source name and update verification/staging/publication comparison boundaries accordingly; or
+2. Add a narrowly scoped owned runtime-identity representation in Core while preserving the existing const-compatible RuntimeIdentity used by compiled managed runners.
+
+Prefer the smallest design that preserves:
+
+const IDENTITY: RuntimeIdentity =
+    RuntimeIdentity::http_acquisition("example-source", 1);
+
+inside generated runners.
+
+Do not remove const compiled identities merely to accommodate framework-side dynamic values.
+
+All identity comparisons must still cover:
+
+* source;
+* protocol;
+* operation;
+* source contract version.
+
+The completion report must explain the chosen owned/borrowed expected-identity boundary.
+
+5. Typed build errors are missing
+
+The current managed pipeline returns Result<_, String> and converts verification, staging, and publication errors with format!.
+
+Introduce a typed internal managed-source-build error.
+
+Representative structure:
+
+#[derive(Debug)]
+pub enum ManagedSourceBuildError {
+    WorkspaceValidation(
+        ManagedWorkspaceValidationError,
+    ),
+    Metadata(
+        ManagedWorkspaceMetadataError,
+    ),
+    CargoBuild(
+        ManagedRunnerBuildError,
+    ),
+    AcquisitionVerification(
+        HttpRuntimeVerificationError,
+    ),
+    ProcessingVerification(
+        ProcessingRuntimeVerificationError,
+    ),
+    AcquisitionStaging(
+        RuntimeBundleStagingError,
+    ),
+    ProcessingStaging(
+        ProcessingRuntimeBundleStagingError,
+    ),
+    Publication(
+        RuntimePairPublicationError,
+    ),
+}
+
+Equivalent organization is acceptable.
+
+Implement:
+
+std::fmt::Display
+std::error::Error
+
+and preserve nested errors through source().
+
+The existing public command boundary may still return Result<SourceBuildResult, String> if changing CLI error handling is outside scope, but it must convert the typed error only once at that outer boundary.
+
+Do not stringify errors inside the managed build pipeline.
+
+6. Managed workspace validation is incomplete
+
+The current validation reads manifests and checks some names, but it does not fully prove the selected Cargo graph.
+
+Validate using parsed Cargo metadata and manifests.
+
+Require:
+
+* exact two workspace members;
+* exact implementation package;
+* exact runner package;
+* exact runner binary target;
+* implementation package exposes a library target;
+* implementation package exposes no binary target used by the supported build;
+* runner package exposes the expected binary target;
+* runner depends on the exact implementation package by the expected relative path;
+* both members resolve the same workspace lexicon_core dependency;
+* a real root Cargo.lock exists;
+* src/lib.rs exists for the implementation;
+* managed runner src/main.rs exists;
+* obsolete implementation src/main.rs is rejected as a legacy layout when no managed workspace exists;
+* unexpected extra workspace members are rejected.
+
+Do not treat textual substring checks of runner source as the primary Cargo-graph validation.
+
+The generated runner source remains managed, so validate its exact generated contents through a deterministic template/version mechanism.
+
+Managed runner template version
+
+Define a distinct managed runner template version.
+
+Representative value:
+
+const MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1;
+
+Include an unambiguous generated marker in each managed runner source, for example:
+
+const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1;
+
+Validation must reject:
+
+* a missing marker;
+* an unsupported version;
+* a runner whose managed template content differs from the canonical template for its source and operation.
+
+Do not use only loose contains(...) checks for source identity and SOURCE.
+
+The source implementation library remains user-owned.
+
+The runner remains Lexicon-owned.
+
+Generated runner stream behavior
+
+Acquisition runner
+
+The generated acquisition runner must follow:
 
 collect argv excluding argv[0]
-→ try_write_runtime_information_probe(...)
-→ Written: return success
-→ NotRequested: construct HTTP context
+→ lock stdout and stderr separately
+→ try HTTP runtime-information probe using stdout
+→ Written: return ExitCode::SUCCESS
+→ NotRequested: construct temporary HTTP context
 → run_http_runtime_invocation(...)
-→ map result to ExitCode
+→ success/failure ExitCode
 
-Use the currently established available-capability set explicitly.
+Probe JSON goes to stdout.
+
+Errors go to stderr.
+
+Normal successful execution must not emit probe JSON.
+
+Continue using:
+
+HttpCapabilitySet::empty()
+
+until real HTTP capabilities exist.
 
 Do not infer available capabilities from source requirements.
 
-Until the real HTTP transport milestone supplies capabilities, declare only capabilities genuinely implemented by the linked Core runtime.
+Processing runner
 
-Do not claim ClientCertificateV1 is available unless it is actually implemented.
+The generated processing runner follows the same stream separation:
 
-Temporary HTTP context boundary
+collect argv excluding argv[0]
+→ lock stdout and stderr separately
+→ try processing runtime-information probe using stdout
+→ Written: return ExitCode::SUCCESS
+→ NotRequested: ProcessingContext::default()
+→ run_processing_runtime_invocation(...)
+→ success/failure ExitCode
 
-Normal acquisition currently requires:
+Probe JSON goes to stdout.
 
-&mut HttpAcquisitionContext
+Errors go to stderr.
 
-and the only production constructor currently available is:
+Temporary HTTP context behavior
+
+Preserve the current temporary normal-execution boundary:
 
 HttpAcquisitionContext::from_env()
 
-For this milestone, the managed runner may use that existing constructor so the generated executable is complete and compilable.
+Do not expand it in this corrective milestone.
 
-Do not redesign invocation JSON or add a second argv path transport here.
+Do not introduce project-path transport, sessions, or new environment variables.
 
-Do not expand or otherwise modernize HttpAcquisitionContext::from_env().
+The generated acquisition runtime merely remains compilable and capable of reaching the completed normal-invocation execution path when the existing source-directory environment value is supplied.
 
-The later session/context milestone will replace this temporary construction boundary.
-
-Document this temporary use explicitly in the completion report.
-
-Managed processing runner
-
-Generate:
-
-process-data/lexicon-runner/src/main.rs
-
-The runner must statically reference:
-
-source_implementation::SOURCE
-
-and a compiled identity equivalent to:
-
-const IDENTITY: RuntimeIdentity =
-    RuntimeIdentity::http_processing(
-        "example-source",
-        ProcessingSourceContractV1::CONTRACT_VERSION,
-    );
-
-Execution order:
-
-collect argv excluding argv[0]
-→ processing try_write_runtime_information_probe(...)
-→ Written: return success
-→ NotRequested: construct ProcessingContext::default()
-→ run_processing_runtime_invocation(...)
-→ map result to ExitCode
-
-Do not add SQLite behavior.
-
-Managed runner error behavior
-
-Both generated runners must:
-
-* return ExitCode::SUCCESS for a successfully written probe;
-* return ExitCode::SUCCESS for successful normal execution;
-* return ExitCode::FAILURE for context, probe, transport, admission, or handler failure;
-* write a concise sanitized diagnostic to stderr;
-* never print source arguments or envelope JSON;
-* never panic merely to map an ordinary typed error;
-* not call std::process::exit.
-
-Handler panics may continue to unwind according to the existing Core policy.
-
-Managed runner manifests
-
-Each managed runner manifest must:
-
-* define one package;
-* define one exact binary target;
-* depend on the operation implementation library by relative path;
-* depend on the same pinned lexicon-core workspace dependency;
-* contain no user-configurable alternate entrypoint.
-
-Expected binary names:
-
-example-source-get-raw-data
-example-source-process-data
-
-Expected runner package names:
-
-example-source-get-raw-data-runner
-example-source-process-data-runner
-
-Expected implementation package names:
-
-example-source-get-raw-data-impl
-example-source-process-data-impl
-
-Normalize the Rust library crate aliases deterministically from the validated source name.
-
-Do not guess the built executable path.
-
-Managed file validation
-
-Before building, validate that each operation workspace has exactly the required managed runner files and expected contents or generated semantic values.
-
-At minimum validate:
-
-* workspace manifest exists;
-* workspace contains the expected members;
-* runner manifest exists;
-* runner package name is exact;
-* runner binary name is exact;
-* runner implementation dependency points to the expected relative implementation path;
-* runner source exists;
-* compiled source identity matches the requested source, protocol, operation, and contract version;
-* implementation manifest is a library package;
-* implementation src/lib.rs exists;
-* obsolete implementation src/main.rs is not used as the runtime entrypoint.
-
-The source author owns the implementation library and may edit its dependencies and source.
-
-The source author does not own the supported runner entrypoint.
-
-Reject modified or incompatible managed runner definitions rather than building an arbitrary source-owned binary.
-
-Do not attempt hostile-code sandboxing.
-
-Source-create migration
-
-Update generate_source_scaffold(...) and its formatting helpers to create the target structure.
-
-Remove obsolete generator helpers or rewrite them:
-
-format_get_raw_data_main(...)
-format_process_data_main(...)
-format_impl_cargo_toml(...)
-format_cargo_lockfile(...)
-
-Replace them with operation-specific helpers for:
-
-* workspace manifests;
-* implementation manifests;
-* implementation lib.rs;
-* runner manifests;
-* managed runner main.rs.
-
-SourceCreateResult.created_files must identify the useful author-facing implementation files and relevant manifests. Do not report obsolete src/main.rs paths.
-
-Source creation must remain transactional: a failure produces no partially published source tree.
-
-Existing-source behavior
-
-Do not silently rewrite existing sources during source build.
-
-For a source still using the legacy source-owned executable layout, return a clear migration-required error identifying the expected managed workspace structure.
-
-Automatic migration of user-authored implementation code is excluded because mechanically converting arbitrary main.rs code into the typed library contract is unsafe.
-
-Newly created sources must use only the managed layout.
-
-Exact build selection
-
-Replace direct implementation-crate building with exact managed-runner building.
-
-For acquisition, invoke Cargo against:
-
-get-raw-data/Cargo.toml
-
-and require the exact:
-
-package: example-source-get-raw-data-runner
-binary:  example-source-get-raw-data
-
-For processing, invoke Cargo against:
-
-process-data/Cargo.toml
-
-and require the exact:
-
-package: example-source-process-data-runner
-binary:  example-source-process-data
-
-Cargo invocation must include:
-
-cargo build
---manifest-path <operation-workspace/Cargo.toml>
---package <exact-runner-package>
---bin <exact-runner-binary>
---release
---locked
---message-format=json-render-diagnostics
---target-dir <isolated-temporary-target>
-
-Keep acquisition and processing target directories isolated.
-
-Select the executable from Cargo JSON by matching:
-
-* package identity;
-* binary target name;
-* executable artifact presence.
-
-Do not select the first executable emitted.
-
-Do not build or publish a source implementation as a standalone executable.
+Its replacement belongs to the session/context milestone.
 
 Lockfile behavior
 
-source create must produce valid workspace lockfiles.
+Preserve:
 
-source build --locked must not mutate them.
+* real Cargo-generated lockfiles during source create;
+* cargo build --locked during source build;
+* no lockfile mutation during ordinary builds.
 
-Remove the current build behavior that unconditionally runs:
+Add tests proving that source build leaves both Cargo.lock files byte-for-byte unchanged.
 
-cargo generate-lockfile
+A missing or stale lockfile must produce a typed managed-build failure.
 
-immediately before cargo build --locked.
+Remove or quarantine the legacy build path
 
-A missing or stale lockfile must cause an actionable build error.
+The current file still contains the obsolete functions:
 
-Lockfile creation or update belongs to source creation or an explicit future dependency-management operation, not ordinary locked builds.
+build_single_crate(...)
+ensure_lockfile_for_manifest(...)
+select_executable_from_cargo_json(...)
+stage_runtime_file(...)
+publish_runtime_transaction(...)
+format_impl_cargo_toml(...)
+format_get_raw_data_main(...)
+format_process_data_main(...)
+format_cargo_lockfile(...)
 
-Probe and verification integration
+and tests for the old source-owned executable scaffold.
 
-After each managed runner builds:
+Remove obsolete private functions and their obsolete tests when they have no remaining supported caller.
 
-1. probe its runtime information using the existing framework probe API;
-2. validate the expected compiled identity;
-3. validate descriptor contract version;
-4. validate operation identity;
-5. validate declared and available capabilities;
-6. hash before and after probing using existing verification;
-7. reject mutation during probing.
+If a function remains necessary for an unrelated supported path, rename or isolate it so the managed build cannot accidentally call it.
 
-Use:
+New scaffolds and source build must have only one supported build route.
 
-verify_http_runtime_candidate(...)
-verify_processing_runtime_candidate(...)
+Do not retain dead legacy production code solely because old unit tests reference it.
 
-Do not duplicate their logic.
+Legacy projects themselves are not automatically rewritten. They receive the established migration-required error.
 
-The acquisition runtime must probe as acquisition.
+Eliminate direct production eprintln! from build helpers
 
-The processing runtime must probe through the processing-specific information model.
+The current managed Cargo build helper writes Cargo stderr directly with:
 
-Staging integration
+eprintln!(...)
 
-Stage each verified runtime using the existing APIs:
+Return captured diagnostic information through the typed error instead.
 
-stage_verified_http_runtime_bundle(...)
-stage_verified_processing_runtime_bundle(...)
+The CLI boundary decides how to display it.
 
-Each staged bundle must contain only its established manifest and executable.
+Bound retained Cargo stderr to a reasonable constant to prevent unbounded error capture.
 
-Do not revert to copying a bare executable directly into runtime/.
+The error’s Display must not dump arbitrary unbounded compiler output.
 
-Paired publication
+Tests may inspect structured retained diagnostic bytes or text through accessors.
 
-Publish the staged acquisition and processing bundles using the existing paired transactional publication API.
+End-to-end generated-project proof
 
-Use:
+Add at least one test that exercises the real generated project rather than testing template strings alone.
 
-publish_runtime_pair(...)
+The test must:
 
-Do not retain the legacy stage_runtime_file(...) and publish_runtime_transaction(...) route for the managed build path.
+1. Create a temporary Lexicon project.
+2. Run the framework’s real source-creation path for example-source.
+3. Confirm both real lockfiles exist.
+4. Replace the generated placeholder acquisition handler with a successful minimal handler if normal execution is tested.
+5. Replace the generated placeholder processing handler with a successful minimal handler if normal execution is tested.
+6. Run the real managed source-build path.
+7. Build both exact runner packages with --locked.
+8. Probe both produced runners.
+9. Verify both candidates.
+10. Stage both bundles.
+11. Publish the pair.
+12. Admit both published bundles.
+13. Confirm the published acquisition identity.
+14. Confirm the published processing identity.
+15. Confirm neither implementation crate was published as an executable.
 
-Required behavior:
+The test may use a local dependency override or fixture specifically to avoid depending on a mutable remote Git state.
 
-* acquisition build failure preserves both existing runtime bundles;
-* processing build failure preserves both;
-* probe failure preserves both;
-* verification failure preserves both;
-* staging failure preserves both;
-* first-publication failure preserves or restores both;
-* second-publication failure rolls both back;
-* successful publication replaces the pair.
+Production-generated manifests must retain the immutable repository revision pin.
 
-Return published bundle directories through SourceBuildResult.
+Do not fake the probe results in this end-to-end test.
 
-If its existing fields are named get_runtime and process_runtime, preserve them but make them identify the published bundle paths rather than guessed bare-executable paths.
+Focused regression tests
 
-Typed framework errors
+Add tests proving:
 
-The current source build implementation returns broad String errors.
-
-Within the new managed build pipeline, add typed errors for at least:
-
-* invalid managed workspace;
-* missing lockfile;
-* Cargo spawn;
-* unsuccessful Cargo build;
-* malformed Cargo JSON;
-* missing exact executable artifact;
-* unexpected or ambiguous executable artifacts;
-* HTTP runtime verification;
-* processing runtime verification;
-* HTTP bundle staging;
-* processing bundle staging;
-* paired publication.
-
-The public command boundary may convert the final typed build error to the CLI’s existing error representation if changing the entire CLI error architecture is outside scope.
-
-Do not discard typed nested errors inside the framework pipeline.
-
-Required tests
-
-Add tests covering at least:
-
-Scaffold
-
-1. New source creation produces both operation workspaces.
-2. Both workspace manifests have the exact members.
-3. Both real workspace lockfiles exist.
-4. Acquisition implementation is a library.
-5. Processing implementation is a library.
-6. Neither implementation contains src/main.rs.
-7. Both implementations export typed SOURCE constants.
-8. Both handler signatures accept &[OsString].
-9. Both managed runner manifests have exact package and binary names.
-10. Both managed runners depend on the expected implementation paths.
-11. Acquisition runner has the exact compiled acquisition identity.
-12. Processing runner has the exact compiled processing identity.
-13. Existing scaffold transactionality remains intact.
-14. The obsolete processing/ directory is absent.
-
-Compilation and probes
-
-15. A generated acquisition workspace builds with --locked.
-16. A generated processing workspace builds with --locked.
-17. The acquisition runner answers the existing HTTP information probe.
-18. The processing runner answers the processing information probe.
-19. Probes do not invoke placeholder handlers.
-20. Probe output passes existing framework admission.
-21. Generated runtime identities match the source name.
-22. Generated descriptor versions match their contracts.
-
-Placeholder handlers may panic or use todo!() during normal execution because probe mode must not invoke them.
-
-Managed validation
-
-23. Missing runner manifest is rejected.
-24. Modified runner package name is rejected.
-25. Modified binary name is rejected.
-26. Wrong implementation path is rejected.
-27. Acquisition/processing identity substitution is rejected.
-28. Legacy source-owned executable layout returns migration-required error.
-29. A source implementation with an invalid handler signature fails compilation.
-
-Build selection
-
-30. Cargo is invoked with the exact workspace manifest.
-31. Cargo is invoked with the exact runner package.
-32. Cargo is invoked with the exact binary target.
-33. Cargo is invoked with --release, --locked, and JSON diagnostics.
-34. Acquisition and processing use isolated target directories.
-35. An unrelated executable artifact is ignored.
-36. Missing exact artifact is rejected.
-37. Multiple matching artifacts are rejected.
-
-Verification, staging, and publication
-
-38. Both built runners pass existing verification.
-39. Both verified runners stage as manifest-bearing bundles.
-40. Successful source build publishes both bundles.
-41. Acquisition build failure preserves the existing pair.
-42. Processing build failure preserves the existing pair.
-43. Probe failure preserves the existing pair.
-44. Staging failure preserves the existing pair.
-45. Publication failure rolls back both.
-46. No bare executable is published outside the bundle.
-47. Existing runtime verification tests remain unchanged.
-48. Existing staging tests remain unchanged.
-49. Existing bundle-admission tests remain unchanged.
-50. Existing paired-publication tests remain unchanged.
-
-Use test seams for Cargo execution and injected failures where necessary.
-
-Do not depend on mutating global PATH or shared temporary directories.
-
-Do not introduce sleeps or global workspace-test serialization.
+1. Acquisition probe JSON is written to stdout.
+2. Acquisition probe stderr is empty.
+3. Processing probe JSON is written to stdout.
+4. Processing probe stderr is empty.
+5. Probe exits successfully.
+6. Probe does not invoke acquisition.
+7. Probe does not invoke processing.
+8. Normal acquisition failure writes only a sanitized diagnostic to stderr.
+9. Normal processing failure writes only a sanitized diagnostic to stderr.
+10. BuiltManagedRunner keeps the executable alive after the build helper returns.
+11. The executable remains available through verification and staging.
+12. Dropping the owning built-runner value cleans the temporary target directory after staging or failure.
+13. Exact package and binary matching selects the acquisition runner.
+14. Exact package and binary matching selects the processing runner.
+15. A similarly named unrelated package is ignored.
+16. A similarly named unrelated binary is ignored.
+17. No exact artifact returns the typed missing-artifact error.
+18. Multiple exact artifacts return the typed ambiguous-artifact error.
+19. Missing executable fields are typed.
+20. Malformed relevant Cargo JSON is typed.
+21. Dynamic source build validation performs no Box::leak.
+22. Repeated builds do not accumulate leaked source-name allocations.
+23. Verification errors remain available as typed nested sources.
+24. Staging errors remain available as typed nested sources.
+25. Publication errors remain available as typed nested sources.
+26. Missing lockfile is typed.
+27. Stale lockfile is rejected by --locked.
+28. Source build does not modify either lockfile.
+29. Modified runner template is rejected.
+30. Unsupported runner template version is rejected.
+31. Extra workspace member is rejected.
+32. Implementation binary substitution is rejected.
+33. Legacy source-owned executable layout returns migration-required.
+34. Existing verification tests remain unchanged.
+35. Existing staging tests remain unchanged.
+36. Existing bundle-admission tests remain unchanged.
+37. Existing paired-publication tests remain unchanged.
 
 Validation
 
-Run:
+Run the framework suite twice:
 
 cargo test -p lexicon-framework --quiet
-
-Run it a second time:
-
 cargo test -p lexicon-framework --quiet
 
-Run the complete Core suite once because generated runner APIs depend on it:
+Run the Core suite once if the identity representation changes:
 
 cargo test -p lexicon-core --quiet
+
+Run the CLI package tests once because source create and source build are public CLI-backed commands:
+
+cargo test -p lexicon-cli --quiet
 
 Do not run:
 
 cargo test --workspace
 
-Workspace-wide validation is intentionally excluded.
+Workspace-wide validation remains intentionally excluded.
 
 Do not run the bundle/install pipeline.
 
@@ -457,20 +490,22 @@ Preserve existing behavior
 
 Do not change:
 
-* CLI command names or argument syntax;
-* project initialization;
+* CLI command names or arguments;
+* lexicon init;
 * source.toml schema;
 * invocation-envelope JSON;
-* argv transport;
-* normal-invocation execution;
-* acquisition or processing admission;
-* runtime-information formats;
-* probe limits or timeouts;
-* hashing behavior;
-* manifest formats;
+* invocation argv transport;
+* acquisition admission;
+* processing admission;
+* normal invocation execution;
+* runtime-information JSON;
+* probe limits and timeout;
+* executable hashing;
+* runtime manifest formats;
+* bundle directory formats;
 * bundle admission;
-* staging formats;
-* paired-publication guarantees;
+* paired-publication rollback;
+* source implementation handler signatures;
 * MZA;
 * Protocol 1;
 * installer behavior.
@@ -479,21 +514,23 @@ Explicit exclusions
 
 Do not implement:
 
-* automatic migration of existing source code;
-* normal data-command process launching;
+* sessions;
 * project-path invocation transport;
-* session creation or locking;
-* session reconciliation;
+* data-command process launching;
 * HTTP transport;
-* redirects or retries;
+* retries;
+* redirects;
+* redaction;
 * raw transaction recording;
-* SQLite processing;
+* checkpoints;
+* processing SQLite behavior;
 * foreground supervision;
 * background supervision;
 * __operator-host;
 * data --get;
 * data --process;
 * lexicon build;
+* automatic source-code migration;
 * cross-compilation;
 * MZA or installer changes.
 
@@ -502,26 +539,26 @@ Completion report
 After completion, replace current.md with a report containing:
 
 * files changed;
-* final generated directory tree;
-* workspace manifest design;
-* immutable Core dependency pin used;
-* acquisition implementation library template;
-* processing implementation library template;
-* acquisition managed runner template;
-* processing managed runner template;
-* temporary HTTP context-construction behavior;
-* managed runner validation behavior;
-* exact Cargo commands;
-* exact package and binary artifact selection;
-* lockfile behavior;
-* acquisition and processing probe results;
-* verification results;
-* staging results;
-* paired-publication results;
-* legacy-source behavior;
-* scaffold tests;
-* framework test result for both runs;
-* Core test result;
+* each repository defect corrected;
+* final probe stdout/stderr behavior;
+* built-runner ownership and cleanup behavior;
+* exact Cargo metadata resolution;
+* exact artifact-selection behavior;
+* dynamic expected-identity solution;
+* confirmation that Box::leak was removed from source build;
+* typed managed-build error hierarchy;
+* managed runner template-version validation;
+* legacy code removed or intentionally retained;
+* lockfile immutability result;
+* real generated-project end-to-end result;
+* acquisition build/probe/verification/staging/publication result;
+* processing build/probe/verification/staging/publication result;
+* first framework test result;
+* second framework test result;
+* Core test result if applicable;
+* CLI test result;
 * confirmation that workspace and bundle/install tests were not run.
 
 Then stop.
+
+Do not begin sessions or HTTP execution until this integration closure is green.
