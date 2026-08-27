@@ -14,10 +14,9 @@ use crate::runtime::{
     RuntimeIdentity, RuntimeInvocationTransportDecodingError, parse_runtime_invocation,
 };
 use crate::session::{
-    CoreRunnerSessionError, SessionFailureKind, SessionOperationRoot, SessionState, SessionStore,
-    SessionTransition, decode_runtime_context_from_env,
+    CoreRunnerSessionError, SessionDataPaths, SessionOperationRoot, SessionStore,
+    bind_runtime_session, decode_runtime_context_from_env,
 };
-use crate::session::store::RunningSession;
 
 pub use crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
 
@@ -600,57 +599,29 @@ pub fn run_processing_runtime_invocation(
         ProcessingRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
     })?;
 
-    let session_id = envelope.session().clone();
-
-    // Load the prepared session record.
-    let prepared_record = store.load(&session_id).map_err(|e| {
-        ProcessingRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
+    let bound = bind_runtime_session(&store, &envelope).map_err(|err| {
+        ProcessingRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::SessionBinding(
+            err,
+        ))
     })?;
-
-    if prepared_record.state() != SessionState::Prepared {
-        return Err(ProcessingRuntimeInvocationExecutionError::Session(
-            CoreRunnerSessionError::StoreOpen(crate::session::SessionStoreError::InvalidTransition(
-                crate::session::SessionTransitionError::InvalidTransition {
-                    from: prepared_record.state(),
-                    to: SessionState::Running,
-                },
-            )),
-        ));
-    }
-
-    // Acquire exclusive session lease.
-    let lease = store.acquire_lease(&session_id).map_err(|e| {
+    let running = bound.enter_running().map_err(|e| {
         ProcessingRuntimeInvocationExecutionError::Session(
-            CoreRunnerSessionError::LeaseAcquisition(e),
+            CoreRunnerSessionError::TransitionToRunning(e),
         )
     })?;
 
-    // Transition Prepared → Running.
-    let revision = prepared_record.revision();
-    let running_record = store
-        .transition(&session_id, revision, SessionTransition::ToRunning)
-        .map_err(|e| {
-            ProcessingRuntimeInvocationExecutionError::Session(
-                CoreRunnerSessionError::TransitionToRunning(e),
-            )
-        })?;
-
-    let running = RunningSession::from_parts(running_record, lease);
-
-    // Construct bound processing context.
-    let mut context = ProcessingContext::from_context_paths(&context_document.paths, running);
+    let data_paths = SessionDataPaths::from_context_paths(&context_document.paths);
+    let mut context =
+        ProcessingContext::from_session_data_paths(data_paths, envelope.session().clone());
 
     // Invoke the selected handler.
     let handler_result = match handler {
         AdmittedProcessingHandler::Process(f) => f(&mut context, &source_arguments),
     };
 
-    // Retrieve the running session from the context.
-    let running = context.take_running_session().expect("running session must be present");
-
     match handler_result {
         Ok(()) => {
-            store.complete_succeeded(running).map_err(|e| {
+            running.complete().map_err(|e| {
                 ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
                     handler_error: None,
                     session_error: e,
@@ -659,11 +630,7 @@ pub fn run_processing_runtime_invocation(
             Ok(())
         }
         Err(processing_error) => {
-            if let Err(persist_error) = store.complete_failed(
-                running,
-                SessionFailureKind::Source,
-                Some("processing source failure".to_string()),
-            ) {
+            if let Err(persist_error) = running.fail_source() {
                 return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
                     handler_error: Some(processing_error),
                     session_error: persist_error,

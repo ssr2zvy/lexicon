@@ -12,10 +12,9 @@ use crate::runtime::{
     RuntimeInvocationTransportDecodingError, parse_runtime_invocation,
 };
 use crate::session::{
-    CoreRunnerSessionError, RuntimeContextPaths, SessionFailureKind, SessionOperationRoot,
-    SessionState, SessionStore, SessionTransition, decode_runtime_context_from_env,
+    CoreRunnerSessionError, RuntimeContextPaths, SessionDataPaths, SessionOperationRoot,
+    SessionStore, bind_runtime_session, decode_runtime_context_from_env,
 };
-use crate::session::store::RunningSession;
 
 pub const RUNTIME_INFORMATION_PROBE_ARGUMENT: &str =
     crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
@@ -661,43 +660,17 @@ pub fn run_http_runtime_invocation(
         HttpRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
     })?;
 
-    let session_id = envelope.session().clone();
-
-    // Load the prepared session record.
-    let prepared_record = store.load(&session_id).map_err(|e| {
-        HttpRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
+    let bound = bind_runtime_session(&store, &envelope).map_err(|err| {
+        HttpRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::SessionBinding(err))
     })?;
-
-    if prepared_record.state() != SessionState::Prepared {
-        return Err(HttpRuntimeInvocationExecutionError::Session(
-            CoreRunnerSessionError::StoreOpen(crate::session::SessionStoreError::InvalidTransition(
-                crate::session::SessionTransitionError::InvalidTransition {
-                    from: prepared_record.state(),
-                    to: SessionState::Running,
-                },
-            )),
-        ));
-    }
-
-    // Acquire exclusive session lease.
-    let lease = store.acquire_lease(&session_id).map_err(|e| {
-        HttpRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::LeaseAcquisition(e))
+    let running = bound.enter_running().map_err(|e| {
+        HttpRuntimeInvocationExecutionError::Session(
+            CoreRunnerSessionError::TransitionToRunning(e),
+        )
     })?;
-
-    // Transition Prepared → Running.
-    let revision = prepared_record.revision();
-    let running_record = store
-        .transition(&session_id, revision, SessionTransition::ToRunning)
-        .map_err(|e| {
-            HttpRuntimeInvocationExecutionError::Session(
-                CoreRunnerSessionError::TransitionToRunning(e),
-            )
-        })?;
-
-    let running = RunningSession::from_parts(running_record, lease);
-
-    // Construct bound acquisition context.
-    let mut context = HttpAcquisitionContext::from_context_paths(&context_document.paths, running);
+    let data_paths = SessionDataPaths::from_context_paths(&context_document.paths);
+    let mut context =
+        HttpAcquisitionContext::from_session_data_paths(data_paths, envelope.session().clone());
 
     // Invoke the selected handler.
     let handler_result = match handler {
@@ -705,12 +678,9 @@ pub fn run_http_runtime_invocation(
         AdmittedHttpHandler::Resume(f) => f(&mut context, &source_arguments),
     };
 
-    // Retrieve the running session from the context.
-    let running = context.take_running_session().expect("running session must be present");
-
     match handler_result {
         Ok(()) => {
-            store.complete_succeeded(running).map_err(|e| {
+            running.complete().map_err(|e| {
                 HttpRuntimeInvocationExecutionError::TerminalPersistence {
                     handler_error: None,
                     session_error: e,
@@ -719,12 +689,7 @@ pub fn run_http_runtime_invocation(
             Ok(())
         }
         Err(acquisition_error) => {
-            let summary = acquisition_error.message().to_string();
-            if let Err(persist_error) = store.complete_failed(
-                running,
-                SessionFailureKind::Source,
-                Some(summary),
-            ) {
+            if let Err(persist_error) = running.fail_source() {
                 return Err(HttpRuntimeInvocationExecutionError::TerminalPersistence {
                     handler_error: Some(acquisition_error),
                     session_error: persist_error,

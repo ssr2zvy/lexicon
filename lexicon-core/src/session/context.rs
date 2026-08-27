@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::invocation::{ProjectInvocationIdentity, SessionInvocationIdentity};
 use crate::runtime::{OwnedRuntimeIdentity, RuntimeOperation, RuntimeProtocol};
-use crate::session::error::{RuntimeContextError, SessionDecodingError};
+use crate::session::error::{
+    RuntimeContextDecodingError, RuntimeContextEncodingError, RuntimeContextError,
+    SessionDecodingError,
+};
 use crate::session::model::{ProjectIdentity, SessionIdentity, SESSION_SCHEMA_VERSION};
 
 /// Environment variable that carries the JSON runtime context document.
@@ -142,12 +145,19 @@ struct RuntimeContextDocumentV1 {
     project: ContextProjectDocument,
     runtime: ContextRuntimeDocument,
     session: ContextSessionDocument,
-    project_root: String,
-    protocol_root: String,
-    operation_root: String,
-    session_directory: String,
-    raw_data_directory: String,
-    processed_data_directory: String,
+    project_root: EncodedNativePathDocument,
+    protocol_root: EncodedNativePathDocument,
+    operation_root: EncodedNativePathDocument,
+    session_directory: EncodedNativePathDocument,
+    raw_data_directory: EncodedNativePathDocument,
+    processed_data_directory: EncodedNativePathDocument,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncodedNativePathDocument {
+    encoding: String,
+    value: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -197,16 +207,17 @@ pub fn encode_runtime_context(
             source_contract_version: runtime.source_contract_version(),
         },
         session: ContextSessionDocument { id: session.id().to_string() },
-        project_root: paths.project_root().display().to_string(),
-        protocol_root: paths.protocol_root().display().to_string(),
-        operation_root: paths.operation_root().display().to_string(),
-        session_directory: paths.session_directory().display().to_string(),
-        raw_data_directory: paths.raw_data_directory().display().to_string(),
-        processed_data_directory: paths.processed_data_directory().display().to_string(),
+        project_root: encode_native_path(paths.project_root())?,
+        protocol_root: encode_native_path(paths.protocol_root())?,
+        operation_root: encode_native_path(paths.operation_root())?,
+        session_directory: encode_native_path(paths.session_directory())?,
+        raw_data_directory: encode_native_path(paths.raw_data_directory())?,
+        processed_data_directory: encode_native_path(paths.processed_data_directory())?,
     };
 
-    serde_json::to_string(&doc)
-        .map_err(|e| RuntimeContextError::Decoding(SessionDecodingError::JsonSyntax(e.to_string())))
+    serde_json::to_string(&doc).map_err(|e| {
+        RuntimeContextError::Encoding(RuntimeContextEncodingError::Serialization(e))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +246,22 @@ impl SessionDataPaths {
             processed_data_directory: paths.processed_data_directory().to_path_buf(),
             operation_root: paths.operation_root().to_path_buf(),
             session_directory: paths.session_directory().to_path_buf(),
+        }
+    }
+
+    pub fn from_legacy_parts(
+        protocol_root: std::path::PathBuf,
+        operation_root: std::path::PathBuf,
+        session_directory: std::path::PathBuf,
+        raw_data_directory: std::path::PathBuf,
+        processed_data_directory: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            protocol_root,
+            raw_data_directory,
+            processed_data_directory,
+            operation_root,
+            session_directory,
         }
     }
 
@@ -282,17 +309,13 @@ pub fn decode_runtime_context(
     admitted_session: &SessionIdentity,
 ) -> Result<DecodedRuntimeContext, RuntimeContextError> {
     let doc: RuntimeContextDocumentV1 = serde_json::from_str(json).map_err(|e| {
-        RuntimeContextError::Decoding(if e.is_syntax() || e.is_eof() {
-            SessionDecodingError::JsonSyntax(e.to_string())
-        } else {
-            SessionDecodingError::StructuralDocument(e.to_string())
-        })
+        RuntimeContextError::Decoding(RuntimeContextDecodingError::Json(e))
     })?;
 
     if doc.schema_version != RUNTIME_CONTEXT_SCHEMA_VERSION {
-        return Err(RuntimeContextError::Decoding(
+        return Err(RuntimeContextError::Decoding(RuntimeContextDecodingError::Session(
             SessionDecodingError::UnknownSchemaVersion(doc.schema_version),
-        ));
+        )));
     }
 
     // Compare identities against admitted invocation
@@ -346,22 +369,22 @@ pub fn decode_runtime_context(
 
     // Re-parse identity objects from the document
     let project = ProjectInvocationIdentity::new(&doc.project.name).map_err(|e| {
-        RuntimeContextError::Decoding(SessionDecodingError::InvalidInvariant(
+        RuntimeContextError::Decoding(RuntimeContextDecodingError::Session(SessionDecodingError::InvalidInvariant(
             format!("invalid project name: {e}"),
-        ))
+        )))
     })?;
 
     let protocol = RuntimeProtocol::from_identifier(&doc.runtime.protocol)
-        .map_err(|_| RuntimeContextError::Decoding(SessionDecodingError::UnknownField {
+    .map_err(|_| RuntimeContextError::Decoding(RuntimeContextDecodingError::Session(SessionDecodingError::UnknownField {
             field: "protocol",
             value: doc.runtime.protocol.clone(),
-        }))?;
+    })))?;
 
     let op = RuntimeOperation::from_identifier(&doc.runtime.operation)
-        .map_err(|_| RuntimeContextError::Decoding(SessionDecodingError::UnknownField {
+        .map_err(|_| RuntimeContextError::Decoding(RuntimeContextDecodingError::Session(SessionDecodingError::UnknownField {
             field: "operation",
             value: doc.runtime.operation.clone(),
-        }))?;
+        })))?;
 
     let runtime = match (protocol, op) {
         (RuntimeProtocol::Http, RuntimeOperation::Acquisition) => {
@@ -373,17 +396,17 @@ pub fn decode_runtime_context(
     };
 
     let session = SessionInvocationIdentity::new(&doc.session.id).map_err(|e| {
-        RuntimeContextError::Decoding(SessionDecodingError::InvalidInvariant(
+        RuntimeContextError::Decoding(RuntimeContextDecodingError::Session(SessionDecodingError::InvalidInvariant(
             format!("invalid session id: {e}"),
-        ))
+        )))
     })?;
 
-    let project_root = PathBuf::from(&doc.project_root);
-    let protocol_root = PathBuf::from(&doc.protocol_root);
-    let operation_root = PathBuf::from(&doc.operation_root);
-    let session_directory = PathBuf::from(&doc.session_directory);
-    let raw_data_directory = PathBuf::from(&doc.raw_data_directory);
-    let processed_data_directory = PathBuf::from(&doc.processed_data_directory);
+    let project_root = decode_native_path(&doc.project_root)?;
+    let protocol_root = decode_native_path(&doc.protocol_root)?;
+    let operation_root = decode_native_path(&doc.operation_root)?;
+    let session_directory = decode_native_path(&doc.session_directory)?;
+    let raw_data_directory = decode_native_path(&doc.raw_data_directory)?;
+    let processed_data_directory = decode_native_path(&doc.processed_data_directory)?;
 
     let paths = RuntimeContextPaths::new(
         project_root,
@@ -398,4 +421,62 @@ pub fn decode_runtime_context(
     .map_err(|e| e)?;
 
     Ok(DecodedRuntimeContext { project, runtime, session, paths })
+}
+
+#[cfg(unix)]
+fn encode_native_path(path: &Path) -> Result<EncodedNativePathDocument, RuntimeContextError> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    Ok(EncodedNativePathDocument {
+        encoding: "unix-bytes-base64".to_string(),
+        value: serde_json::Value::String(base64::encode(bytes)),
+    })
+}
+
+#[cfg(windows)]
+fn encode_native_path(path: &Path) -> Result<EncodedNativePathDocument, RuntimeContextError> {
+    use std::os::windows::ffi::OsStrExt;
+    let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let value = serde_json::to_value(units).map_err(|e| {
+        RuntimeContextError::Encoding(RuntimeContextEncodingError::Serialization(e))
+    })?;
+    Ok(EncodedNativePathDocument {
+        encoding: "windows-utf16".to_string(),
+        value,
+    })
+}
+
+#[cfg(unix)]
+fn decode_native_path(doc: &EncodedNativePathDocument) -> Result<PathBuf, RuntimeContextError> {
+    use std::os::unix::ffi::OsStringExt;
+    if doc.encoding != "unix-bytes-base64" {
+        return Err(RuntimeContextError::Decoding(
+            RuntimeContextDecodingError::NativePathEncodingMismatch,
+        ));
+    }
+    let value = doc.value.as_str().ok_or_else(|| {
+        RuntimeContextError::Decoding(RuntimeContextDecodingError::Session(
+            SessionDecodingError::StructuralDocument("invalid encoded path payload".to_string()),
+        ))
+    })?;
+    let bytes = base64::decode(value).map_err(|_| {
+        RuntimeContextError::Decoding(RuntimeContextDecodingError::Session(
+            SessionDecodingError::StructuralDocument("invalid encoded path payload".to_string()),
+        ))
+    })?;
+    Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+#[cfg(windows)]
+fn decode_native_path(doc: &EncodedNativePathDocument) -> Result<PathBuf, RuntimeContextError> {
+    use std::os::windows::ffi::OsStringExt;
+    if doc.encoding != "windows-utf16" {
+        return Err(RuntimeContextError::Decoding(
+            RuntimeContextDecodingError::NativePathEncodingMismatch,
+        ));
+    }
+    let units: Vec<u16> = serde_json::from_value(doc.value.clone()).map_err(|e| {
+        RuntimeContextError::Decoding(RuntimeContextDecodingError::Json(e))
+    })?;
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&units)))
 }

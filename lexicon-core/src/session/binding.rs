@@ -2,11 +2,11 @@ use std::fmt;
 
 use crate::runtime::invocation::RuntimeInvocationEnvelopeV1;
 use crate::runtime::{RuntimeExecutionMode, RuntimeSupervisionMode};
-use crate::session::error::{SessionLeaseError, SessionStoreError};
-use crate::session::lease::SessionLease;
 use crate::session::model::{
-    MAX_FAILURE_SUMMARY_BYTES, SessionFailureKind, SessionRecordV1, SessionState, SessionTransition,
+    SafeSessionFailure, SessionFailureCode, SessionRecordV1, SessionState, SessionTransition,
 };
+use crate::session::error::{SessionLeaseError, SessionStoreError};
+use crate::session::lease::SessionLeaseState;
 use crate::session::store::SessionStore;
 
 // ---------------------------------------------------------------------------
@@ -37,6 +37,8 @@ pub enum RuntimeSessionBindingError {
         expected: RuntimeSupervisionMode,
         actual: RuntimeSupervisionMode,
     },
+    SupervisorLeaseUnavailable,
+    SupervisorLeaseInspectionFailed(SessionLeaseError),
 }
 
 impl fmt::Display for RuntimeSessionBindingError {
@@ -67,6 +69,12 @@ impl fmt::Display for RuntimeSessionBindingError {
                     "supervision mode mismatch: envelope says '{expected:?}', record says '{actual:?}'"
                 )
             }
+            Self::SupervisorLeaseUnavailable => {
+                f.write_str("supervisor lease is not currently owned for this session")
+            }
+            Self::SupervisorLeaseInspectionFailed(err) => {
+                write!(f, "failed to inspect supervisor lease state: {err}")
+            }
         }
     }
 }
@@ -75,6 +83,7 @@ impl std::error::Error for RuntimeSessionBindingError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::StoreLoad(err) => Some(err),
+            Self::SupervisorLeaseInspectionFailed(err) => Some(err),
             _ => None,
         }
     }
@@ -89,8 +98,8 @@ impl std::error::Error for RuntimeSessionBindingError {
 /// Validates exact agreement for project, runtime source, protocol, operation,
 /// source contract version, session ID, execution mode, and supervision mode.
 ///
-/// Returns a `BoundRuntimeSession` that can be advanced to `Running` once the
-/// caller acquires the session lease.
+/// Returns a `BoundRuntimeSession` that can be advanced to `Running` only after
+/// confirming an active external supervisor lease owner exists.
 pub fn bind_runtime_session<'store>(
     store: &'store SessionStore,
     envelope: &RuntimeInvocationEnvelopeV1,
@@ -176,6 +185,16 @@ pub fn bind_runtime_session<'store>(
         });
     }
 
+    match store.inspect_lease_state(session_id) {
+        Ok(SessionLeaseState::Owned) => {}
+        Ok(SessionLeaseState::Available) => {
+            return Err(RuntimeSessionBindingError::SupervisorLeaseUnavailable)
+        }
+        Err(err) => {
+            return Err(RuntimeSessionBindingError::SupervisorLeaseInspectionFailed(err))
+        }
+    }
+
     Ok(BoundRuntimeSession { store, record })
 }
 
@@ -201,15 +220,7 @@ impl<'store> BoundRuntimeSession<'store> {
 
     /// Transition the session to `Running`.
     ///
-    /// The caller must hold `lease` before calling this method. The lease must
-    /// belong to this session — validated by comparing its file path against the
-    /// expected path derived from the store's operation root.
-    pub fn enter_running(
-        self,
-        lease: &SessionLease,
-    ) -> Result<RunningRuntimeSession<'store>, SessionStoreError> {
-        validate_lease_for_session(self.store, self.record.session(), lease)?;
-
+    pub fn enter_running(self) -> Result<RunningRuntimeSession<'store>, SessionStoreError> {
         let session_id = self.record.session().clone();
         let revision = self.record.revision();
         let updated = self
@@ -236,8 +247,7 @@ impl fmt::Debug for BoundRuntimeSession<'_> {
 /// A session in the `Running` state.
 ///
 /// Obtained by calling `BoundRuntimeSession::enter_running`. Provides consuming
-/// methods for terminal transitions. The caller retains the session lease and
-/// must pass it to each transition method for ownership proof.
+/// methods for terminal transitions.
 ///
 /// No public constructor; obtained only via `BoundRuntimeSession::enter_running`.
 pub struct RunningRuntimeSession<'store> {
@@ -251,12 +261,7 @@ impl<'store> RunningRuntimeSession<'store> {
     }
 
     /// Transition the session to `Succeeded`, consuming this value.
-    pub fn complete(
-        self,
-        lease: &SessionLease,
-    ) -> Result<SessionRecordV1, SessionStoreError> {
-        validate_lease_for_session(self.store, self.record.session(), lease)?;
-
+    pub fn complete(self) -> Result<SessionRecordV1, SessionStoreError> {
         let session_id = self.record.session().clone();
         let revision = self.record.revision();
         self.store
@@ -265,46 +270,32 @@ impl<'store> RunningRuntimeSession<'store> {
 
     /// Transition the session to `Failed` with `Source` failure kind, consuming this value.
     ///
-    /// The error message is sanitized and truncated before storage.
-    pub fn fail_source(
-        self,
-        lease: &SessionLease,
-        error: &dyn std::error::Error,
-    ) -> Result<SessionRecordV1, SessionStoreError> {
-        validate_lease_for_session(self.store, self.record.session(), lease)?;
-
+    pub fn fail_source(self) -> Result<SessionRecordV1, SessionStoreError> {
         let session_id = self.record.session().clone();
         let revision = self.record.revision();
-        let summary = sanitize_error_message(error);
         self.store.transition(
             &session_id,
             revision,
             SessionTransition::ToFailed {
-                kind: SessionFailureKind::Source,
-                summary: Some(summary),
+                failure: SafeSessionFailure::source_failure(),
             },
         )
     }
 
     /// Transition the session to `Failed` with `Runtime` failure kind, consuming this value.
     ///
-    /// The error message is sanitized and truncated before storage.
     pub fn fail_runtime(
         self,
-        lease: &SessionLease,
-        error: &dyn std::error::Error,
+        code: SessionFailureCode,
+        diagnostic: Option<String>,
     ) -> Result<SessionRecordV1, SessionStoreError> {
-        validate_lease_for_session(self.store, self.record.session(), lease)?;
-
         let session_id = self.record.session().clone();
         let revision = self.record.revision();
-        let summary = sanitize_error_message(error);
         self.store.transition(
             &session_id,
             revision,
             SessionTransition::ToFailed {
-                kind: SessionFailureKind::Runtime,
-                summary: Some(summary),
+                failure: SafeSessionFailure::runtime_failure(code, diagnostic),
             },
         )
     }
@@ -317,46 +308,4 @@ impl fmt::Debug for RunningRuntimeSession<'_> {
             .field("revision", &self.record.revision())
             .finish_non_exhaustive()
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Verify that `lease` was acquired for the given session in `store`.
-///
-/// Compares the lease's file path against the canonical path derived from the
-/// store's operation root and the session identity.
-fn validate_lease_for_session(
-    store: &SessionStore,
-    session: &crate::session::model::SessionIdentity,
-    lease: &SessionLease,
-) -> Result<(), SessionStoreError> {
-    let expected = store.operation_root().lease_path(session);
-    if lease.path() != expected {
-        return Err(SessionStoreError::LeaseRequired(SessionLeaseError::Io(
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "lease does not belong to this session",
-            ),
-        )));
-    }
-    Ok(())
-}
-
-/// Produce a sanitized diagnostic string from an error value.
-///
-/// Uses only `Display` formatting. Truncates at `MAX_FAILURE_SUMMARY_BYTES` on a
-/// character boundary. Does not capture backtraces, source chains, arguments, or
-/// any raw I/O content beyond the top-level message.
-fn sanitize_error_message(error: &dyn std::error::Error) -> String {
-    let raw = error.to_string();
-    if raw.len() <= MAX_FAILURE_SUMMARY_BYTES {
-        return raw;
-    }
-    let mut end = MAX_FAILURE_SUMMARY_BYTES;
-    while !raw.is_char_boundary(end) {
-        end -= 1;
-    }
-    raw[..end].to_string()
 }

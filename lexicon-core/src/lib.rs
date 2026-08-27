@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub mod processing;
 pub mod protocols;
@@ -11,7 +11,9 @@ pub use runtime::{
     RuntimeIdentifierError, RuntimeIdentity, RuntimeInformationDecodingError,
     RuntimeInformationEncodingError, RuntimeOperation, RuntimeProtocol,
 };
-pub use session::{RUNTIME_CONTEXT_ENVIRONMENT_VARIABLE, RuntimeContextPaths};
+pub use session::{
+    RUNTIME_CONTEXT_ENVIRONMENT_VARIABLE, RuntimeContextPaths, SessionDataPaths, SessionIdentity,
+};
 
 // ---------------------------------------------------------------------------
 // HttpAcquisitionContext
@@ -19,50 +21,36 @@ pub use session::{RUNTIME_CONTEXT_ENVIRONMENT_VARIABLE, RuntimeContextPaths};
 
 /// Bound acquisition context provided to HTTP source handlers.
 ///
-/// Constructed from an admitted HTTP invocation, validated `RuntimeContextPaths`,
-/// and an owned `RunningSession`. Fields are private; use the provided accessors.
+/// Constructed from an admitted HTTP invocation and validated session data paths.
 ///
 /// # Legacy note
 ///
 /// The old `LEXICON_SOURCE_DIRECTORY`-based construction path (`from_env`) is
 /// quarantined and unsupported for managed runners after this milestone.
 pub struct HttpAcquisitionContext {
-    source_directory: PathBuf,
-    raw_data_directory: PathBuf,
-    running_session: Option<session::store::RunningSession>,
+    paths: SessionDataPaths,
+    session_identity: Option<SessionIdentity>,
 }
 
 impl HttpAcquisitionContext {
-    /// Construct a context from validated runtime context paths and a running session.
-    ///
-    /// The running session is retained for the entire handler call.
-    pub fn from_context_paths(
-        paths: &RuntimeContextPaths,
-        running_session: session::store::RunningSession,
-    ) -> Self {
+    pub fn from_session_data_paths(paths: SessionDataPaths, session_identity: SessionIdentity) -> Self {
         Self {
-            source_directory: paths.operation_root().to_path_buf(),
-            raw_data_directory: paths.raw_data_directory().to_path_buf(),
-            running_session: Some(running_session),
+            paths,
+            session_identity: Some(session_identity),
         }
     }
 
-    /// Take the running session out of the context, releasing ownership.
-    ///
-    /// Returns `None` if this context was constructed via the legacy path.
-    pub(crate) fn take_running_session(&mut self) -> Option<session::store::RunningSession> {
-        self.running_session.take()
+    /// Compatibility accessor; returns protocol root in managed mode.
+    pub fn source_directory(&self) -> &Path {
+        self.paths.protocol_root()
     }
 
-    /// Path to the operation root directory (source-specific operation directory).
-    pub fn source_directory(&self) -> &std::path::Path {
-        &self.source_directory
-    }
-
-    /// Path to the raw data directory.
-    pub fn raw_data_directory(&self) -> &std::path::Path {
-        &self.raw_data_directory
-    }
+    pub fn protocol_root(&self) -> &Path { self.paths.protocol_root() }
+    pub fn operation_root(&self) -> &Path { self.paths.operation_root() }
+    pub fn session_directory(&self) -> &Path { self.paths.session_directory() }
+    pub fn raw_data_directory(&self) -> &Path { self.paths.raw_data_directory() }
+    pub fn processed_data_directory(&self) -> &Path { self.paths.processed_data_directory() }
+    pub fn session_identity(&self) -> Option<&SessionIdentity> { self.session_identity.as_ref() }
 
     /// **Quarantined legacy constructor.** Uses `LEXICON_SOURCE_DIRECTORY` environment variable.
     ///
@@ -89,10 +77,18 @@ impl HttpAcquisitionContext {
         }
 
         let raw_data_directory = source_directory.join("data/raw");
+        let processed_data_directory = source_directory.join("data/processed");
+        let operation_root = source_directory.join("get-raw-data");
+        let session_directory = operation_root.join("sessions/legacy");
         Ok(Self {
-            source_directory,
-            raw_data_directory,
-            running_session: None,
+            paths: SessionDataPaths::from_legacy_parts(
+                source_directory,
+                operation_root,
+                session_directory,
+                raw_data_directory,
+                processed_data_directory,
+            ),
+            session_identity: None,
         })
     }
 }

@@ -15,14 +15,15 @@ pub use context::{
     encode_runtime_context,
 };
 pub use error::{
-    CoreRunnerSessionError, RuntimeContextError, SessionDecodingError, SessionEncodingError,
-    SessionLeaseError, SessionStoreError, SessionTransitionError,
+    CoreRunnerSessionError, RuntimeContextDecodingError, RuntimeContextEncodingError,
+    RuntimeContextError, SessionDecodingError, SessionEncodingError, SessionLeaseError,
+    SessionStoreError, SessionTransitionError,
 };
-pub use lease::SessionLease;
+pub use lease::{SessionLease, SessionLeaseState, inspect_session_lease};
 pub use model::{
-    MAX_FAILURE_SUMMARY_BYTES, NewSessionRecord, ProjectIdentity, SESSION_SCHEMA_VERSION,
-    SessionClock, SessionFailureKind, SessionFailureV1, SessionIdentity, SessionOperation,
-    SessionRecordV1, SessionState, SessionStatusV1, SessionTimestamp, SessionTransition,
-    SystemClock, generate_session_id,
+    MAX_FAILURE_SUMMARY_BYTES, NewSessionRecord, ProjectIdentity, SafeSessionFailure,
+    SESSION_SCHEMA_VERSION, SessionClock, SessionFailureCode, SessionFailureKind, SessionFailureV1,
+    SessionIdentity, SessionOperation, SessionRecordV1, SessionState, SessionStatusV1,
+    SessionTimestamp, SessionTransition, SystemClock, generate_session_id,
 };
-pub use store::{PreparedSession, RunningSession, SessionOperationRoot, SessionStore};
+pub use store::{PreparedSession, SessionOperationRoot, SessionStore};

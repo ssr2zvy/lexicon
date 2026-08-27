@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::session::error::SessionLeaseError;
 
@@ -13,6 +13,12 @@ use crate::session::error::SessionLeaseError;
 pub struct SessionLease {
     file: File,
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLeaseState {
+    Available,
+    Owned,
 }
 
 impl std::fmt::Debug for SessionLease {
@@ -45,6 +51,17 @@ impl SessionLease {
         write_pid_diagnostic(&file);
 
         Ok(Self { file, path })
+    }
+
+    pub fn inspect_session_lease(path: &Path) -> Result<SessionLeaseState, SessionLeaseError> {
+        match SessionLease::acquire(path.to_path_buf()) {
+            Ok(lease) => {
+                drop(lease);
+                Ok(SessionLeaseState::Available)
+            }
+            Err(SessionLeaseError::AlreadyOwned) => Ok(SessionLeaseState::Owned),
+            Err(err) => Err(err),
+        }
     }
 
     /// Path to the lock file.

@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use crate::session::error::{
     SessionDecodingError, SessionLeaseError, SessionStoreError,
 };
-use crate::session::lease::SessionLease;
+use crate::session::lease::{SessionLease, SessionLeaseState, inspect_session_lease};
 use crate::session::model::{
-    NewSessionRecord, SessionClock, SessionIdentity, SessionOperation, SessionRecordV1,
-    SessionState, SessionStatusV1, SessionTimestamp, SessionTransition, SystemClock,
-    generate_session_id,
+    NewSessionRecord, SafeSessionFailure, SessionClock, SessionIdentity, SessionOperation,
+    SessionRecordV1, SessionState, SessionStatusV1, SessionTimestamp, SessionTransition,
+    SystemClock, generate_session_id,
 };
 use crate::session::transition::validate_transition;
 
@@ -70,7 +70,7 @@ impl SessionOperationRoot {
 }
 
 // ---------------------------------------------------------------------------
-// PreparedSession / RunningSession
+// PreparedSession
 // ---------------------------------------------------------------------------
 
 /// A session record in the `Prepared` state, returned after creation.
@@ -91,40 +91,6 @@ impl PreparedSession {
 impl std::fmt::Debug for PreparedSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedSession")
-            .field("session", self.record.session())
-            .field("revision", &self.record.revision())
-            .finish_non_exhaustive()
-    }
-}
-
-/// A session record in the `Running` state, with an active exclusive lease.
-///
-/// The lease is retained for the lifetime of the running session.
-/// Not `Clone`; not constructible by callers outside this crate.
-pub struct RunningSession {
-    record: SessionRecordV1,
-    lease: SessionLease,
-}
-
-impl RunningSession {
-    pub fn record(&self) -> &SessionRecordV1 {
-        &self.record
-    }
-
-    pub fn into_record(self) -> SessionRecordV1 {
-        self.record
-        // lease dropped here → lock released
-    }
-
-    /// Crate-internal constructor used by runners that acquire the lease independently.
-    pub(crate) fn from_parts(record: SessionRecordV1, lease: SessionLease) -> Self {
-        Self { record, lease }
-    }
-}
-
-impl std::fmt::Debug for RunningSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RunningSession")
             .field("session", self.record.session())
             .field("revision", &self.record.revision())
             .finish_non_exhaustive()
@@ -179,10 +145,7 @@ impl SessionStore {
                 format!("generated invalid session id: {e}"),
             )))?;
 
-        let record = SessionRecordV1::new_prepared(
-            NewSessionRecord { session, ..input },
-            self.clock.as_ref(),
-        );
+        let record = SessionRecordV1::new_prepared(input, session, self.clock.as_ref());
 
         let session_dir = self.operation_root.session_directory(record.session());
         fs::create_dir_all(&session_dir).map_err(SessionStoreError::DirectoryCreation)?;
@@ -191,6 +154,17 @@ impl SessionStore {
         let json = record.to_json().map_err(SessionStoreError::Encoding)?;
         write_atomic(&record_path, json.as_bytes())
             .map_err(SessionStoreError::AtomicPersistence)?;
+
+        let status = SessionStatusV1::from_record(&record, self.clock.as_ref());
+        match self.write_status(&status) {
+            Ok(()) => {}
+            Err(summary_err) => {
+                return Err(SessionStoreError::PartialCommit {
+                    record_error: None,
+                    summary_error: Box::new(summary_err),
+                });
+            }
+        }
 
         Ok(PreparedSession { record })
     }
@@ -237,6 +211,13 @@ impl SessionStore {
     ) -> Result<SessionLease, SessionLeaseError> {
         let path = self.operation_root.lease_path(session);
         SessionLease::acquire(path)
+    }
+
+    pub fn inspect_lease_state(
+        &self,
+        session: &SessionIdentity,
+    ) -> Result<SessionLeaseState, SessionLeaseError> {
+        inspect_session_lease(&self.operation_root.lease_path(session))
     }
 
     // ------------------------------------------------------------------
@@ -289,56 +270,6 @@ impl SessionStore {
         }
 
         Ok(updated)
-    }
-
-    // ------------------------------------------------------------------
-    // Promote Prepared → Running
-    // ------------------------------------------------------------------
-
-    /// Transition a `PreparedSession` to `Running`, consuming the prepared value
-    /// and binding the provided lease to the new `RunningSession`.
-    ///
-    /// The lease must have been acquired by the caller before calling this method.
-    pub fn promote_to_running(
-        &self,
-        prepared: PreparedSession,
-        lease: SessionLease,
-    ) -> Result<RunningSession, SessionStoreError> {
-        let session_id = prepared.record.session().clone();
-        let revision = prepared.record.revision();
-        let new_record = self.transition(
-            &session_id,
-            revision,
-            SessionTransition::ToRunning,
-        )?;
-        Ok(RunningSession { record: new_record, lease })
-    }
-
-    // ------------------------------------------------------------------
-    // Terminal transitions from RunningSession
-    // ------------------------------------------------------------------
-
-    /// Persist `Succeeded` state and consume the `RunningSession` (releasing the lease).
-    pub fn complete_succeeded(
-        &self,
-        running: RunningSession,
-    ) -> Result<SessionRecordV1, SessionStoreError> {
-        let session_id = running.record.session().clone();
-        let revision = running.record.revision();
-        // running (and its lease) will be dropped on return from this fn
-        self.transition(&session_id, revision, SessionTransition::ToSucceeded)
-    }
-
-    /// Persist `Failed` state and consume the `RunningSession` (releasing the lease).
-    pub fn complete_failed(
-        &self,
-        running: RunningSession,
-        kind: crate::session::model::SessionFailureKind,
-        summary: Option<String>,
-    ) -> Result<SessionRecordV1, SessionStoreError> {
-        let session_id = running.record.session().clone();
-        let revision = running.record.revision();
-        self.transition(&session_id, revision, SessionTransition::ToFailed { kind, summary })
     }
 
     // ------------------------------------------------------------------
@@ -406,8 +337,7 @@ impl SessionStore {
                 session,
                 revision,
                 SessionTransition::ToFailed {
-                    kind: crate::session::model::SessionFailureKind::StaleOwnership,
-                    summary: Some("stale session ownership: prior process terminated without completing".to_string()),
+                    failure: SafeSessionFailure::stale_ownership_failure(),
                 },
             )
             .map_err(|e| {
@@ -453,9 +383,9 @@ fn apply_transition(
         SessionTransition::ToSucceeded => {
             record.finished_at = Some(now);
         }
-        SessionTransition::ToFailed { kind, summary } => {
+        SessionTransition::ToFailed { failure } => {
             record.finished_at = Some(now);
-            record.failure = Some(SessionFailureV1::new(*kind, summary.clone()));
+            record.failure = Some(SessionFailureV1::from_safe(failure.clone()));
         }
         SessionTransition::ToAbandoned => {
             record.finished_at = Some(now);

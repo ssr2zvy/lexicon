@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::session::binding::RuntimeSessionBindingError;
+
 // ---------------------------------------------------------------------------
 // Session encoding / decoding
 // ---------------------------------------------------------------------------
@@ -215,7 +217,8 @@ impl std::error::Error for SessionStoreError {
 pub enum RuntimeContextError {
     MissingEnvironmentVariable,
     InvalidUtf8,
-    Decoding(SessionDecodingError),
+    Encoding(RuntimeContextEncodingError),
+    Decoding(RuntimeContextDecodingError),
     IdentityMismatch { field: &'static str, expected: String, actual: String },
     PathMismatch { field: &'static str, expected: String, actual: String },
     RelativeProjectRoot,
@@ -225,6 +228,61 @@ pub enum RuntimeContextError {
     SessionDirectoryDisagreement,
 }
 
+#[derive(Debug)]
+pub enum RuntimeContextEncodingError {
+    Serialization(serde_json::Error),
+    NativePathEncodingMismatch,
+}
+
+impl fmt::Display for RuntimeContextEncodingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Serialization(_) => f.write_str("runtime context JSON serialization failed"),
+            Self::NativePathEncodingMismatch => {
+                f.write_str("runtime context native path encoding does not match this platform")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RuntimeContextEncodingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Serialization(err) => Some(err),
+            Self::NativePathEncodingMismatch => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum RuntimeContextDecodingError {
+    Json(serde_json::Error),
+    Session(SessionDecodingError),
+    NativePathEncodingMismatch,
+}
+
+impl fmt::Display for RuntimeContextDecodingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Json(_) => f.write_str("runtime context JSON decoding failed"),
+            Self::Session(err) => write!(f, "runtime context decoding error: {err}"),
+            Self::NativePathEncodingMismatch => {
+                f.write_str("runtime context native path encoding does not match this platform")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RuntimeContextDecodingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Json(err) => Some(err),
+            Self::Session(err) => Some(err),
+            Self::NativePathEncodingMismatch => None,
+        }
+    }
+}
+
 impl fmt::Display for RuntimeContextError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -232,6 +290,7 @@ impl fmt::Display for RuntimeContextError {
                 write!(f, "missing runtime context environment variable")
             }
             Self::InvalidUtf8 => f.write_str("runtime context environment variable is not valid UTF-8"),
+            Self::Encoding(err) => write!(f, "runtime context encoding error: {err}"),
             Self::Decoding(err) => write!(f, "runtime context decoding error: {err}"),
             Self::IdentityMismatch { field, expected, actual } => {
                 write!(
@@ -267,6 +326,7 @@ impl fmt::Display for RuntimeContextError {
 impl std::error::Error for RuntimeContextError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Encoding(err) => Some(err),
             Self::Decoding(err) => Some(err),
             _ => None,
         }
@@ -281,9 +341,11 @@ impl std::error::Error for RuntimeContextError {
 pub enum CoreRunnerSessionError {
     ContextDecode(RuntimeContextError),
     StoreOpen(SessionStoreError),
+    SessionBinding(RuntimeSessionBindingError),
     LeaseAcquisition(SessionLeaseError),
     TransitionToRunning(SessionStoreError),
     TerminalPersistence(SessionStoreError),
+    RunningSessionUnavailable,
 }
 
 impl fmt::Display for CoreRunnerSessionError {
@@ -291,12 +353,16 @@ impl fmt::Display for CoreRunnerSessionError {
         match self {
             Self::ContextDecode(err) => write!(f, "runtime context decoding failed: {err}"),
             Self::StoreOpen(err) => write!(f, "session store open failed: {err}"),
+            Self::SessionBinding(err) => write!(f, "runtime session binding failed: {err}"),
             Self::LeaseAcquisition(err) => write!(f, "session lease acquisition failed: {err}"),
             Self::TransitionToRunning(err) => {
                 write!(f, "session transition to running failed: {err}")
             }
             Self::TerminalPersistence(err) => {
                 write!(f, "terminal session state persistence failed: {err}")
+            }
+            Self::RunningSessionUnavailable => {
+                f.write_str("running session lifecycle value is unavailable")
             }
         }
     }
@@ -307,9 +373,11 @@ impl std::error::Error for CoreRunnerSessionError {
         match self {
             Self::ContextDecode(err) => Some(err),
             Self::StoreOpen(err) => Some(err),
+            Self::SessionBinding(err) => Some(err),
             Self::LeaseAcquisition(err) => Some(err),
             Self::TransitionToRunning(err) => Some(err),
             Self::TerminalPersistence(err) => Some(err),
+            Self::RunningSessionUnavailable => None,
         }
     }
 }
