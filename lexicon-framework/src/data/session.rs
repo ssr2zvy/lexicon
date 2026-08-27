@@ -37,10 +37,12 @@ pub fn build_project_identity(
     project_name: &str,
 ) -> Result<ProjectIdentity, ForegroundDataExecutionError> {
     ProjectIdentity::new(project_name).map_err(|e| {
-        ForegroundDataExecutionError::ProjectConfiguration(format!(
-            "invalid project identity '{}': {e}",
-            project_name
-        ))
+        ForegroundDataExecutionError::ProjectConfiguration(
+            crate::data::error::ProjectConfigurationError::Identity(format!(
+                "invalid project identity '{}': {e}",
+                project_name
+            ))
+        )
     })
 }
 
@@ -288,5 +290,174 @@ fn session_coordination_error_to_store_error(
             std::io::ErrorKind::Other,
             err.to_string(),
         )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Terminal session validation helpers
+// ---------------------------------------------------------------------------
+
+/// Load the session record after child termination and verify that its identity
+/// fields match the prepared launch.
+///
+/// Checks: project, runtime, session, operation, execution_mode, supervision_mode.
+pub fn load_and_validate_terminal_session(
+    operation_root_path: &std::path::Path,
+    prepared_record: &SessionRecordV1,
+) -> Result<SessionRecordV1, crate::data::error::ForegroundDataExecutionError> {
+    let session_id = prepared_record.session();
+    let record = load_terminal_session(operation_root_path, session_id)?;
+
+    // Verify identity fields agree with the prepared record.
+    if record.project() != prepared_record.project() {
+        return Err(crate::data::error::ForegroundDataExecutionError::SessionIdentityDisagreement {
+            field: "project",
+            expected: format!("{:?}", prepared_record.project()),
+            actual: format!("{:?}", record.project()),
+        });
+    }
+    if record.runtime() != prepared_record.runtime() {
+        return Err(crate::data::error::ForegroundDataExecutionError::SessionIdentityDisagreement {
+            field: "runtime",
+            expected: format!("{:?}", prepared_record.runtime()),
+            actual: format!("{:?}", record.runtime()),
+        });
+    }
+    if record.session() != prepared_record.session() {
+        return Err(crate::data::error::ForegroundDataExecutionError::SessionIdentityDisagreement {
+            field: "session",
+            expected: prepared_record.session().id().to_owned(),
+            actual: record.session().id().to_owned(),
+        });
+    }
+    if record.operation() != prepared_record.operation() {
+        return Err(crate::data::error::ForegroundDataExecutionError::SessionIdentityDisagreement {
+            field: "operation",
+            expected: format!("{:?}", prepared_record.operation()),
+            actual: format!("{:?}", record.operation()),
+        });
+    }
+    if record.execution_mode() != prepared_record.execution_mode() {
+        return Err(crate::data::error::ForegroundDataExecutionError::SessionIdentityDisagreement {
+            field: "execution_mode",
+            expected: format!("{:?}", prepared_record.execution_mode()),
+            actual: format!("{:?}", record.execution_mode()),
+        });
+    }
+    if record.supervision_mode() != prepared_record.supervision_mode() {
+        return Err(crate::data::error::ForegroundDataExecutionError::SessionIdentityDisagreement {
+            field: "supervision_mode",
+            expected: format!("{:?}", prepared_record.supervision_mode()),
+            actual: format!("{:?}", record.supervision_mode()),
+        });
+    }
+
+    Ok(record)
+}
+
+/// Validate that the root `session_status.json` agrees with a terminal session record.
+///
+/// Checks: schema_version, project, runtime, operation, current_session,
+/// current_state, revision.
+///
+/// Returns `Ok(())` if the summary agrees, or `Err` with a detail string describing
+/// the first disagreement found.
+pub fn validate_root_summary_against_record(
+    store: &SessionStore,
+    record: &SessionRecordV1,
+) -> Result<(), String> {
+    let status = match store.load_status() {
+        Ok(Some(s)) => s,
+        Ok(None) => return Err("root session_status.json is missing".to_owned()),
+        Err(e) => return Err(format!("failed to load session_status.json: {e}")),
+    };
+
+    if status.schema_version() != lexicon_core::session::SESSION_SCHEMA_VERSION {
+        return Err(format!(
+            "schema_version mismatch: expected {}, found {}",
+            lexicon_core::session::SESSION_SCHEMA_VERSION,
+            status.schema_version()
+        ));
+    }
+    if status.project() != record.project() {
+        return Err(format!(
+            "project mismatch: summary={:?}, record={:?}",
+            status.project(),
+            record.project()
+        ));
+    }
+    if status.runtime() != record.runtime() {
+        return Err(format!(
+            "runtime mismatch: summary={:?}, record={:?}",
+            status.runtime(),
+            record.runtime()
+        ));
+    }
+    if status.operation() != record.operation() {
+        return Err(format!(
+            "operation mismatch: summary={:?}, record={:?}",
+            status.operation(),
+            record.operation()
+        ));
+    }
+    match status.current_session() {
+        None => return Err("root summary has no current_session".to_owned()),
+        Some(id) if id != record.session() => {
+            return Err(format!(
+                "current_session mismatch: summary={}, record={}",
+                id.id(),
+                record.session().id()
+            ));
+        }
+        Some(_) => {}
+    }
+    match status.current_state() {
+        None => return Err("root summary has no current_state".to_owned()),
+        Some(s) if s != record.state() => {
+            return Err(format!(
+                "current_state mismatch: summary={:?}, record={:?}",
+                s,
+                record.state()
+            ));
+        }
+        Some(_) => {}
+    }
+    if status.revision() != record.revision() {
+        return Err(format!(
+            "revision mismatch: summary={}, record={}",
+            status.revision(),
+            record.revision()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Attempt to rebuild the root summary from the session record, then validate.
+///
+/// Returns the rebuilt status on success, or a `SessionStoreError` if the rebuild fails.
+pub fn rebuild_and_validate_root_summary(
+    operation_root_path: &std::path::Path,
+    session_id: &SessionIdentity,
+    record: &SessionRecordV1,
+) -> Result<(), crate::data::error::ForegroundDataExecutionError> {
+    let op_root = SessionOperationRoot::new(operation_root_path.to_path_buf())
+        .map_err(crate::data::error::ForegroundDataExecutionError::StaleSessionReconciliation)?;
+    let store = SessionStore::open(op_root)
+        .map_err(crate::data::error::ForegroundDataExecutionError::MissingTerminalSession)?;
+
+    store
+        .rebuild_status_from_record(session_id)
+        .map_err(crate::data::error::ForegroundDataExecutionError::MissingTerminalSession)?;
+
+    // Reload and re-validate.
+    match validate_root_summary_against_record(&store, record) {
+        Ok(()) => Ok(()),
+        Err(detail) => Err(
+            crate::data::error::ForegroundDataExecutionError::RootSummaryReconciliationFailed {
+                detail,
+                rebuild_error: None,
+            },
+        ),
     }
 }

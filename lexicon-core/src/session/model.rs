@@ -172,6 +172,20 @@ pub enum SessionFailureKind {
     StaleOwnership,
 }
 
+impl SessionFailureKind {
+    /// Stable lowercase identifier for this failure kind.
+    ///
+    /// These values are part of the public display surface; do not use `{:?}`.
+    pub const fn identifier(&self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Runtime => "runtime",
+            Self::AbnormalTermination => "abnormal_termination",
+            Self::StaleOwnership => "stale_ownership",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionFailureCode {
@@ -182,6 +196,38 @@ pub enum SessionFailureCode {
     LaunchFailed,
     AbnormalTermination,
     StaleOwnership,
+    /// The runtime invocation envelope could not be constructed before launch.
+    InvocationConstructionFailed,
+    /// The runtime invocation could not be encoded for transport before launch.
+    InvocationEncodingFailed,
+    /// The admitted executable failed its pre-launch integrity check.
+    ExecutableIntegrityFailed,
+    /// The child exited zero but the session was not in a terminal state.
+    ZeroExitWithoutCompletion,
+    /// The child exited nonzero but left no failure record.
+    NonzeroExitWithoutFailureRecord,
+}
+
+impl SessionFailureCode {
+    /// Stable snake_case identifier for this failure code.
+    ///
+    /// These values are part of the public display surface; do not use `{:?}`.
+    pub const fn identifier(&self) -> &'static str {
+        match self {
+            Self::SourceReturnedError => "source_returned_error",
+            Self::RuntimeInitializationFailed => "runtime_initialization_failed",
+            Self::RuntimeContextInvalid => "runtime_context_invalid",
+            Self::HandlerStateUnavailable => "handler_state_unavailable",
+            Self::LaunchFailed => "launch_failed",
+            Self::AbnormalTermination => "abnormal_termination",
+            Self::StaleOwnership => "stale_ownership",
+            Self::InvocationConstructionFailed => "invocation_construction_failed",
+            Self::InvocationEncodingFailed => "invocation_encoding_failed",
+            Self::ExecutableIntegrityFailed => "executable_integrity_failed",
+            Self::ZeroExitWithoutCompletion => "zero_exit_without_completion",
+            Self::NonzeroExitWithoutFailureRecord => "nonzero_exit_without_failure_record",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
