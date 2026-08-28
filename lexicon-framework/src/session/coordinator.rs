@@ -399,6 +399,13 @@ fn build_session_paths(
     let session_directory = operation_root.join("sessions").join(session.id());
     let raw_data_directory = protocol_root.join("data/raw");
     let processed_data_directory = protocol_root.join("data/processed");
+    let source_state_directory = match op {
+        lexicon_core::runtime::RuntimeOperation::Acquisition => {
+            Some(operation_root.join("state"))
+        }
+        lexicon_core::runtime::RuntimeOperation::Processing => None,
+        _ => unreachable!("unknown RuntimeOperation variant"),
+    };
 
     RuntimeContextPaths::new(
         project_root.to_path_buf(),
@@ -407,6 +414,7 @@ fn build_session_paths(
         session_directory,
         raw_data_directory,
         processed_data_directory,
+        source_state_directory,
         op,
         session,
     )

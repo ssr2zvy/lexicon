@@ -572,6 +572,7 @@ pub enum HttpRuntimeInvocationExecutionError {
     Transport(RuntimeInvocationTransportDecodingError),
     Admission(HttpRuntimeInvocationAdmissionError),
     Session(CoreRunnerSessionError),
+    SourceStateDirectoryPreparation(crate::protocols::http::context::SessionValidationError),
     Handler(AcquisitionError),
     TerminalPersistence {
         handler_error: Option<AcquisitionError>,
@@ -587,6 +588,9 @@ impl fmt::Display for HttpRuntimeInvocationExecutionError {
             }
             Self::Admission(_) => formatter.write_str("HTTP runtime invocation admission error"),
             Self::Session(_) => formatter.write_str("HTTP runtime session initialization error"),
+            Self::SourceStateDirectoryPreparation(_) => {
+                formatter.write_str("failed to prepare the durable source-state directory")
+            }
             Self::Handler(_) => formatter.write_str("acquisition handler error"),
             Self::TerminalPersistence { handler_error: Some(_), .. } => {
                 formatter.write_str("acquisition handler error; terminal session state persistence also failed")
@@ -604,6 +608,7 @@ impl std::error::Error for HttpRuntimeInvocationExecutionError {
             Self::Transport(e) => Some(e),
             Self::Admission(e) => Some(e),
             Self::Session(e) => Some(e),
+            Self::SourceStateDirectoryPreparation(e) => Some(e),
             Self::Handler(e) => Some(e),
             Self::TerminalPersistence { session_error, .. } => Some(session_error),
         }
@@ -671,6 +676,12 @@ pub fn run_http_runtime_invocation(
     let data_paths = SessionDataPaths::from_context_paths(&context_document.paths);
     let mut context =
         HttpAcquisitionContext::from_session_data_paths(data_paths, envelope.session().clone());
+
+    // Create and validate the durable source-state directory before source code runs
+    // (contract.md §9, specs.md §11).
+    context
+        .ensure_source_state_directory_ready()
+        .map_err(HttpRuntimeInvocationExecutionError::SourceStateDirectoryPreparation)?;
 
     // Invoke the selected handler.
     let handler_result = match handler {
@@ -1287,5 +1298,83 @@ mod execution_tests {
         .unwrap_err();
 
         assert!(matches!(err, HttpRuntimeInvocationExecutionError::Session(_)));
+    }
+
+    // Test 20: Core creates and validates `source_state_directory()` before the
+    // acquire handler runs, and it is writable from inside the handler.
+    #[test]
+    fn source_state_directory_is_created_and_writable_before_handler_runs() {
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let state_dir = context
+                .source_state_directory()
+                .expect("acquisition context must expose a source_state_directory");
+            assert!(state_dir.is_dir(), "Core must create the directory before dispatch");
+            assert!(state_dir.ends_with("get-raw-data/state"));
+            std::fs::write(state_dir.join("marker.txt"), b"seen")
+                .expect("handler must be able to write into source_state_directory");
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(RuntimeIdentity::http_acquisition(
+            "example-source",
+            1,
+        ));
+        let args = fixture.build_argv(&[]);
+
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 21: durable source state survives across two sequential sessions against
+    // the same fixture (same protocol/operation root, different session identities),
+    // per specs.md §44's "state survives sessions" requirement.
+    #[test]
+    fn source_state_directory_persists_across_sequential_sessions() {
+        fn write_marker(
+            context: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            let state_dir = context.source_state_directory().unwrap();
+            std::fs::write(state_dir.join("marker.txt"), b"from-session-one").unwrap();
+            Ok(())
+        }
+        fn read_marker(
+            context: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            let state_dir = context.source_state_directory().unwrap();
+            let contents = std::fs::read(state_dir.join("marker.txt"))
+                .expect("marker written by the prior session must still be present");
+            assert_eq!(contents, b"from-session-one");
+            Ok(())
+        }
+
+        let mut fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let first_args = fixture.build_argv(&[]);
+        let first_result = run_http_runtime_invocation(
+            &first_args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(write_marker),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(first_result.is_ok(), "{first_result:?}");
+
+        fixture.advance_to_new_session();
+        let second_args = fixture.build_argv(&[]);
+        let second_result = run_http_runtime_invocation(
+            &second_args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(read_marker),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(second_result.is_ok(), "{second_result:?}");
     }
 }

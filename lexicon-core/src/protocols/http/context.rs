@@ -89,8 +89,33 @@ impl HttpAcquisitionContext {
         self.paths.processed_data_directory()
     }
 
+    /// The contract-reserved durable-state directory for this acquisition source
+    /// (`get-raw-data/state/`), per contract.md §9 and specs.md §11. `None` only for a
+    /// context built through the legacy, non-session-bound construction path.
+    pub fn source_state_directory(&self) -> Option<&Path> {
+        self.paths.source_state_directory()
+    }
+
     pub fn session_identity(&self) -> Option<&crate::session::SessionIdentity> {
         self.session_identity.as_ref()
+    }
+
+    /// Create (if absent) and validate the durable source-state directory before source
+    /// code is invoked, per specs.md §11 ("Core must create and validate the directory
+    /// before calling source code"). A no-op returning `Ok(())` when this context has no
+    /// source-state directory (the legacy construction path).
+    pub(crate) fn ensure_source_state_directory_ready(&self) -> Result<(), SessionValidationError> {
+        let Some(directory) = self.source_state_directory() else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(directory)
+            .map_err(SessionValidationError::SourceStateDirectoryCreation)?;
+        validate_managed_path(
+            self.protocol_root(),
+            directory,
+            HttpManagedPathValidationMode::ExistingDirectory,
+        )
+        .map_err(SessionValidationError::ManagedPath)
     }
 
     #[doc(hidden)]
@@ -1464,6 +1489,7 @@ pub enum SessionValidationError {
     SessionIdentityMismatch,
     LeaseUnavailable,
     LeaseInspectionFailed,
+    SourceStateDirectoryCreation(std::io::Error),
 }
 
 impl fmt::Display for SessionValidationError {
@@ -1480,6 +1506,9 @@ impl fmt::Display for SessionValidationError {
             Self::SessionIdentityMismatch => formatter.write_str("session identity mismatch"),
             Self::LeaseUnavailable => formatter.write_str("supervisor lease is not currently owned"),
             Self::LeaseInspectionFailed => formatter.write_str("failed to inspect supervisor lease state"),
+            Self::SourceStateDirectoryCreation(_) => {
+                formatter.write_str("failed to create the durable source-state directory")
+            }
         }
     }
 }
@@ -1488,6 +1517,7 @@ impl std::error::Error for SessionValidationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::ManagedPath(error) => Some(error),
+            Self::SourceStateDirectoryCreation(error) => Some(error),
             _ => None,
         }
     }
