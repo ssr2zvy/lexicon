@@ -14,6 +14,9 @@ pub enum AcquisitionError {
     Request(HttpRequestError),
     Execution(HttpExecutionError),
     ResponseStatus(HttpResponseStatusError),
+    CheckpointCommit(crate::protocols::http::checkpoint::error::HttpCheckpointCommitError),
+    CheckpointLookup(crate::protocols::http::checkpoint::error::HttpCheckpointLookupError),
+    TransactionAdmission(crate::protocols::http::transaction::metadata::HttpTransactionAdmissionError),
 }
 
 impl AcquisitionError {
@@ -39,12 +42,27 @@ impl AcquisitionError {
         Self::Execution(HttpExecutionError::Transport(failure))
     }
 
+    pub(crate) fn checkpoint_commit(
+        error: crate::protocols::http::checkpoint::error::HttpCheckpointCommitError,
+    ) -> Self {
+        Self::CheckpointCommit(error)
+    }
+
+    pub(crate) fn checkpoint_lookup(
+        error: crate::protocols::http::checkpoint::error::HttpCheckpointLookupError,
+    ) -> Self {
+        Self::CheckpointLookup(error)
+    }
+
     pub fn message(&self) -> &str {
         match self {
             Self::Source { message } => message,
             Self::Request(_) => "request error",
             Self::Execution(_) => "execution error",
             Self::ResponseStatus(_) => "response status error",
+            Self::CheckpointCommit(_) => "checkpoint commit error",
+            Self::CheckpointLookup(_) => "checkpoint lookup error",
+            Self::TransactionAdmission(_) => "transaction admission error",
         }
     }
 }
@@ -56,6 +74,9 @@ impl fmt::Display for AcquisitionError {
             Self::Request(error) => write!(formatter, "{error}"),
             Self::Execution(error) => write!(formatter, "{error}"),
             Self::ResponseStatus(error) => write!(formatter, "{error}"),
+            Self::CheckpointCommit(error) => write!(formatter, "{error}"),
+            Self::CheckpointLookup(error) => write!(formatter, "{error}"),
+            Self::TransactionAdmission(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -66,6 +87,9 @@ impl std::error::Error for AcquisitionError {
             Self::Request(error) => Some(error),
             Self::Execution(error) => Some(error),
             Self::ResponseStatus(error) => Some(error),
+            Self::CheckpointCommit(error) => Some(error),
+            Self::CheckpointLookup(error) => Some(error),
+            Self::TransactionAdmission(error) => Some(error),
             Self::Source { .. } => None,
         }
     }

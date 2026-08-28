@@ -34,10 +34,7 @@ impl HttpLogicalRequestKey {
         if key.as_bytes().len() > MAX_LOGICAL_REQUEST_KEY_BYTES {
             return Err(HttpLogicalRequestKeyError::TooLong);
         }
-        if key
-            .chars()
-            .any(|ch| ch == '/' || ch == '\\' || ch == '\0' || ch.is_control())
-        {
+        if key.chars().any(|ch| ch == '\0' || ch.is_control()) {
             return Err(HttpLogicalRequestKeyError::InvalidCharacter);
         }
         Ok(Self { key: key.to_string() })

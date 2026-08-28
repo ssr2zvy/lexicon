@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,9 +27,9 @@ use super::transaction::metadata::{
     AcquisitionProgressValidationError,
 };
 use super::transaction::{
-    FinalizedRecordedAttempt, HttpAttemptIdentity, HttpRecordedOutcome, HttpRecordedOutcomeKind,
-    ProgressPublishedRecordedAttempt, RecordedAttemptContext, RecordedTransaction,
-    record_transaction_attempt,
+    FinalizedRecordedAttempt, HttpAttemptIdentity, HttpLogicalRequestKey, HttpRecordedOutcome,
+    HttpRecordedOutcomeKind, ProgressPublishedRecordedAttempt, RecordedAttemptContext,
+    RecordedTransaction, record_transaction_attempt,
 };
 use super::transport::{HttpTransport, HttpTransportConfigurationError, ReqwestHttpTransport};
 
@@ -37,6 +38,14 @@ pub struct HttpAcquisitionContext {
     session_identity: Option<crate::session::SessionIdentity>,
     transport: Option<Box<dyn HttpTransport>>,
     transport_init_error: Option<HttpTransportConfigurationError>,
+    transaction_registry: HashMap<String, TransactionRegistryEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct TransactionRegistryEntry {
+    transaction_identity: super::transaction::HttpTransactionIdentity,
+    attempt_identity: HttpAttemptIdentity,
+    transaction_path: PathBuf,
 }
 
 impl HttpAcquisitionContext {
@@ -53,6 +62,7 @@ impl HttpAcquisitionContext {
             session_identity: Some(session_identity),
             transport,
             transport_init_error,
+            transaction_registry: HashMap::new(),
         }
     }
 
@@ -122,10 +132,28 @@ impl HttpAcquisitionContext {
             session_identity: None,
             transport,
             transport_init_error,
+            transaction_registry: HashMap::new(),
         })
     }
 
     pub fn execute(&mut self, request: HttpRequest) -> AcquisitionResult<RecordedTransaction> {
+        let result = self.execute_impl(request);
+        if let Ok(ref tx) = result {
+            if let Some(key) = tx.logical_request_key() {
+                if matches!(tx.response().outcome(), HttpRecordedOutcome::Response) {
+                    let entry = TransactionRegistryEntry {
+                        transaction_identity: tx.identity().clone(),
+                        attempt_identity: *tx.attempt_identity(),
+                        transaction_path: tx.directory().to_path_buf(),
+                    };
+                    self.transaction_registry.insert(key.as_str().to_string(), entry);
+                }
+            }
+        }
+        result
+    }
+
+    fn execute_impl(&mut self, request: HttpRequest) -> AcquisitionResult<RecordedTransaction> {
         self.validate_for_execution()
             .map_err(|e| AcquisitionError::execution(HttpExecutionError::SessionValidation(e)))?;
 
@@ -380,6 +408,512 @@ impl HttpAcquisitionContext {
         }
     }
 
+    pub fn has_checkpoint(
+        &self,
+        key: impl AsRef<str>,
+    ) -> AcquisitionResult<bool> {
+        use crate::protocols::http::checkpoint::error::{
+            HttpCheckpointKeyError, HttpCheckpointLookupError,
+        };
+        use crate::protocols::http::checkpoint::model::{
+            admit_http_checkpoint_from_disk, checkpoint_filename,
+        };
+
+        let session_identity = self
+            .session_identity
+            .as_ref()
+            .ok_or_else(|| AcquisitionError::checkpoint_lookup(HttpCheckpointLookupError::UnmanagedContext))?;
+
+        let logical_key = super::transaction::HttpLogicalRequestKey::new(key.as_ref())
+            .map_err(|e| {
+                AcquisitionError::checkpoint_lookup(HttpCheckpointLookupError::InvalidKey(
+                    HttpCheckpointKeyError::InvalidKey(e),
+                ))
+            })?;
+
+        let record = load_session_record_for_has_checkpoint(
+            self.operation_root(),
+            session_identity,
+        )
+        .map_err(|e| AcquisitionError::checkpoint_lookup(e))?;
+        let project_name = record.project().name().to_string();
+
+        let sessions_dir = self.operation_root().join("sessions");
+        let entries = std::fs::read_dir(&sessions_dir).map_err(|e| {
+            AcquisitionError::checkpoint_lookup(HttpCheckpointLookupError::SessionEnumeration(e))
+        })?;
+
+        let filename = checkpoint_filename(&logical_key);
+
+        for entry_result in entries {
+            let entry = entry_result.map_err(|e| {
+                AcquisitionError::checkpoint_lookup(HttpCheckpointLookupError::SessionEnumeration(e))
+            })?;
+
+            let file_type = entry.file_type().map_err(|e| {
+                AcquisitionError::checkpoint_lookup(HttpCheckpointLookupError::SessionEnumeration(e))
+            })?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let session_dir = entry.path();
+            if let Ok(meta) = std::fs::symlink_metadata(&session_dir) {
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+            }
+
+            let checkpoint_path = session_dir.join("checkpoints").join(&filename);
+            if !checkpoint_path.exists() {
+                continue;
+            }
+
+            let session_id_str = entry.file_name().to_string_lossy().to_string();
+            match admit_http_checkpoint_from_disk(
+                self.operation_root(),
+                self.raw_data_directory(),
+                &checkpoint_path,
+                &project_name,
+                None,
+            ) {
+                Ok(_) => return Ok(true),
+                Err(e) => {
+                    return Err(AcquisitionError::checkpoint_lookup(
+                        HttpCheckpointLookupError::CorruptCandidate {
+                            session_id: session_id_str,
+                            source: Box::new(e),
+                        },
+                    ));
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    pub fn commit_checkpoint(
+        &mut self,
+        key: impl AsRef<str>,
+    ) -> AcquisitionResult<super::checkpoint::CommittedHttpCheckpoint> {
+        use crate::protocols::http::checkpoint::error::{
+            HttpCheckpointCommitError, HttpCheckpointKeyError,
+        };
+        use crate::protocols::http::checkpoint::model::{
+            CommittedHttpCheckpoint, HttpCheckpointDocumentV1, HTTP_CHECKPOINT_SCHEMA_VERSION,
+            admit_http_checkpoint_from_disk, key_sha256_hex, write_checkpoint_atomic,
+        };
+        use crate::session::lease::SessionLeaseState;
+
+        // 1. Require managed context
+        let session_identity = self
+            .session_identity
+            .as_ref()
+            .ok_or_else(|| {
+                AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::UnmanagedContext)
+            })?
+            .clone();
+
+        // 2. Validate the key
+        let logical_key = super::transaction::HttpLogicalRequestKey::new(key.as_ref())
+            .map_err(|e| {
+                AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::InvalidKey(
+                    HttpCheckpointKeyError::InvalidKey(e),
+                ))
+            })?;
+
+        // 3-8: Load and validate session record
+        let record = {
+            let op_root =
+                crate::session::store::SessionOperationRoot::new(self.operation_root().to_path_buf())
+                    .map_err(|_| {
+                        AcquisitionError::checkpoint_commit(
+                            HttpCheckpointCommitError::SessionValidation(
+                                SessionValidationError::StoreOpen,
+                            ),
+                        )
+                    })?;
+            let store = crate::session::store::SessionStore::open(op_root).map_err(|_| {
+                AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::SessionValidation(
+                    SessionValidationError::StoreOpen,
+                ))
+            })?;
+            let rec = store.load(&session_identity).map_err(|e| match e {
+                crate::session::error::SessionStoreError::MissingSession => {
+                    AcquisitionError::checkpoint_commit(
+                        HttpCheckpointCommitError::SessionValidation(
+                            SessionValidationError::MissingSession,
+                        ),
+                    )
+                }
+                _ => AcquisitionError::checkpoint_commit(
+                    HttpCheckpointCommitError::SessionValidation(
+                        SessionValidationError::SessionLoadFailed,
+                    ),
+                ),
+            })?;
+            if rec.state() != crate::session::model::SessionState::Running {
+                return Err(AcquisitionError::checkpoint_commit(
+                    HttpCheckpointCommitError::SessionValidation(
+                        SessionValidationError::SessionNotRunning,
+                    ),
+                ));
+            }
+            if rec.operation() != crate::session::model::SessionOperation::Acquisition {
+                return Err(AcquisitionError::checkpoint_commit(
+                    HttpCheckpointCommitError::SessionValidation(
+                        SessionValidationError::OperationMismatch,
+                    ),
+                ));
+            }
+            if rec.runtime().protocol() != RuntimeProtocol::Http
+                || rec.runtime().operation() != RuntimeOperation::Acquisition
+            {
+                return Err(AcquisitionError::checkpoint_commit(
+                    HttpCheckpointCommitError::SessionValidation(
+                        SessionValidationError::RuntimeMismatch,
+                    ),
+                ));
+            }
+            if rec.session().id() != session_identity.id() {
+                return Err(AcquisitionError::checkpoint_commit(
+                    HttpCheckpointCommitError::SessionValidation(
+                        SessionValidationError::SessionIdentityMismatch,
+                    ),
+                ));
+            }
+            match store.inspect_lease_state(&session_identity) {
+                Ok(SessionLeaseState::Owned) => {}
+                Ok(SessionLeaseState::Available) => {
+                    return Err(AcquisitionError::checkpoint_commit(
+                        HttpCheckpointCommitError::SessionValidation(
+                            SessionValidationError::LeaseUnavailable,
+                        ),
+                    ));
+                }
+                Err(_) => {
+                    return Err(AcquisitionError::checkpoint_commit(
+                        HttpCheckpointCommitError::SessionValidation(
+                            SessionValidationError::LeaseInspectionFailed,
+                        ),
+                    ));
+                }
+            }
+            rec
+        };
+        let project_name = record.project().name().to_string();
+        let session_id = session_identity.id().to_string();
+
+        // 9. Locate the latest returned transaction for key in registry
+        let registry_entry = self
+            .transaction_registry
+            .get(logical_key.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::NoTransactionForKey)
+            })?;
+
+        // 10. Re-admit the transaction from disk
+        let transaction =
+            super::transaction::metadata::admit_transaction_from_disk(
+                self.raw_data_directory(),
+                &registry_entry.transaction_path,
+            )
+            .map_err(|e| {
+                AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::TransactionAdmission(
+                    e,
+                ))
+            })?;
+
+        // 11. Transaction session must match current session
+        let req_meta_path = registry_entry.transaction_path.join("request").join("metadata.json");
+        let req_meta_raw = std::fs::read_to_string(&req_meta_path).map_err(|e| {
+            AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::TransactionAdmission(
+                super::transaction::error::HttpTransactionAdmissionError::RequestMetadataRead(e),
+            ))
+        })?;
+        let req_meta: super::transaction::metadata::RequestMetadataDocument =
+            serde_json::from_str(&req_meta_raw).map_err(|e| {
+                AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::TransactionAdmission(
+                    super::transaction::error::HttpTransactionAdmissionError::RequestMetadataDecode(e),
+                ))
+            })?;
+        if req_meta.session_id != session_id {
+            return Err(AcquisitionError::checkpoint_commit(
+                HttpCheckpointCommitError::TransactionSessionMismatch,
+            ));
+        }
+
+        // 12. Transaction logical key must match checkpoint key
+        match transaction.logical_request_key() {
+            Some(tx_key) if tx_key.as_str() == logical_key.as_str() => {}
+            _ => {
+                return Err(AcquisitionError::checkpoint_commit(
+                    HttpCheckpointCommitError::TransactionKeyMismatch,
+                ));
+            }
+        }
+
+        // 13. Transaction must be an HTTP response
+        if matches!(
+            transaction.response().outcome(),
+            HttpRecordedOutcome::TransportFailure(_)
+        ) {
+            return Err(AcquisitionError::checkpoint_commit(
+                HttpCheckpointCommitError::TransactionNotResponse,
+            ));
+        }
+
+        // 14. Compute checkpoint filename
+        let key_hash = key_sha256_hex(&logical_key);
+        let filename = format!("{}.json", key_hash);
+
+        // 15. Validate checkpoint directory and target path
+        let checkpoints_dir = self.session_directory().join("checkpoints");
+        validate_managed_path(
+            self.protocol_root(),
+            &checkpoints_dir,
+            HttpManagedPathValidationMode::CreatableDirectory,
+        )
+        .map_err(|e| AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::ManagedPath(e)))?;
+        let target_path = checkpoints_dir.join(&filename);
+        validate_managed_path(
+            self.protocol_root(),
+            &target_path,
+            HttpManagedPathValidationMode::CreatableRegularFile,
+        )
+        .map_err(|e| AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::ManagedPath(e)))?;
+
+        // Create checkpoints directory
+        std::fs::create_dir_all(&checkpoints_dir).map_err(|e| {
+            AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::CheckpointDirectoryCreation(e))
+        })?;
+
+        // Idempotency: if target already exists, admit the existing checkpoint
+        if target_path.exists() {
+            let existing =
+                admit_http_checkpoint_from_disk(
+                    self.operation_root(),
+                    self.raw_data_directory(),
+                    &target_path,
+                    &project_name,
+                    Some(&session_id),
+                )
+                .map_err(|e| {
+                    AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::ExistingCorrupt(e))
+                })?;
+
+            let attempt = registry_entry.attempt_identity;
+            if existing.key().as_str() != logical_key.as_str()
+                || existing.key_sha256() != key_hash
+                || existing.session_id() != session_id
+                || existing.transaction_identity() != transaction.identity()
+                || existing.attempt_identity().physical_attempt_index()
+                    != attempt.physical_attempt_index()
+            {
+                return Err(AcquisitionError::checkpoint_commit(
+                    HttpCheckpointCommitError::ExistingIdentityMismatch,
+                ));
+            }
+
+            return Ok(existing);
+        }
+
+        let committed_at_unix_nanos = now_nanos().map_err(|e| {
+            AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::Clock(e))
+        })?;
+
+        let doc = HttpCheckpointDocumentV1 {
+            schema_version: HTTP_CHECKPOINT_SCHEMA_VERSION,
+            key: logical_key.as_str().to_string(),
+            key_sha256: key_hash.clone(),
+            project_name: project_name.clone(),
+            runtime_protocol: RuntimeProtocol::Http.identifier().to_string(),
+            runtime_operation: RuntimeOperation::Acquisition.identifier().to_string(),
+            session_id: session_id.clone(),
+            transaction_id: transaction.identity().id().to_string(),
+            physical_attempt_index: registry_entry.attempt_identity.physical_attempt_index(),
+            redirect_index: registry_entry.attempt_identity.redirect_index(),
+            retry_index: registry_entry.attempt_identity.retry_index(),
+            committed_at_unix_nanos,
+        };
+
+        // Revalidate session and lease immediately before publication (step 16 pre-check)
+        validate_running_acquisition_session(self.operation_root(), &session_identity)
+            .map_err(|e| {
+                AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::SessionValidation(e))
+            })?;
+
+        // 16. Publish atomically (no-replace)
+        write_checkpoint_atomic(&checkpoints_dir, &target_path, &doc)
+            .map_err(|e| AcquisitionError::checkpoint_commit(e))?;
+
+        // 17. Directory durability step
+        if let Err(e) = std::fs::File::open(&checkpoints_dir).and_then(|f| f.sync_all()) {
+            let partial = crate::protocols::http::checkpoint::error::HttpCheckpointPartialCommitError {
+                directory_sync_error: e,
+            };
+            return Err(AcquisitionError::checkpoint_commit(
+                HttpCheckpointCommitError::PartialCommit(Box::new(partial)),
+            ));
+        }
+
+        // 18. Build and return CommittedHttpCheckpoint
+        let attempt_identity = HttpAttemptIdentity::new(
+            registry_entry.attempt_identity.physical_attempt_index(),
+            registry_entry.attempt_identity.redirect_index(),
+            registry_entry.attempt_identity.retry_index(),
+        );
+        Ok(CommittedHttpCheckpoint::new(
+            logical_key,
+            key_hash,
+            session_id,
+            transaction.identity().clone(),
+            attempt_identity,
+            target_path,
+            committed_at_unix_nanos,
+        ))
+    }
+
+    pub fn latest_transaction(
+        &self,
+        key: impl AsRef<str>,
+    ) -> AcquisitionResult<Option<RecordedTransaction>> {
+        use crate::protocols::http::checkpoint::error::{
+            HttpCheckpointKeyError, HttpCheckpointLookupError,
+        };
+        use super::transaction::metadata::admit_transaction_from_disk;
+
+        let logical_key = super::transaction::HttpLogicalRequestKey::new(key.as_ref())
+            .map_err(|e| {
+                AcquisitionError::checkpoint_lookup(HttpCheckpointLookupError::InvalidKey(
+                    HttpCheckpointKeyError::InvalidKey(e),
+                ))
+            })?;
+
+        let raw_root = self.raw_data_directory();
+        let entries = match std::fs::read_dir(raw_root) {
+            Ok(e) => e,
+            Err(_) => return Ok(None),
+        };
+
+        let mut best: Option<(u64, u32, String, RecordedTransaction)> = None;
+
+        for entry_result in entries {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if !ft.is_dir() {
+                continue;
+            }
+
+            let dir_name = entry.file_name();
+            let dir_name_str = match dir_name.to_str() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+
+            if dir_name_str.starts_with(".partial-") {
+                continue;
+            }
+
+            let path = entry.path();
+            let tx = admit_transaction_from_disk(raw_root, &path)
+                .map_err(|e| AcquisitionError::TransactionAdmission(e))?;
+
+            match tx.logical_request_key() {
+                Some(k) if k.as_str() == logical_key.as_str() => {}
+                _ => continue,
+            }
+
+            if matches!(tx.response().outcome(), HttpRecordedOutcome::TransportFailure(_)) {
+                continue;
+            }
+
+            let dir_ts: u64 = dir_name_str
+                .split_once('-')
+                .and_then(|(ts, _)| ts.parse().ok())
+                .unwrap_or(0);
+            let attempt_idx = tx.attempt_identity().physical_attempt_index();
+            let tx_id = tx.identity().id().to_string();
+
+            let is_better = match &best {
+                None => true,
+                Some((best_ts, best_attempt, best_id, _)) => {
+                    if dir_ts != *best_ts {
+                        dir_ts > *best_ts
+                    } else if attempt_idx != *best_attempt {
+                        attempt_idx > *best_attempt
+                    } else {
+                        tx_id > *best_id
+                    }
+                }
+            };
+
+            if is_better {
+                best = Some((dir_ts, attempt_idx, tx_id, tx));
+            }
+        }
+
+        Ok(best.map(|(_, _, _, tx)| tx))
+    }
+
+    pub fn latest_response_header(
+        &self,
+        key: impl AsRef<str>,
+        header_name: impl AsRef<str>,
+    ) -> AcquisitionResult<Option<String>> {
+        use reqwest::header::HeaderName;
+
+        let header_name_str = header_name.as_ref();
+        HeaderName::from_bytes(header_name_str.as_bytes()).map_err(|_| {
+            AcquisitionError::source_message(format!(
+                "invalid HTTP header name: {header_name_str}"
+            ))
+        })?;
+
+        let tx = match self.latest_transaction(key.as_ref())? {
+            Some(tx) => tx,
+            None => return Ok(None),
+        };
+
+        let header_lower = header_name_str.to_ascii_lowercase();
+
+        if matches!(
+            header_lower.as_str(),
+            "set-cookie" | "authorization" | "proxy-authorization" | "cookie"
+        ) {
+            return Ok(None);
+        }
+
+        for header in tx.response().headers().as_slice() {
+            if header.name().to_ascii_lowercase() != header_lower {
+                continue;
+            }
+
+            match header.value() {
+                super::transaction::RecordedHeaderValue::Utf8(text) => {
+                    if text == "<redacted>" {
+                        return Ok(None);
+                    }
+                    return Ok(Some(text.clone()));
+                }
+                super::transaction::RecordedHeaderValue::Base64(_) => {
+                    return Err(AcquisitionError::source_message(
+                        "response header value is non-UTF-8 encoded bytes",
+                    ));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     fn validate_for_execution(&self) -> Result<(), SessionValidationError> {
         if self.session_identity.is_none() {
             return Err(SessionValidationError::UnmanagedContext);
@@ -443,6 +977,28 @@ fn map_session_load_error(error: SessionStoreError) -> SessionValidationError {
         SessionStoreError::MissingSession => SessionValidationError::MissingSession,
         _ => SessionValidationError::SessionLoadFailed,
     }
+}
+
+fn load_session_record_for_has_checkpoint(
+    operation_root: &Path,
+    session: &crate::session::SessionIdentity,
+) -> Result<crate::session::model::SessionRecordV1, crate::protocols::http::checkpoint::error::HttpCheckpointLookupError> {
+    use crate::protocols::http::checkpoint::error::HttpCheckpointLookupError;
+
+    let op_root = crate::session::SessionOperationRoot::new(operation_root.to_path_buf())
+        .map_err(|e| HttpCheckpointLookupError::SessionEnumeration(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            e.to_string(),
+        )))?;
+    let store = SessionStore::open(op_root)
+        .map_err(|e| HttpCheckpointLookupError::SessionEnumeration(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        )))?;
+    store.load(session).map_err(|e| HttpCheckpointLookupError::SessionEnumeration(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        e.to_string(),
+    )))
 }
 
 fn redirect_request_from(
