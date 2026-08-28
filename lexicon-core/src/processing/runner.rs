@@ -511,25 +511,143 @@ pub enum ProcessingRuntimeInvocationExecutionError {
     Transport(RuntimeInvocationTransportDecodingError),
     Admission(ProcessingRuntimeInvocationAdmissionError),
     Session(CoreRunnerSessionError),
-    TransactionDiscovery(crate::processing::ProcessingTransactionDiscoveryError),
-    ContextConstruction(crate::processing::ProcessingContextConstructionError),
-    DatabaseOpen(crate::processing::ProcessingDatabaseOpenError),
-    DatabaseTransaction(crate::processing::ProcessingDatabaseTransactionError),
+    /// An internal processing lifecycle invariant was violated.
+    Lifecycle(crate::processing::ProcessingLifecycleError),
+    /// Setup failed and the terminal failure state was persisted successfully.
+    Setup(crate::processing::ProcessingSetupError),
+    /// Setup failed and terminal persistence also failed; both are retained.
+    SetupAndPersistence(crate::processing::ProcessingSetupAndPersistenceFailure),
     Handler(ProcessingError),
-    HandlerRollbackFailure {
+    /// The handler failed and the Core-owned rollback also failed.
+    HandlerAndRollbackFailure {
         handler_error: ProcessingError,
         rollback_error: crate::processing::ProcessingDatabaseTransactionError,
         terminal_persistence_error: Option<crate::session::SessionStoreError>,
     },
-    TerminalPersistence {
-        handler_error: Option<ProcessingError>,
+    /// The handler failed and terminal session persistence also failed.
+    HandlerAndPersistenceFailure {
+        handler_error: ProcessingError,
         session_error: crate::session::SessionStoreError,
     },
+    /// Terminal session persistence failed with no handler failure involved.
+    TerminalPersistence {
+        session_error: crate::session::SessionStoreError,
+    },
+    /// A database transaction operation failed and the database did not commit.
+    DatabaseTransaction(crate::processing::ProcessingDatabaseTransactionError),
+    /// The database did not commit and terminal failure persistence also failed.
     DatabaseCommitAndPersistenceFailure {
         commit_error: crate::processing::ProcessingDatabaseTransactionError,
         persistence_error: crate::session::SessionStoreError,
     },
-    DatabaseCommittedSessionPersistenceFailed(crate::processing::ProcessingDatabasePartialCommit),
+    /// SQLite could not prove whether the commit became durable.
+    DatabaseCommitOutcomeUncertain(crate::processing::ProcessingDatabaseCommitOutcomeUncertain),
+    /// SQLite committed but the session cannot be reported successful.
+    DatabasePartialCommit(crate::processing::ProcessingDatabasePartialCommit),
+    /// The SQLite sidecar policy was violated; the database did not commit.
+    DatabaseSidecar {
+        handler_error: Option<ProcessingError>,
+        sidecar_error: crate::processing::ProcessingDatabaseSidecarError,
+        terminal_persistence_error: Option<crate::session::SessionStoreError>,
+    },
+}
+
+impl ProcessingRuntimeInvocationExecutionError {
+    /// The retained source handler failure, when this outcome involved one.
+    pub fn handler_error(&self) -> Option<&ProcessingError> {
+        match self {
+            Self::Handler(error)
+            | Self::HandlerAndRollbackFailure {
+                handler_error: error,
+                ..
+            }
+            | Self::HandlerAndPersistenceFailure {
+                handler_error: error,
+                ..
+            } => Some(error),
+            Self::DatabaseSidecar { handler_error, .. } => handler_error.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The retained setup failure, when this outcome involved one.
+    pub fn setup_error(&self) -> Option<&crate::processing::ProcessingSetupError> {
+        match self {
+            Self::Setup(error) => Some(error),
+            Self::SetupAndPersistence(failure) => Some(failure.setup_error()),
+            _ => None,
+        }
+    }
+
+    /// The retained database transaction failure, when this outcome involved one.
+    pub fn database_transaction_error(
+        &self,
+    ) -> Option<&crate::processing::ProcessingDatabaseTransactionError> {
+        match self {
+            Self::DatabaseTransaction(error)
+            | Self::DatabaseCommitAndPersistenceFailure {
+                commit_error: error,
+                ..
+            }
+            | Self::HandlerAndRollbackFailure {
+                rollback_error: error,
+                ..
+            } => Some(error),
+            _ => None,
+        }
+    }
+
+    /// The retained sidecar failure, when this outcome involved one.
+    pub fn sidecar_error(&self) -> Option<&crate::processing::ProcessingDatabaseSidecarError> {
+        match self {
+            Self::DatabaseSidecar { sidecar_error, .. } => Some(sidecar_error),
+            Self::DatabasePartialCommit(partial) => partial.sidecar_error(),
+            _ => None,
+        }
+    }
+
+    /// The retained committed-database outcome, when this outcome involved one.
+    pub fn database_partial_commit(
+        &self,
+    ) -> Option<&crate::processing::ProcessingDatabasePartialCommit> {
+        match self {
+            Self::DatabasePartialCommit(partial) => Some(partial),
+            _ => None,
+        }
+    }
+
+    /// The retained uncertain-commit outcome, when this outcome involved one.
+    pub fn database_commit_outcome_uncertain(
+        &self,
+    ) -> Option<&crate::processing::ProcessingDatabaseCommitOutcomeUncertain> {
+        match self {
+            Self::DatabaseCommitOutcomeUncertain(outcome) => Some(outcome),
+            _ => None,
+        }
+    }
+
+    /// Every retained session-persistence failure, however this outcome arose.
+    pub fn session_persistence_error(&self) -> Option<&crate::session::SessionStoreError> {
+        match self {
+            Self::SetupAndPersistence(failure) => Some(failure.persistence_error()),
+            Self::HandlerAndRollbackFailure {
+                terminal_persistence_error,
+                ..
+            }
+            | Self::DatabaseSidecar {
+                terminal_persistence_error,
+                ..
+            } => terminal_persistence_error.as_ref(),
+            Self::HandlerAndPersistenceFailure { session_error, .. }
+            | Self::TerminalPersistence { session_error } => Some(session_error),
+            Self::DatabaseCommitAndPersistenceFailure {
+                persistence_error, ..
+            } => Some(persistence_error),
+            Self::DatabasePartialCommit(partial) => partial.session_persistence_error(),
+            Self::DatabaseCommitOutcomeUncertain(outcome) => outcome.session_persistence_error(),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ProcessingRuntimeInvocationExecutionError {
@@ -541,31 +659,41 @@ impl fmt::Display for ProcessingRuntimeInvocationExecutionError {
             Self::Admission(_) => {
                 formatter.write_str("processing runtime invocation admission error")
             }
-            Self::Session(_) => formatter.write_str("processing runtime session initialization error"),
-            Self::TransactionDiscovery(_) => {
-                formatter.write_str("processing transaction discovery failed")
+            Self::Session(_) => {
+                formatter.write_str("processing runtime session initialization error")
             }
-            Self::ContextConstruction(_) => {
-                formatter.write_str("processing context construction failed")
+            Self::Lifecycle(_) => {
+                formatter.write_str("processing runtime lifecycle invariant violated")
             }
-            Self::DatabaseOpen(_) => formatter.write_str("processing database open failed"),
-            Self::DatabaseTransaction(_) => formatter.write_str("processing database transaction failed"),
+            Self::Setup(_) => formatter.write_str("processing setup failed"),
+            Self::SetupAndPersistence(_) => formatter.write_str(
+                "processing setup failed and terminal session persistence also failed",
+            ),
             Self::Handler(_) => formatter.write_str("processing handler error"),
-            Self::HandlerRollbackFailure { .. } => formatter.write_str(
+            Self::HandlerAndRollbackFailure { .. } => formatter.write_str(
                 "processing handler error followed by rollback and/or terminal persistence failure",
             ),
-            Self::TerminalPersistence { handler_error: Some(_), .. } => {
-                formatter.write_str("processing handler error; terminal session state persistence also failed")
-            }
-            Self::TerminalPersistence { handler_error: None, .. } => {
+            Self::HandlerAndPersistenceFailure { .. } => formatter.write_str(
+                "processing handler error; terminal session state persistence also failed",
+            ),
+            Self::TerminalPersistence { .. } => {
                 formatter.write_str("terminal session state persistence failed")
+            }
+            Self::DatabaseTransaction(_) => {
+                formatter.write_str("processing database transaction failed")
             }
             Self::DatabaseCommitAndPersistenceFailure { .. } => formatter.write_str(
                 "processing database commit failed and terminal session failure persistence also failed",
             ),
-            Self::DatabaseCommittedSessionPersistenceFailed(_) => formatter.write_str(
-                "processing database commit succeeded but session success persistence failed",
+            Self::DatabaseCommitOutcomeUncertain(_) => {
+                formatter.write_str("processing database commit outcome is uncertain")
+            }
+            Self::DatabasePartialCommit(_) => formatter.write_str(
+                "processing database committed but the session cannot be reported successful",
             ),
+            Self::DatabaseSidecar { .. } => {
+                formatter.write_str("processing database sidecar policy was violated")
+            }
         }
     }
 }
@@ -576,38 +704,148 @@ impl std::error::Error for ProcessingRuntimeInvocationExecutionError {
             Self::Transport(error) => Some(error),
             Self::Admission(error) => Some(error),
             Self::Session(error) => Some(error),
-            Self::TransactionDiscovery(error) => Some(error),
-            Self::ContextConstruction(error) => Some(error),
-            Self::DatabaseOpen(error) => Some(error),
-            Self::DatabaseTransaction(error) => Some(error),
+            Self::Lifecycle(error) => Some(error),
+            Self::Setup(error) => Some(error),
+            Self::SetupAndPersistence(error) => Some(error),
             Self::Handler(error) => Some(error),
-            Self::HandlerRollbackFailure { rollback_error, .. } => Some(rollback_error),
-            Self::TerminalPersistence { session_error, .. } => Some(session_error),
+            Self::HandlerAndRollbackFailure { handler_error, .. }
+            | Self::HandlerAndPersistenceFailure { handler_error, .. } => Some(handler_error),
+            Self::TerminalPersistence { session_error } => Some(session_error),
+            Self::DatabaseTransaction(error) => Some(error),
             Self::DatabaseCommitAndPersistenceFailure { commit_error, .. } => Some(commit_error),
-            Self::DatabaseCommittedSessionPersistenceFailed(error) => Some(error),
+            Self::DatabaseCommitOutcomeUncertain(error) => Some(error),
+            Self::DatabasePartialCommit(error) => Some(error),
+            Self::DatabaseSidecar { sidecar_error, .. } => Some(sidecar_error),
         }
+    }
+}
+
+// --- Running lifecycle ownership ---
+
+/// Owns the proven `Running` processing session for the rest of the invocation.
+///
+/// The running lifecycle is non-optional and is consumed exactly once by whichever
+/// terminal operation applies. Ordinary paths therefore never need `expect`,
+/// `unwrap`, or an internal-state assertion to reach the owner.
+struct RunningProcessingExecution<'store> {
+    running: crate::session::RunningRuntimeSession<'store>,
+    project: crate::session::ProjectIdentity,
+    runtime: crate::runtime::OwnedRuntimeIdentity,
+    session: crate::session::SessionIdentity,
+}
+
+impl<'store> RunningProcessingExecution<'store> {
+    fn new(
+        running: crate::session::RunningRuntimeSession<'store>,
+        project: crate::session::ProjectIdentity,
+        runtime: crate::runtime::OwnedRuntimeIdentity,
+        session: crate::session::SessionIdentity,
+    ) -> Self {
+        Self {
+            running,
+            project,
+            runtime,
+            session,
+        }
+    }
+
+    fn project(&self) -> &crate::session::ProjectIdentity {
+        &self.project
+    }
+
+    fn runtime(&self) -> &crate::runtime::OwnedRuntimeIdentity {
+        &self.runtime
+    }
+
+    fn session(&self) -> &crate::session::SessionIdentity {
+        &self.session
+    }
+
+    /// Record a setup failure, preserving the original typed error even when
+    /// terminal persistence also fails.
+    fn fail_setup(
+        self,
+        setup_error: crate::processing::ProcessingSetupError,
+    ) -> ProcessingRuntimeInvocationExecutionError {
+        let code = setup_error.failure_code();
+        let diagnostic = setup_error.diagnostic().to_string();
+        match self.running.fail_runtime(code, Some(diagnostic)) {
+            Ok(_) => ProcessingRuntimeInvocationExecutionError::Setup(setup_error),
+            Err(persistence_error) => {
+                ProcessingRuntimeInvocationExecutionError::SetupAndPersistence(
+                    crate::processing::ProcessingSetupAndPersistenceFailure::new(
+                        setup_error,
+                        persistence_error,
+                    ),
+                )
+            }
+        }
+    }
+
+    /// Record a Core-authored runtime failure with a stable code and bounded diagnostic.
+    fn fail_runtime(
+        self,
+        code: crate::session::SessionFailureCode,
+        diagnostic: &'static str,
+    ) -> Option<crate::session::SessionStoreError> {
+        self.running
+            .fail_runtime(code, Some(diagnostic.to_string()))
+            .err()
+    }
+
+    /// Record an ordinary source failure. No source-authored text is persisted.
+    fn fail_source(self) -> Option<crate::session::SessionStoreError> {
+        self.running.fail_source().err()
+    }
+
+    /// Record successful completion.
+    fn complete(self) -> Option<crate::session::SessionStoreError> {
+        self.running.complete().err()
     }
 }
 
 /// Run a processing runtime invocation with full session lifecycle.
 ///
-/// Supported order:
-/// 1. Parse invocation argv.
-/// 2. Admit invocation.
-/// 3. Decode runtime context configuration from the environment.
-/// 4. Compare context identities with admitted envelope.
-/// 5. Open session store.
-/// 6. Acquire/confirm session lease.
-/// 7. Transition Prepared → Running.
-/// 8. Construct bound operation context.
-/// 9. Invoke the selected handler.
-/// 10. Persist Succeeded or ordinary Failed.
-/// 11. Return typed result.
+/// Authoritative sequence:
+/// ```text
+/// parse invocation
+/// → admit processing invocation
+/// → decode managed context
+/// → open processing SessionStore
+/// → bind processing session
+/// → enter Running with a non-optional owner
+/// → validate exact raw/acquisition/processed roots
+/// → enumerate raw entries
+/// → strictly admit finalized transactions
+/// → load typed acquisition-session cache
+/// → validate every transaction against its session
+/// → build deterministic catalog
+/// → derive exact database path
+/// → validate main and sidecar paths
+/// → open SQLite with explicit flags
+/// → configure and verify baseline pragmas
+/// → BEGIN IMMEDIATE
+/// → construct fully checked ProcessingContext
+/// → verify transaction is active
+/// → invoke source handler
+/// → verify transaction remains active
+/// → success:  COMMIT, durability, sidecar validation, session Succeeded
+/// → source failure: ROLLBACK, sidecar validation, session Failed
+/// → setup/runtime failure: preserve the primary typed error, persist a stable code
+/// → partial or uncertain commit: preserve database provenance, never report success
+/// ```
 pub fn run_processing_runtime_invocation(
     arguments: &[OsString],
     compiled_identity: RuntimeIdentity,
     source: &ProcessingSourceContractV1,
 ) -> Result<(), ProcessingRuntimeInvocationExecutionError> {
+    use crate::processing::{
+        ProcessingDatabasePartialCommit, ProcessingDatabasePartialCommitCause,
+        ProcessingDatabasePartialCommitPhase, ProcessingDatabaseTransactionError,
+        ProcessingSetupError, ProcessingTransactionBoundaryPhase,
+    };
+    use crate::session::SessionFailureCode;
+
     let parsed = parse_runtime_invocation(arguments)
         .map_err(ProcessingRuntimeInvocationExecutionError::Transport)?;
 
@@ -626,12 +864,14 @@ pub fn run_processing_runtime_invocation(
         ProcessingRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::ContextDecode(e))
     })?;
 
-    let operation_root = SessionOperationRoot::new(
-        context_document.paths.operation_root().to_path_buf(),
-    )
-    .map_err(|e| {
-        ProcessingRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
-    })?;
+    let operation_root =
+        SessionOperationRoot::new(context_document.paths.operation_root().to_path_buf()).map_err(
+            |e| {
+                ProcessingRuntimeInvocationExecutionError::Session(
+                    CoreRunnerSessionError::StoreOpen(e),
+                )
+            },
+        )?;
 
     let store = SessionStore::open(operation_root).map_err(|e| {
         ProcessingRuntimeInvocationExecutionError::Session(CoreRunnerSessionError::StoreOpen(e))
@@ -648,60 +888,52 @@ pub fn run_processing_runtime_invocation(
         )
     })?;
 
-    let data_paths = SessionDataPaths::from_context_paths(&context_document.paths);
-    let mut running = Some(running);
+    // The running lifecycle is owned outright from here on; no ordinary path needs to
+    // reach for it through an `Option`.
+    let execution = RunningProcessingExecution::new(
+        running,
+        context_document.project.clone(),
+        context_document.runtime.clone(),
+        envelope.session().clone(),
+    );
 
-    let discovered_transactions = match super::transactions::discover_http_transactions_for_processing(
-        &context_document.project,
-        &context_document.runtime,
-        context_document.paths.protocol_root(),
-        context_document.paths.raw_data_directory(),
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            if let Some(session_error) = persist_runtime_failure(&mut running) {
-                return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
-                    handler_error: None,
-                    session_error,
-                });
+    let data_paths = SessionDataPaths::from_context_paths(&context_document.paths);
+    let protocol_root = context_document.paths.protocol_root().to_path_buf();
+    let processed_root = context_document
+        .paths
+        .processed_data_directory()
+        .to_path_buf();
+
+    let discovered_transactions =
+        match super::transactions::discover_http_transactions_for_processing(
+            &context_document.project,
+            &context_document.runtime,
+            &protocol_root,
+            context_document.paths.raw_data_directory(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(
+                    execution.fail_setup(ProcessingSetupError::TransactionDiscovery(error))
+                );
             }
-            return Err(ProcessingRuntimeInvocationExecutionError::TransactionDiscovery(error));
-        }
-    };
+        };
 
     let database_path = match derive_processing_database_path(
-        context_document.paths.protocol_root(),
-        context_document.paths.processed_data_directory(),
+        &protocol_root,
+        &processed_root,
         &context_document.runtime,
     ) {
         Ok(value) => value,
         Err(error) => {
-            if let Some(session_error) = persist_runtime_failure(&mut running) {
-                return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
-                    handler_error: None,
-                    session_error,
-                });
-            }
-            return Err(ProcessingRuntimeInvocationExecutionError::DatabaseOpen(
-                crate::processing::ProcessingDatabaseOpenError::Path(error),
-            ));
+            return Err(execution.fail_setup(ProcessingSetupError::DatabasePath(error)));
         }
     };
 
-    let database = match open_processing_database(
-        context_document.paths.protocol_root(),
-        context_document.paths.processed_data_directory(),
-        &database_path,
-    ) {
+    let database = match open_processing_database(&protocol_root, &processed_root, &database_path) {
         Ok(value) => value,
         Err(error) => {
-            if let Some(session_error) = persist_runtime_failure(&mut running) {
-                return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
-                    handler_error: None,
-                    session_error,
-                });
-            }
-            return Err(ProcessingRuntimeInvocationExecutionError::DatabaseOpen(error));
+            return Err(execution.fail_setup(ProcessingSetupError::DatabaseOpen(error)));
         }
     };
 
@@ -716,116 +948,265 @@ pub fn run_processing_runtime_invocation(
     ) {
         Ok(value) => value,
         Err(error) => {
-            if let Some(session_error) = persist_runtime_failure(&mut running) {
-                return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
-                    handler_error: None,
-                    session_error,
-                });
-            }
-            return Err(ProcessingRuntimeInvocationExecutionError::ContextConstruction(error));
+            return Err(execution.fail_setup(ProcessingSetupError::ContextConstruction(error)));
         }
     };
+
+    // The Core-owned transaction must be active before source code runs.
+    if let Err(violation) =
+        context.require_transaction_active(ProcessingTransactionBoundaryPhase::BeforeHandler)
+    {
+        context.mark_transaction_ended_outside_core();
+        drop(context);
+        return Err(execution.fail_setup(ProcessingSetupError::TransactionBoundary(violation)));
+    }
 
     // Invoke the selected handler.
     let handler_result = match handler {
         AdmittedProcessingHandler::Process(f) => f(&mut context, &source_arguments),
     };
 
+    // The source may have ended the Core-owned transaction. Detect that before any
+    // commit or rollback decision, and never report success afterwards.
+    if let Err(violation) =
+        context.require_transaction_active(ProcessingTransactionBoundaryPhase::AfterHandler)
+    {
+        context.mark_transaction_ended_outside_core();
+        drop(context);
+
+        if violation.possible_database_partial_commit() {
+            let partial = ProcessingDatabasePartialCommit::new(
+                execution.project().clone(),
+                execution.runtime().clone(),
+                execution.session().clone(),
+                database_path.clone(),
+                ProcessingDatabasePartialCommitPhase::SourceTransactionBoundaryLoss,
+                ProcessingDatabasePartialCommitCause::TransactionBoundary(violation),
+            );
+            let persistence = execution.fail_runtime(
+                SessionFailureCode::ProcessingDatabaseTransactionFailed,
+                "processing source ended the Core-owned database transaction",
+            );
+            let partial = match persistence {
+                Some(error) => partial.with_session_persistence_error(error),
+                None => partial,
+            };
+            return Err(ProcessingRuntimeInvocationExecutionError::DatabasePartialCommit(
+                partial,
+            ));
+        }
+
+        return Err(execution.fail_setup(ProcessingSetupError::TransactionBoundary(violation)));
+    }
+
     match handler_result {
         Ok(()) => {
-            context.commit_database().map_err(|error| {
-                let persistence_error = running
-                    .take()
-                    .expect("running lifecycle must exist")
-                    .fail_runtime(
-                        crate::session::SessionFailureCode::RuntimeInitializationFailed,
-                        Some("processing database commit failed".to_string()),
-                    );
-                if let Err(persistence_error) = persistence_error {
-                    ProcessingRuntimeInvocationExecutionError::DatabaseCommitAndPersistenceFailure {
-                        commit_error: error,
-                        persistence_error,
+            match context.commit_database() {
+                Ok(()) => {}
+                Err(ProcessingDatabaseTransactionError::Commit(sqlite_error)) => {
+                    // SQLite does not always prove that a failed COMMIT left no durable
+                    // changes. If the transaction is still active, nothing committed. If
+                    // it is gone, the outcome is genuinely uncertain.
+                    let still_active = context.database_transaction_active();
+                    if !still_active {
+                        context.mark_transaction_ended_outside_core();
                     }
-                } else {
-                    ProcessingRuntimeInvocationExecutionError::DatabaseTransaction(error)
-                }
-            })?;
+                    drop(context);
 
-            let persisted_running = running.take().expect("running lifecycle must exist");
-            persisted_running.complete().map_err(|session_error| {
-                ProcessingRuntimeInvocationExecutionError::DatabaseCommittedSessionPersistenceFailed(
-                    crate::processing::ProcessingDatabasePartialCommit::new(
-                        context.project().clone(),
-                        context.runtime().clone(),
-                        context.session_identity().clone(),
-                        context.database_path().to_path_buf(),
-                        session_error,
+                    if still_active {
+                        let commit_error =
+                            ProcessingDatabaseTransactionError::Commit(sqlite_error);
+                        return Err(match execution.fail_runtime(
+                            SessionFailureCode::ProcessingDatabaseTransactionFailed,
+                            "processing database commit failed",
+                        ) {
+                            Some(persistence_error) => {
+                                ProcessingRuntimeInvocationExecutionError::DatabaseCommitAndPersistenceFailure {
+                                    commit_error,
+                                    persistence_error,
+                                }
+                            }
+                            None => ProcessingRuntimeInvocationExecutionError::DatabaseTransaction(
+                                commit_error,
+                            ),
+                        });
+                    }
+
+                    let uncertain =
+                        crate::processing::ProcessingDatabaseCommitOutcomeUncertain::new(
+                            execution.project().clone(),
+                            execution.runtime().clone(),
+                            execution.session().clone(),
+                            database_path.clone(),
+                            sqlite_error,
+                        );
+                    let persistence = execution.fail_runtime(
+                        SessionFailureCode::ProcessingDatabaseTransactionFailed,
+                        "processing database commit outcome is uncertain",
+                    );
+                    let uncertain = match persistence {
+                        Some(error) => uncertain.with_session_persistence_error(error),
+                        None => uncertain,
+                    };
+                    return Err(
+                        ProcessingRuntimeInvocationExecutionError::DatabaseCommitOutcomeUncertain(
+                            uncertain,
+                        ),
+                    );
+                }
+                Err(state_error) => {
+                    drop(context);
+                    return Err(match execution.fail_runtime(
+                        SessionFailureCode::ProcessingDatabaseTransactionFailed,
+                        "processing database transaction state is invalid",
+                    ) {
+                        Some(persistence_error) => {
+                            ProcessingRuntimeInvocationExecutionError::DatabaseCommitAndPersistenceFailure {
+                                commit_error: state_error,
+                                persistence_error,
+                            }
+                        }
+                        None => ProcessingRuntimeInvocationExecutionError::DatabaseTransaction(
+                            state_error,
+                        ),
+                    });
+                }
+            }
+
+            // Close the connection before durability and sidecar validation so the
+            // rollback journal is released and the checks observe the final state.
+            drop(context);
+
+            // The database is committed from here on. Core never claims a rollback.
+            if let Err(durability_error) =
+                finalize_database_durability(&processed_root, &database_path)
+            {
+                let partial = ProcessingDatabasePartialCommit::new(
+                    execution.project().clone(),
+                    execution.runtime().clone(),
+                    execution.session().clone(),
+                    database_path.clone(),
+                    ProcessingDatabasePartialCommitPhase::PostCommitDurability,
+                    ProcessingDatabasePartialCommitCause::Durability(durability_error),
+                );
+                let persistence = execution.fail_runtime(
+                    SessionFailureCode::ProcessingDatabaseTransactionFailed,
+                    "processing database durability failed after commit",
+                );
+                let partial = match persistence {
+                    Some(error) => partial.with_session_persistence_error(error),
+                    None => partial,
+                };
+                return Err(
+                    ProcessingRuntimeInvocationExecutionError::DatabasePartialCommit(partial),
+                );
+            }
+
+            if let Err(sidecar_error) =
+                validate_database_sidecars(&database_path, SidecarValidationPhase::AfterTransaction)
+            {
+                let partial = ProcessingDatabasePartialCommit::new(
+                    execution.project().clone(),
+                    execution.runtime().clone(),
+                    execution.session().clone(),
+                    database_path.clone(),
+                    ProcessingDatabasePartialCommitPhase::PostCommitSidecarValidation,
+                    ProcessingDatabasePartialCommitCause::Sidecar(sidecar_error),
+                );
+                let persistence = execution.fail_runtime(
+                    SessionFailureCode::ProcessingDatabaseTransactionFailed,
+                    "processing database sidecar validation failed after commit",
+                );
+                let partial = match persistence {
+                    Some(error) => partial.with_session_persistence_error(error),
+                    None => partial,
+                };
+                return Err(
+                    ProcessingRuntimeInvocationExecutionError::DatabasePartialCommit(partial),
+                );
+            }
+
+            // Only now is the session allowed to become Succeeded.
+            let project = execution.project().clone();
+            let runtime = execution.runtime().clone();
+            let session = execution.session().clone();
+            match execution.complete() {
+                None => Ok(()),
+                Some(session_error) => Err(
+                    ProcessingRuntimeInvocationExecutionError::DatabasePartialCommit(
+                        ProcessingDatabasePartialCommit::new(
+                            project,
+                            runtime,
+                            session,
+                            database_path,
+                            ProcessingDatabasePartialCommitPhase::SessionCompletionPersistence,
+                            ProcessingDatabasePartialCommitCause::SessionPersistence(session_error),
+                        ),
                     ),
-                )
-            })?;
-            Ok(())
+                ),
+            }
         }
         Err(processing_error) => {
-            if let Err(rollback_error) = context.rollback_database() {
-                let persistence_error = running
-                    .take()
-                    .expect("running lifecycle must exist")
-                    .fail_source()
-                    .err();
-                return Err(ProcessingRuntimeInvocationExecutionError::HandlerRollbackFailure {
-                    handler_error: processing_error,
-                    rollback_error,
-                    terminal_persistence_error: persistence_error,
-                });
+            let rollback_result = context.rollback_database();
+            drop(context);
+
+            if let Err(rollback_error) = rollback_result {
+                let terminal_persistence_error = execution.fail_source();
+                return Err(
+                    ProcessingRuntimeInvocationExecutionError::HandlerAndRollbackFailure {
+                        handler_error: processing_error,
+                        rollback_error,
+                        terminal_persistence_error,
+                    },
+                );
             }
 
-            if let Err(persist_error) = running
-                .take()
-                .expect("running lifecycle must exist")
-                .fail_source()
+            if let Err(sidecar_error) =
+                validate_database_sidecars(&database_path, SidecarValidationPhase::AfterTransaction)
             {
-                return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
+                let terminal_persistence_error = execution.fail_source();
+                return Err(ProcessingRuntimeInvocationExecutionError::DatabaseSidecar {
                     handler_error: Some(processing_error),
-                    session_error: persist_error,
+                    sidecar_error,
+                    terminal_persistence_error,
                 });
             }
 
-            Err(ProcessingRuntimeInvocationExecutionError::Handler(processing_error))
+            match execution.fail_source() {
+                Some(session_error) => Err(
+                    ProcessingRuntimeInvocationExecutionError::HandlerAndPersistenceFailure {
+                        handler_error: processing_error,
+                        session_error,
+                    },
+                ),
+                None => Err(ProcessingRuntimeInvocationExecutionError::Handler(
+                    processing_error,
+                )),
+            }
         }
     }
 }
 
-fn persist_runtime_failure(
-    running: &mut Option<crate::session::RunningRuntimeSession<'_>>,
-) -> Option<crate::session::SessionStoreError> {
-    if let Some(lifecycle) = running.take() {
-        return lifecycle
-            .fail_runtime(
-            crate::session::SessionFailureCode::RuntimeInitializationFailed,
-            Some("processing runtime setup failed".to_string()),
-        )
-            .err();
-    }
-    None
-}
-
+/// Derive and admit the canonical processing database path.
+///
+/// Requires `processed_root == protocol_root/data/processed` and
+/// `database_path == processed_root/<runtime-source>.sqlite3`.
 fn derive_processing_database_path(
     protocol_root: &std::path::Path,
     processed_root: &std::path::Path,
     runtime: &crate::runtime::OwnedRuntimeIdentity,
 ) -> Result<std::path::PathBuf, crate::processing::ProcessingDatabasePathError> {
+    use crate::processing::ProcessingDatabasePathError;
     use crate::protocols::http::transaction::error::{
         HttpManagedPathValidationMode, validate_managed_path,
     };
 
     let expected_processed_root = protocol_root.join("data").join("processed");
     if processed_root != expected_processed_root {
-        return Err(crate::processing::ProcessingDatabasePathError::ManagedPath(
-            crate::protocols::http::transaction::error::HttpManagedPathError::PathOutsideTrustedRoot {
-                trusted_root: expected_processed_root,
-                target_path: processed_root.to_path_buf(),
-            },
-        ));
+        return Err(ProcessingDatabasePathError::ProcessedRootDisagreement {
+            expected: expected_processed_root,
+            actual: processed_root.to_path_buf(),
+        });
     }
 
     validate_managed_path(
@@ -833,31 +1214,47 @@ fn derive_processing_database_path(
         protocol_root,
         HttpManagedPathValidationMode::ExistingDirectory,
     )
-    .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)?;
+    .map_err(ProcessingDatabasePathError::ManagedPath)?;
     validate_managed_path(
         protocol_root,
         processed_root,
         HttpManagedPathValidationMode::ExistingDirectory,
     )
-    .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)?;
+    .map_err(ProcessingDatabasePathError::ManagedPath)?;
 
-    let database_path = processed_root.join(format!("{}.sqlite3", runtime.source_name()));
-    let mode = if database_path.exists() {
-        HttpManagedPathValidationMode::ExistingRegularFile
-    } else {
-        HttpManagedPathValidationMode::CreatableRegularFile
-    };
-    validate_managed_path(protocol_root, &database_path, mode)
-        .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)?;
+    let database_path =
+        crate::processing::context::processing_database_path(processed_root, runtime);
+    if database_path.parent() != Some(processed_root) {
+        return Err(ProcessingDatabasePathError::DatabaseNameDisagreement {
+            expected: processed_root
+                .join(crate::processing::context::processing_database_file_name(runtime)),
+            actual: database_path,
+        });
+    }
+
+    validate_managed_path(
+        protocol_root,
+        &database_path,
+        existing_or_creatable_regular_file(&database_path),
+    )
+    .map_err(ProcessingDatabasePathError::ManagedPath)?;
+
+    validate_database_sidecars(&database_path, SidecarValidationPhase::BeforeOpen)
+        .map_err(ProcessingDatabasePathError::Sidecar)?;
 
     Ok(database_path)
 }
 
+/// Open the processing database with explicit flags and a verified baseline.
+///
+/// URI filename interpretation is deliberately not enabled, so an alternate filename
+/// can never be embedded in the managed path.
 fn open_processing_database(
     protocol_root: &std::path::Path,
     processed_root: &std::path::Path,
     database_path: &std::path::Path,
 ) -> Result<rusqlite::Connection, crate::processing::ProcessingDatabaseOpenError> {
+    use crate::processing::{ProcessingDatabaseOpenError, ProcessingDatabasePathError};
     use crate::protocols::http::transaction::error::{
         HttpManagedPathValidationMode, validate_managed_path,
     };
@@ -867,36 +1264,228 @@ fn open_processing_database(
         processed_root,
         HttpManagedPathValidationMode::ExistingDirectory,
     )
-    .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)
-    .map_err(crate::processing::ProcessingDatabaseOpenError::Path)?;
+    .map_err(ProcessingDatabasePathError::ManagedPath)
+    .map_err(ProcessingDatabaseOpenError::Path)?;
 
-    let mode = if database_path.exists() {
-        HttpManagedPathValidationMode::ExistingRegularFile
-    } else {
-        HttpManagedPathValidationMode::CreatableRegularFile
-    };
-    validate_managed_path(protocol_root, database_path, mode)
-        .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)
-        .map_err(crate::processing::ProcessingDatabaseOpenError::Path)?;
+    let database_existed = database_path.exists();
+    validate_managed_path(
+        protocol_root,
+        database_path,
+        existing_or_creatable_regular_file(database_path),
+    )
+    .map_err(ProcessingDatabasePathError::ManagedPath)
+    .map_err(ProcessingDatabaseOpenError::Path)?;
 
-    let connection = rusqlite::Connection::open(database_path)
-        .map_err(crate::processing::ProcessingDatabaseOpenError::ConnectionOpen)?;
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+        | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let connection = rusqlite::Connection::open_with_flags(database_path, flags)
+        .map_err(ProcessingDatabaseOpenError::ConnectionOpen)?;
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(crate::processing::ProcessingDatabaseOpenError::BusyTimeoutConfiguration)?;
-    connection
-        .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE; BEGIN IMMEDIATE;")
-        .map_err(crate::processing::ProcessingDatabaseOpenError::BaselineConfiguration)?;
+        .map_err(ProcessingDatabaseOpenError::BusyTimeoutConfiguration)?;
 
+    // Baseline configuration must be applied before the transaction begins, because
+    // SQLite refuses journal-mode changes inside an active transaction.
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE;")
+        .map_err(ProcessingDatabaseOpenError::BaselineConfiguration)?;
+    verify_persistent_baseline_configuration(&connection)
+        .map_err(ProcessingDatabaseOpenError::Configuration)?;
+
+    connection
+        .execute_batch("BEGIN IMMEDIATE;")
+        .map_err(ProcessingDatabaseOpenError::BaselineConfiguration)?;
+    verify_transaction_active(&connection).map_err(ProcessingDatabaseOpenError::Configuration)?;
+
+    // The database file now certainly exists; re-validate and make its directory entry
+    // durable when this invocation created it.
     validate_managed_path(
         protocol_root,
         database_path,
         HttpManagedPathValidationMode::ExistingRegularFile,
     )
-    .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)
-    .map_err(crate::processing::ProcessingDatabaseOpenError::Path)?;
+    .map_err(ProcessingDatabasePathError::ManagedPath)
+    .map_err(ProcessingDatabaseOpenError::Path)?;
+
+    if !database_existed {
+        initialize_database_durability(processed_root, database_path)
+            .map_err(ProcessingDatabaseOpenError::Durability)?;
+    }
 
     Ok(connection)
+}
+
+fn existing_or_creatable_regular_file(
+    path: &std::path::Path,
+) -> crate::protocols::http::transaction::error::HttpManagedPathValidationMode {
+    use crate::protocols::http::transaction::error::HttpManagedPathValidationMode;
+    if path.exists() {
+        HttpManagedPathValidationMode::ExistingRegularFile
+    } else {
+        HttpManagedPathValidationMode::CreatableRegularFile
+    }
+}
+
+/// Read back and verify the persistent SQLite settings the supported route requires.
+///
+/// SQLite may ignore a pragma or apply a different effective value, so the effective
+/// configuration is verified rather than assumed.
+fn verify_persistent_baseline_configuration(
+    connection: &rusqlite::Connection,
+) -> Result<(), crate::processing::ProcessingDatabaseConfigurationError> {
+    use crate::processing::{ProcessingDatabaseConfigurationError, ProcessingDatabaseSetting};
+
+    let foreign_keys: i64 = connection
+        .query_row("PRAGMA foreign_keys;", [], |row| row.get(0))
+        .map_err(|source| ProcessingDatabaseConfigurationError::Readback {
+            setting: ProcessingDatabaseSetting::ForeignKeys,
+            source,
+        })?;
+    if foreign_keys != 1 {
+        return Err(ProcessingDatabaseConfigurationError::Disagreement {
+            setting: ProcessingDatabaseSetting::ForeignKeys,
+            expected: "1",
+            actual: foreign_keys.to_string(),
+        });
+    }
+
+    // WAL stays disabled: the supported route requires DELETE journaling.
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+        .map_err(|source| ProcessingDatabaseConfigurationError::Readback {
+            setting: ProcessingDatabaseSetting::JournalMode,
+            source,
+        })?;
+    if !journal_mode.eq_ignore_ascii_case("delete") {
+        return Err(ProcessingDatabaseConfigurationError::Disagreement {
+            setting: ProcessingDatabaseSetting::JournalMode,
+            expected: "delete",
+            actual: journal_mode,
+        });
+    }
+
+    Ok(())
+}
+
+/// Verify that `BEGIN IMMEDIATE` actually left a transaction open.
+fn verify_transaction_active(
+    connection: &rusqlite::Connection,
+) -> Result<(), crate::processing::ProcessingDatabaseConfigurationError> {
+    use crate::processing::{ProcessingDatabaseConfigurationError, ProcessingDatabaseSetting};
+
+    if connection.is_autocommit() {
+        return Err(ProcessingDatabaseConfigurationError::Disagreement {
+            setting: ProcessingDatabaseSetting::TransactionActive,
+            expected: "active",
+            actual: "autocommit".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Make a newly created database file and its parent directory entry durable.
+fn initialize_database_durability(
+    processed_root: &std::path::Path,
+    database_path: &std::path::Path,
+) -> Result<(), crate::processing::ProcessingDatabaseDurabilityError> {
+    finalize_database_durability(processed_root, database_path)
+}
+
+/// Make the database file and the processed-data directory durable.
+///
+/// Uses the shared cross-platform Core durability boundary.
+fn finalize_database_durability(
+    processed_root: &std::path::Path,
+    database_path: &std::path::Path,
+) -> Result<(), crate::processing::ProcessingDatabaseDurabilityError> {
+    use crate::processing::{ProcessingDatabaseDurabilityError, ProcessingDurabilityPhase};
+    use crate::protocols::http::transaction::recorder::{sync_directory, sync_regular_file};
+
+    sync_regular_file(database_path).map_err(|source| ProcessingDatabaseDurabilityError::Sync {
+        phase: ProcessingDurabilityPhase::DatabaseFileSync,
+        path: database_path.to_path_buf(),
+        source,
+    })?;
+    sync_directory(processed_root).map_err(|source| ProcessingDatabaseDurabilityError::Sync {
+        phase: ProcessingDurabilityPhase::ProcessedDirectorySync,
+        path: processed_root.to_path_buf(),
+        source,
+    })?;
+    Ok(())
+}
+
+/// When the SQLite sidecar policy is evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidecarValidationPhase {
+    /// Before the database is opened.
+    BeforeOpen,
+    /// After the Core-owned transaction has finished and the connection is closed.
+    AfterTransaction,
+}
+
+/// Enforce the allowed SQLite sidecar policy beside the canonical database.
+///
+/// Only the transient DELETE-mode rollback journal is ever permitted, and only while a
+/// transaction is in flight. Symlinks, wrong file types, and `-wal`/`-shm` files are
+/// rejected. Nothing is ever deleted: an unexpected user file whose name resembles a
+/// SQLite sidecar is reported, not removed.
+fn validate_database_sidecars(
+    database_path: &std::path::Path,
+    phase: SidecarValidationPhase,
+) -> Result<(), crate::processing::ProcessingDatabaseSidecarError> {
+    use crate::processing::{ProcessingDatabaseSidecarError, ProcessingDatabaseSidecarKind};
+
+    for kind in [
+        ProcessingDatabaseSidecarKind::RollbackJournal,
+        ProcessingDatabaseSidecarKind::WriteAheadLog,
+        ProcessingDatabaseSidecarKind::SharedMemory,
+    ] {
+        let path = sidecar_path(database_path, kind);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(ProcessingDatabaseSidecarError::Inspection { kind, path, source });
+            }
+        };
+
+        if metadata.file_type().is_symlink() {
+            return Err(ProcessingDatabaseSidecarError::Symlink { kind, path });
+        }
+        if !metadata.is_file() {
+            return Err(ProcessingDatabaseSidecarError::WrongFileType { kind, path });
+        }
+
+        match kind {
+            ProcessingDatabaseSidecarKind::WriteAheadLog
+            | ProcessingDatabaseSidecarKind::SharedMemory => {
+                return Err(ProcessingDatabaseSidecarError::ForbiddenSidecarPresent { kind, path });
+            }
+            ProcessingDatabaseSidecarKind::RollbackJournal => match phase {
+                // A journal left by an interrupted writer is legitimate; SQLite recovers
+                // it when the database is opened.
+                SidecarValidationPhase::BeforeOpen => {}
+                SidecarValidationPhase::AfterTransaction => {
+                    return Err(ProcessingDatabaseSidecarError::RollbackJournalNotCleanedUp {
+                        path,
+                    });
+                }
+            },
+        }
+    }
+
+    Ok(())
+}
+
+/// Derive the SQLite sidecar path for the canonical database file.
+fn sidecar_path(
+    database_path: &std::path::Path,
+    kind: crate::processing::ProcessingDatabaseSidecarKind,
+) -> std::path::PathBuf {
+    let mut name = database_path.as_os_str().to_os_string();
+    name.push(kind.suffix());
+    std::path::PathBuf::from(name)
 }
 
 #[cfg(test)]
@@ -1355,7 +1944,7 @@ mod execution_tests {
     #[test]
     fn processing_failure_returns_handler_error() {
         fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
-            Err(ProcessingError)
+            Err(ProcessingError::source_message("test source failure"))
         }
         let args = encode(&example_envelope(), &[]);
         let err = run_processing_runtime_invocation(
@@ -1378,7 +1967,7 @@ mod execution_tests {
         }
         fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
             COUNT.with(|c| *c.borrow_mut() += 1);
-            Err(ProcessingError)
+            Err(ProcessingError::source_message("test source failure"))
         }
         let args = encode(&example_envelope(), &[]);
         let _ = run_processing_runtime_invocation(

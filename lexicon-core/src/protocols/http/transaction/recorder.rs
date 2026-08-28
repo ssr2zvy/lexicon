@@ -29,6 +29,77 @@ use crate::protocols::http::transport::{HttpLocationHeader, HttpTransport};
 
 const MAX_STAGING_IDENTITY_ATTEMPTS: usize = 8;
 
+/// Prefix used by the recorder for in-progress (staging) transaction directories.
+///
+/// This module owns the staging-name grammar. Every other Core component that has
+/// to recognize a staging directory must use
+/// [`classify_staging_transaction_directory_name`] rather than re-deriving the rule.
+pub(crate) const PARTIAL_TRANSACTION_DIRECTORY_PREFIX: &str = ".partial-";
+
+/// Build the Core-authored staging directory name for a transaction attempt.
+pub(crate) fn staging_transaction_directory_name(timestamp: u64, transaction_id: &str) -> String {
+    format!("{PARTIAL_TRANSACTION_DIRECTORY_PREFIX}{timestamp}-{transaction_id}")
+}
+
+/// Build the Core-authored finalized directory name for a transaction attempt.
+pub(crate) fn finalized_transaction_directory_name(timestamp: u64, transaction_id: &str) -> String {
+    format!("{timestamp}-{transaction_id}")
+}
+
+/// Classification of a raw-root directory name against the staging grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StagingDirectoryNameClass<'a> {
+    /// The name does not use the Core staging prefix at all.
+    NotStaging,
+    /// The name is exactly a Core-authored staging directory name.
+    Valid {
+        timestamp: u64,
+        transaction_id: &'a str,
+    },
+    /// The name uses the Core staging prefix but violates the recorder grammar.
+    Malformed,
+}
+
+/// Classify a raw-root directory name against the exact recorder staging grammar.
+///
+/// The grammar is `.partial-<timestamp>-<transaction-id>` where `<timestamp>` is a
+/// nonzero ASCII-decimal `u64` and `<transaction-id>` is a valid HTTP transaction
+/// identity. Anything that carries the prefix but violates the grammar is reported
+/// as [`StagingDirectoryNameClass::Malformed`] so callers can reject it instead of
+/// silently ignoring an arbitrary directory.
+pub(crate) fn classify_staging_transaction_directory_name(
+    name: &str,
+) -> StagingDirectoryNameClass<'_> {
+    let Some(remainder) = name.strip_prefix(PARTIAL_TRANSACTION_DIRECTORY_PREFIX) else {
+        return StagingDirectoryNameClass::NotStaging;
+    };
+
+    let Some((timestamp, transaction_id)) = remainder.split_once('-') else {
+        return StagingDirectoryNameClass::Malformed;
+    };
+
+    if timestamp.is_empty() || !timestamp.bytes().all(|byte| byte.is_ascii_digit()) {
+        return StagingDirectoryNameClass::Malformed;
+    }
+
+    let Ok(parsed_timestamp) = timestamp.parse::<u64>() else {
+        return StagingDirectoryNameClass::Malformed;
+    };
+
+    if parsed_timestamp == 0 {
+        return StagingDirectoryNameClass::Malformed;
+    }
+
+    if HttpTransactionIdentity::from_validated(transaction_id).is_err() {
+        return StagingDirectoryNameClass::Malformed;
+    }
+
+    StagingDirectoryNameClass::Valid {
+        timestamp: parsed_timestamp,
+        transaction_id,
+    }
+}
+
 pub(crate) struct RecordedAttemptContext {
     pub(crate) session_id: String,
     pub(crate) raw_data_root: PathBuf,
@@ -56,10 +127,10 @@ pub(crate) fn record_transaction_attempt(
         })?;
         let staging_dir = attempt
             .raw_data_root
-            .join(format!(".partial-{}-{}", timestamp, identity.id()));
+            .join(staging_transaction_directory_name(timestamp, identity.id()));
         let final_dir = attempt
             .raw_data_root
-            .join(format!("{}-{}", timestamp, identity.id()));
+            .join(finalized_transaction_directory_name(timestamp, identity.id()));
 
         validate_managed_path(
             &attempt.raw_data_root,
@@ -649,18 +720,26 @@ fn sync_published_parent(path: &Path) -> Result<(), std::io::Error> {
     sync_directory(path)
 }
 
+/// Durably synchronize an existing regular file.
+///
+/// This is the shared Core durability boundary for managed regular files; callers
+/// outside the recorder must use it instead of re-implementing per-platform syncing.
+pub(crate) fn sync_regular_file(path: &Path) -> Result<(), std::io::Error> {
+    OpenOptions::new().read(true).write(true).open(path)?.sync_all()
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
     File::open(path)?.sync_all()
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
     File::open(path)?.sync_all()
 }
 
 #[cfg(target_os = "windows")]
-fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{

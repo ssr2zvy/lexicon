@@ -1838,6 +1838,7 @@ fn format_processing_implementation_library(source_name: &str) -> String {
     out.push_str("use std::ffi::OsString;\n");
     out.push_str("use lexicon_core::processing::{\n");
     out.push_str("    ProcessingContext,\n");
+    out.push_str("    ProcessingError,\n");
     out.push_str("    ProcessingResult,\n");
     out.push_str("    ProcessingSourceContractV1,\n");
     out.push_str("};\n\n");
@@ -1847,15 +1848,21 @@ fn format_processing_implementation_library(source_name: &str) -> String {
     out.push_str("    context: &mut ProcessingContext,\n");
     out.push_str("    arguments: &[OsString],\n");
     out.push_str(") -> ProcessingResult<()> {\n");
-    out.push_str("    let _ = arguments;\n");
-    out.push_str("    for transaction in context.transactions().iter() {\n");
-    out.push_str("        let _ = transaction.transaction();\n");
-    out.push_str("        // Inspect admitted metadata and recorded body paths.\n");
-    out.push_str("    }\n");
-    out.push_str("    let database = context.database();\n");
-    out.push_str("    let _ = database;\n");
-    out.push_str("    // Source owns schema and SQL.\n");
-    out.push_str("    Ok(())\n");
+    out.push_str("    let _ = (context, arguments);\n\n");
+    out.push_str("    // Borrow the admitted transaction catalog and the database together:\n");
+    out.push_str("    //\n");
+    out.push_str("    // let (transactions, database) = context.resources();\n");
+    out.push_str("    // for transaction in transactions.iter() {\n");
+    out.push_str("    //     let _ = transaction.transaction();\n");
+    out.push_str("    //     // Parse recorded bodies, then insert or update rows.\n");
+    out.push_str("    //     // database.execute(/* source-owned SQL */)?;\n");
+    out.push_str("    // }\n");
+    out.push_str("    //\n");
+    out.push_str("    // The source owns the schema and all SQL. Return Ok(()) once this\n");
+    out.push_str("    // implementation actually processes the admitted transactions.\n\n");
+    out.push_str("    Err(ProcessingError::source_message(\n");
+    out.push_str("        \"processing implementation is not configured\",\n");
+    out.push_str("    ))\n");
     out.push_str("}\n");
     out
 }

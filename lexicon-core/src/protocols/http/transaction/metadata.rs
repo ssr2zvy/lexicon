@@ -544,7 +544,7 @@ pub(crate) fn admit_transaction_from_disk(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or(HttpTransactionAdmissionError::TransactionDirectoryNameInvalid)?;
-    if dir_name.starts_with(".partial-") {
+    if dir_name.starts_with(super::recorder::PARTIAL_TRANSACTION_DIRECTORY_PREFIX) {
         return Err(HttpTransactionAdmissionError::PartialDirectoryRejected);
     }
     let (dir_timestamp, dir_transaction_id) = parse_transaction_directory_name(dir_name)?;
@@ -759,7 +759,10 @@ pub(crate) fn admit_transaction_from_disk(
     ))
 }
 
-fn parse_transaction_directory_name(
+/// Authoritative parser for Core-authored finalized transaction directory names.
+///
+/// Other Core components must call this rather than re-deriving the grammar.
+pub(crate) fn parse_transaction_directory_name(
     name: &str,
 ) -> Result<(u64, &str), HttpTransactionAdmissionError> {
     let (timestamp, transaction_id) = name

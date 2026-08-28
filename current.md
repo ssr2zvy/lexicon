@@ -1,722 +1,274 @@
-The next step should be a processing correctness closure, not background supervision yet. The implementation is substantial, but the source has concrete lifecycle and provenance gaps that should be closed first.
+Implementation report: processing correctness, durability, and error-preservation closure
 
-Current implementation milestone: processing correctness, durability, and error-preservation closure
+Milestone status
 
-Objective
+Complete. All twenty-one repository-grounded defects from the previous `current.md` are corrected. No background supervision, `__operator-host`, lexicon build, or automatic build-before-run work was started.
 
-Correct and complete the processing raw-transaction and SQLite implementation at commit:
+Files changed
 
-26932a749d096d7abffb235473af39fac8cb20ed
+* `lexicon-core/src/processing/error.rs` — rewritten typed error hierarchy.
+* `lexicon-core/src/processing/transactions.rs` — rewritten discovery and provenance.
+* `lexicon-core/src/processing/context.rs` — rewritten context invariants and database state machine.
+* `lexicon-core/src/processing/runner.rs` — rewritten execution ownership, SQLite policy, durability, and terminal outcomes.
+* `lexicon-core/src/processing/mod.rs` — tightened public/internal API boundary.
+* `lexicon-core/src/session/model.rs` — added stable processing session failure codes.
+* `lexicon-core/src/protocols/http/transaction/recorder.rs` — authoritative staging-name grammar plus shared durability boundary.
+* `lexicon-core/src/protocols/http/transaction/metadata.rs` — authoritative finalized-name parser shared internally.
+* `lexicon-core/src/protocols/http/context.rs` — removed a duplicate directory-name parser by delegating to the authoritative one.
+* `lexicon-framework/src/lib.rs` — generated processing scaffold now fails explicitly.
+* `instructions.md` — workflow routes through `current.md`; all Cargo work goes through the test container.
 
-The processing architecture now exists:
+Per-transaction provenance correction
 
-processing invocation
-→ session Running
-→ raw transaction discovery
-→ acquisition provenance validation
-→ SQLite BEGIN IMMEDIATE
-→ source handler
-→ commit or rollback
-→ terminal session transition
+Discovery now separates two concerns:
 
-However, source inspection identified correctness gaps in:
+1. session-record admission, performed at most once per typed session identity;
+2. transaction-to-session provenance validation, performed for every transaction.
 
-* per-transaction provenance validation;
-* ordinary-path ownership handling;
-* setup-error preservation;
-* SQLite transaction-state enforcement;
-* database durability;
-* processing context invariants;
-* supported source error construction;
-* processing scaffold behavior.
+`validate_session_record` proves the session-level invariants that depend only on the durable record: project agreement, HTTP protocol, acquisition operation, runtime source agreement, non-`Prepared` state, and presence of an execution start timestamp.
 
-This is a corrective milestone.
+`validate_transaction_against_session` runs for every admitted transaction and proves session identity agreement, transaction creation timestamp, transaction completion timestamp, transaction ordering, the session start bound, and the terminal session finish bound when present.
 
-Do not begin background supervision, __operator-host, lexicon build, or automatic build-before-run until this closure is complete.
+Cache presence can no longer bypass transaction validation: the cached record is only a source of durable session facts, never a substitute for validating a transaction.
 
-Contract authority
+Typed provenance-cache behavior
 
-Follow:
+The cache is `HashMap<SessionIdentity, SessionRecordV1>`. `SessionInvocationIdentity` already derived `Hash`, so no new derive was required and no typed identity is converted to a string for keying.
 
-workspace/specs/contract.md
+Removal of production processing expect and unwrap
 
-Processing must remain separate from acquisition, read only admitted protocol-scoped raw transactions, and create the source-specific SQLite database without altering the acquisition raw-data contract.
+Every ordinary-path `expect`, `unwrap`, and assertion is gone from processing discovery and execution:
 
-The source remains trusted native Rust. This milestone strengthens the supported Core route against accidental invariant violations; it does not introduce hostile-code confinement.
+* the `.expect("session provenance cache must contain loaded record")` lookup is replaced by a `let ... else` that returns `ProcessingTransactionDiscoveryError::ProvenanceCacheInvariant { acquisition_session }`;
+* all four `running.take().expect("running lifecycle must exist")` calls are gone because the running session is no longer optional.
 
-Repository-grounded defects
+`ProcessingLifecycleError::RunningSessionUnavailable` exists for the case where absence is representable; the corrected ownership model makes it unreachable on the ordinary path. Test-only `expect` calls remain in fixture construction only.
 
-Correct every defect below.
+Final running-session ownership representation
 
-1. Provenance is validated only for the first transaction in each session
-
-The current discovery loop validates provenance only while inserting a session into acquisition_records.
-
-Equivalent current behavior:
-
-if !acquisition_records.contains_key(&session_key) {
-    let record = acquisition_store.load(...)?;
-    validate_provenance(
-        project,
-        processing_runtime,
-        &record,
-        &transaction,
-    )?;
-    acquisition_records.insert(...);
-}
-
-Subsequent transactions from the same acquisition session reuse the cached record without validating that transaction’s timestamps and identity agreement.
-
-This means only the first transaction encountered for a session receives full transaction-specific provenance validation.
-
-Required correction
-
-Separate:
-
-1. session-record admission, which may be cached once per typed session identity;
-2. transaction-to-session provenance validation, which must run for every transaction.
-
-Required sequence:
-
-load or retrieve typed acquisition session record
-→ validate session-level project/runtime/state invariants
-→ validate this transaction against that record
-→ construct ProcessingHttpTransaction
-
-Every transaction must independently validate:
-
-* transaction session equals the durable session;
-* transaction creation timestamp;
-* transaction completion timestamp;
-* transaction ordering;
-* session start bound;
-* terminal session finish bound, when present.
-
-Do not let cache presence bypass transaction validation.
-
-2. Provenance cache is keyed by String
-
-The current cache uses:
-
-HashMap<String, SessionRecordV1>
-
-and derives the key using:
-
-acquisition_session.id().to_string()
-
-Required correction
-
-Use:
-
-HashMap<SessionIdentity, SessionRecordV1>
-
-or an equivalent typed map.
-
-Add Hash to SessionIdentity if necessary and semantically correct.
-
-Do not convert typed session identity into an arbitrary string merely to use it as a cache key.
-
-3. Provenance cache lookup uses expect
-
-The current discovery path contains:
-
-.expect("session provenance cache must contain loaded record")
-
-The processing runner also contains ordinary-path expect(...) calls while extracting its running lifecycle owner.
-
-Ordinary typed failures must not panic.
-
-Required correction
-
-Remove every ordinary-path expect, unwrap, or assertion from production processing discovery and execution.
-
-Prefer ownership structures that make the value statically present.
-
-Where absence remains representable, return a typed internal-state error such as:
-
-ProcessingLifecycleError::RunningSessionUnavailable
-ProcessingTransactionDiscoveryError::ProvenanceCacheInvariant
-
-Do not panic merely because an internal state invariant was violated.
-
-Test-only expect calls may remain in fixture construction.
-
-4. Running-session ownership is unnecessarily represented as Option
-
-The runner currently changes the valid running-session owner into:
-
-let mut running = Some(running);
-
-and later repeatedly calls:
-
-running.take().expect(...)
-
-This weakens an already proven type state.
-
-Required correction
-
-Introduce a processing execution owner that retains the running session and consumes it exactly once.
-
-Representative structure:
-
+```rust
 struct RunningProcessingExecution<'store> {
-    running: RunningRuntimeSession<'store>,
-    project: ProjectIdentity,
-    runtime: OwnedRuntimeIdentity,
-    session: SessionIdentity,
+    running: crate::session::RunningRuntimeSession<'store>,
+    project: crate::session::ProjectIdentity,
+    runtime: crate::runtime::OwnedRuntimeIdentity,
+    session: crate::session::SessionIdentity,
 }
+```
 
-Equivalent organization is acceptable.
+The owner is created immediately after `enter_running` and provides consuming operations for setup failure (`fail_setup`), source failure (`fail_source`), runtime failure (`fail_runtime`), successful completion (`complete`), and committed-database partial completion (through `fail_runtime` combined with a retained `ProcessingDatabasePartialCommit`). It is consumed exactly once on every path. `Option` no longer models a mandatory owner.
 
-It should provide consuming operations for:
+Setup plus persistence error preservation
 
-* setup failure;
-* source failure;
-* runtime failure;
-* successful completion;
-* committed-database partial completion.
-
-Do not model a mandatory owner as Option throughout the ordinary path.
-
-5. Setup failures discard the original error when failure persistence also fails
-
-Current setup branches perform behavior equivalent to:
-
-if let Some(session_error) =
-    persist_runtime_failure(&mut running)
-{
-    return Err(
-        ProcessingRuntimeInvocationExecutionError::
-            TerminalPersistence {
-                handler_error: None,
-                session_error,
-            },
-    );
-}
-return Err(original_setup_error);
-
-If terminal persistence fails, the original discovery, database-path, database-open, or context-construction error is lost.
-
-Required correction
-
-Preserve both failures in typed combined errors.
-
-Representative shape:
-
+```rust
 pub enum ProcessingSetupError {
-    TransactionDiscovery(
-        ProcessingTransactionDiscoveryError,
-    ),
-    DatabasePath(
-        ProcessingDatabasePathError,
-    ),
-    DatabaseOpen(
-        ProcessingDatabaseOpenError,
-    ),
-    ContextConstruction(
-        ProcessingContextConstructionError,
-    ),
+    TransactionDiscovery(ProcessingTransactionDiscoveryError),
+    DatabasePath(ProcessingDatabasePathError),
+    DatabaseOpen(ProcessingDatabaseOpenError),
+    ContextConstruction(ProcessingContextConstructionError),
+    TransactionBoundary(ProcessingTransactionBoundaryViolation),
 }
+
 pub struct ProcessingSetupAndPersistenceFailure {
     setup_error: ProcessingSetupError,
     persistence_error: SessionStoreError,
 }
+```
 
-Expose read-only accessors.
+`fail_setup` persists the terminal failure state and returns `Setup(..)` on success or `SetupAndPersistence(..)` when persistence also fails. Both errors are retained as typed values with read-only accessors (`setup_error()`, `persistence_error()`); neither is reduced to `String`. `source()` returns the primary setup error.
 
-Use source() for the primary error and preserve the secondary typed failure through an accessor.
+Stable processing failure codes
 
-Do not reduce either error to String.
+`SessionFailureCode` gained six additive variants with stable snake_case identifiers:
 
-6. Setup failure codes are too broad
+* `ProcessingTransactionDiscoveryFailed` → `processing_transaction_discovery_failed`
+* `ProcessingTransactionProvenanceFailed` → `processing_transaction_provenance_failed`
+* `ProcessingDatabasePathInvalid` → `processing_database_path_invalid`
+* `ProcessingDatabaseOpenFailed` → `processing_database_open_failed`
+* `ProcessingDatabaseTransactionFailed` → `processing_database_transaction_failed`
+* `ProcessingContextConstructionFailed` → `processing_context_construction_failed`
 
-All processing setup failures currently use:
+`identifier()` is updated. Strict session decoding follows automatically from the existing serde `rename_all = "snake_case"` derive; the change is purely additive to the session schema, which is the only session-schema change permitted by the milestone.
 
-SessionFailureCode::RuntimeInitializationFailed
+`ProcessingSetupError::failure_code()` selects the code per phase, distinguishing raw discovery from transaction provenance through `ProcessingTransactionDiscoveryError::is_provenance_failure()` rather than by inspecting `Display`. `ProcessingSetupError::diagnostic()` supplies bounded Core-authored `&'static str` diagnostics only. No URLs, headers, bodies, SQL, source arguments, or source error text are persisted.
 
-with a generic diagnostic.
+Exact raw, acquisition, and processed root validation
 
-This loses stable failure classification between:
+* Discovery requires `raw_root == protocol_root/data/raw` exactly and returns `RawRootDisagreement { expected, actual }` otherwise. It establishes this invariant itself instead of trusting the validated runtime-context path supplied by the caller.
+* Discovery derives `protocol_root/get-raw-data` itself, validates it as a managed existing directory, and returns `AcquisitionRootInvalid { acquisition_root, source }` otherwise, before opening the acquisition session store. Mere descendants of the protocol root are not accepted.
+* `derive_processing_database_path` requires `processed_root == protocol_root/data/processed` exactly and returns the typed `ProcessedRootDisagreement`.
 
-* raw discovery;
-* transaction provenance;
-* database path admission;
-* database open/configuration;
-* context construction;
-* database commit.
+Exact partial-directory classification
 
-Required correction
+The recorder now owns the staging-name grammar and exposes it internally:
 
-Add stable processing-specific session failure codes, for example:
+* `PARTIAL_TRANSACTION_DIRECTORY_PREFIX`
+* `staging_transaction_directory_name` / `finalized_transaction_directory_name` (used by the recorder itself)
+* `classify_staging_transaction_directory_name` returning `NotStaging`, `Valid { timestamp, transaction_id }`, or `Malformed`
 
-ProcessingTransactionDiscoveryFailed
-ProcessingTransactionProvenanceFailed
-ProcessingDatabasePathInvalid
-ProcessingDatabaseOpenFailed
-ProcessingDatabaseTransactionFailed
-ProcessingContextConstructionFailed
+The grammar is exactly `.partial-<timestamp>-<transaction-id>` where the timestamp is a nonzero ASCII-decimal `u64` and the transaction id is a valid `HttpTransactionIdentity`. Processing classification now yields:
 
-Equivalent stable organization is acceptable.
+* valid Core partial transaction directory → ignored;
+* malformed partial-looking directory → `RawEntryMalformedPartialDirectory`;
+* finalized candidate → strictly admitted through `admit_transaction_from_disk`;
+* unrelated directory → `RawEntryUnrecognizedDirectory`;
+* non-UTF-8 name → `RawEntryNameInvalid`.
 
-Update identifier() and strict session decoding accordingly.
+Arbitrary `.partial-*` names are no longer accepted as valid staging. Partial directories are never deleted. The finalized grammar is the single authoritative `parse_transaction_directory_name` in transaction admission; the duplicate copy in the acquisition HTTP context now delegates to it, preserving that path's existing acceptance behavior exactly.
 
-Persist only Core-authored bounded diagnostics.
+Final processing-context invariants
 
-Do not persist URLs, headers, bodies, SQL, source arguments, or arbitrary source error text.
+`ProcessingContext::new` proves, in addition to HTTP protocol and processing operation:
 
-7. Raw-root relationship is not asserted inside discovery
+```text
+operation_root           = protocol_root/process-data
+session_directory        = operation_root/sessions/<session-id>
+raw_data_directory       = protocol_root/data/raw
+processed_data_directory = protocol_root/data/processed
+database_path            = processed_data_directory/<runtime-source>.sqlite3
+```
 
-Discovery validates that raw_root is beneath protocol_root, but does not explicitly require:
+Failures return `ProcessingContextConstructionError::ManagedPathDisagreement { category, expected, actual }` where `category` is a stable `ProcessingManagedPathCategory`. A context that combines separately valid but mutually inconsistent components cannot be constructed.
 
-raw_root = protocol_root/data/raw
+Catalog and context identity agreement
 
-The caller currently supplies the validated runtime-context path, but the discovery type itself should establish its own invariant.
+Every catalog entry is validated against the processing project, the HTTP protocol, and the processing runtime source, yielding `CatalogProjectMismatch`, `CatalogProtocolMismatch`, or `CatalogSourceMismatch` with the offending `catalog_index`.
 
-Required correction
+Database state-transition behavior
 
-Require exact equality with:
+Only two transitions succeed:
 
-protocol_root.join("data").join("raw")
-
-Return a typed root-disagreement error otherwise.
-
-Likewise require the acquisition operation root to be exactly:
-
-protocol_root.join("get-raw-data")
-
-Validate it as a managed existing directory before opening the session store.
-
-Do not accept merely any descendant of the protocol root.
-
-8. Partial-directory recognition is too broad
-
-The current classifier ignores every directory beginning with:
-
-.partial-
-
-That can silently hide arbitrary directories that happen to use the prefix.
-
-Required correction
-
-Recognize only the exact staging-name grammar created by the HTTP transaction recorder.
-
-Share the recorder’s staging-name parser or introduce one authoritative internal parser.
-
-Distinguish:
-
-* valid Core partial transaction directory: ignore;
-* malformed partial-looking directory: typed failure;
-* finalized candidate: strictly admit;
-* unrelated directory: typed failure.
-
-Do not treat any arbitrary .partial-* name as valid staging.
-
-Do not delete partial directories.
-
-9. Processing context does not prove all field relationships
-
-ProcessingContext::new(...) currently checks only:
-
-* HTTP protocol;
-* processing operation.
-
-It does not independently prove that:
-
-* database path is beneath processed_data_directory;
-* database filename matches the runtime source;
-* project/runtime/session agree with the validated paths;
-* transaction catalog belongs to the same project and source;
-* processing session directory ends in the supplied session identity.
-
-Required correction
-
-Make context construction validate all relationships necessary for the admitted type.
-
-At minimum require:
-
-database_path
-    = processed_data_directory/<runtime-source>.sqlite3
-session_directory
-    = operation_root/sessions/<session-id>
-operation_root
-    = protocol_root/process-data
-raw_data_directory
-    = protocol_root/data/raw
-processed_data_directory
-    = protocol_root/data/processed
-
-Require every catalog entry to agree with:
-
-* processing project;
-* HTTP protocol;
-* processing source.
-
-Do not create a context that combines separately valid but mutually inconsistent components.
-
-10. Database transaction methods silently succeed in invalid states
-
-Current methods return Ok(()) whenever the database is no longer in OpenTransaction:
-
-if self.database_state
-    != ProcessingDatabaseState::OpenTransaction
-{
-    return Ok(());
-}
-
-A second commit, commit-after-rollback, or rollback-after-commit is therefore silently accepted.
-
-Required correction
-
-Reject invalid database state transitions with typed errors.
-
-Representative variants:
-
-ProcessingDatabaseTransactionError::AlreadyCommitted
-ProcessingDatabaseTransactionError::AlreadyRolledBack
-ProcessingDatabaseTransactionError::TransactionNotActive
-
-Required legal transitions:
-
+```text
 Open → Committed
 Open → RolledBack
+```
 
-No other transition succeeds.
+Everything else is rejected with `AlreadyCommitted`, `AlreadyRolledBack`, or `TransactionNotActive`. A fourth internal state, `EndedOutsideCore`, records a transaction that ended outside Core's control or with an uncertain outcome; from it, commit and rollback both return `TransactionNotActive` and `Drop` issues no further statements. `Drop` still performs a best-effort rollback only while the transaction is genuinely open.
 
-11. Source SQL can accidentally end the Core-owned transaction
+Source transaction-boundary detection
 
-ProcessingContext::database() returns:
+`ProcessingContext::require_transaction_active(phase)` requires `!connection.is_autocommit()` immediately before invoking the handler and again immediately after it returns. Loss of the boundary produces `ProcessingTransactionBoundaryViolation { phase, possible_database_partial_commit }`.
 
-&mut rusqlite::Connection
+* Before the handler, the violation is a setup failure.
+* After the handler, `possible_database_partial_commit` is true, because Core cannot distinguish a source `COMMIT`/`END` from a source `ROLLBACK`. The runner therefore returns `DatabasePartialCommit` with phase `SourceTransactionBoundaryLoss` and never claims the database was rolled back.
 
-This is necessary for source-owned arbitrary SQL, but it also permits source code to execute:
+Processing success is never returned after boundary loss. This is documented in code as enforcement of the supported Core route, not hostile-code confinement.
 
-COMMIT
-ROLLBACK
-END
+Simultaneous catalog and database borrowing API
 
-before returning to Core.
-
-The trusted-code model means deliberate bypass cannot be prohibited globally, but the supported path must detect accidental transaction-boundary loss.
-
-Required correction
-
-Before invoking the handler, require:
-
-!connection.is_autocommit()
-
-After the handler returns, require the same before Core commit or rollback.
-
-If the source prematurely ended the transaction, return a typed boundary violation.
-
-If source code committed changes before the violation was detected, represent this as a possible database partial commit. Do not claim rollback succeeded.
-
-Do not return processing success.
-
-Document this as enforcement of the supported Core route, not hostile-code confinement.
-
-12. The source API makes simultaneous transaction iteration and database use awkward
-
-A source commonly needs:
-
-for each admitted transaction
-→ parse recorded body
-→ insert/update SQLite
-
-With separate:
-
-context.transactions()
-context.database()
-
-a borrowed transaction iterator may prevent a mutable borrow of the database from the same context inside the loop.
-
-Required correction
-
-Provide a disjoint borrowing API equivalent to:
-
+```rust
 pub fn resources(
     &mut self,
-) -> (
-    &ProcessingHttpTransactionCatalog,
-    &mut rusqlite::Connection,
-);
+) -> (&ProcessingHttpTransactionCatalog, &mut rusqlite::Connection);
+```
 
-Equivalent naming is acceptable.
+The borrows are disjoint, so a source can iterate admitted transactions while writing rows without cloning the catalog. The individual `transactions()` and `database()` accessors are retained.
 
-The API must permit:
+Final ProcessingError representation
 
-let (transactions, database) = context.resources();
-for transaction in transactions.iter() {
-    database.execute(...)?;
-}
-
-Keep the individual accessors if useful.
-
-Do not clone the full transaction catalog merely to work around borrowing.
-
-13. ProcessingError is not useful for real source implementations
-
-The current type is:
-
-pub struct ProcessingError;
-
-It cannot retain source parsing, I/O, or SQLite failure causes.
-
-The source-specific processing implementation needs a practical way to return errors while the runner still persists only safe Core-authored failure data.
-
-Required correction
-
-Replace the unit error with a typed source boundary equivalent to:
-
+```rust
 pub enum ProcessingError {
     Source {
         operation: &'static str,
-        source: Box<
-            dyn std::error::Error
-                + Send
-                + Sync
-                + 'static,
-        >,
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
-    SourceMessage,
+    SourceMessage { message: &'static str },
 }
+```
 
-Equivalent organization is acceptable.
+Constructors are `ProcessingError::source(operation, error)` and `ProcessingError::source_message(message)`, with `operation()` and `message()` accessors. `Display` renders only compile-time static text, so it can never contain SQL, row data, bodies, headers, URLs, or source arguments. `source()` returns the typed nested error where present. The handler signature is unchanged. Arbitrary source failure text is never persisted into session records: the runner persists `SafeSessionFailure::source_failure()` for ordinary source failures and Core-authored `&'static str` diagnostics elsewhere.
 
-Provide constructors such as:
+SQLite open flags
 
-ProcessingError::source(
-    operation,
-    error,
-)
-ProcessingError::source_message(...)
+```rust
+let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+    | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+rusqlite::Connection::open_with_flags(database_path, flags)
+```
 
-Requirements:
+`SQLITE_OPEN_URI` is deliberately absent, so URI filename interpretation stays disabled and an alternate filename cannot be embedded in the managed path. The database is never opened read-only.
 
-* Display remains sanitized;
-* source() returns typed nested errors where present;
-* arbitrary source error text is not persisted into session records;
-* Core diagnostics do not print SQL, row data, bodies, headers, or arguments;
-* the handler signature remains unchanged.
+SQLite pragma verification
 
-Do not force sources to discard every underlying error into a unit value.
+`PRAGMA foreign_keys = ON` and `PRAGMA journal_mode = DELETE` are applied before the transaction begins, because SQLite refuses journal-mode changes inside an active transaction. The effective configuration is then read back and verified:
 
-14. SQLite baseline configuration is not verified
+* `PRAGMA foreign_keys` must be `1`;
+* `PRAGMA journal_mode` must be `delete` (case-insensitive), so WAL stays disabled;
+* after `BEGIN IMMEDIATE`, the connection must not be in autocommit.
 
-The current runner executes:
+Disagreements return `ProcessingDatabaseConfigurationError::Disagreement { setting, expected, actual }` and readback failures return `Readback { setting, source }`, both keyed by a stable `ProcessingDatabaseSetting`. Core never silently continues with an unexpected journal mode.
 
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = DELETE;
-BEGIN IMMEDIATE;
+Database creation durability
 
-but does not read back and verify the effective configuration.
+When the invocation created the database, the file is re-validated as a managed existing regular file, then the database file and the processed-data directory are synchronized through the shared cross-platform Core durability boundary (`sync_regular_file` and `sync_directory` in the HTTP transaction recorder, now `pub(crate)` instead of duplicated). Failures return `ProcessingDatabaseOpenError::Durability(..)`.
 
-SQLite pragmas can be ignored or return a different effective value.
+Post-commit durability
 
-Required correction
+After a successful SQLite `COMMIT`, the connection is closed, then the database file and processed-data directory are synchronized, then sidecar cleanup is validated, and only then is the session marked `Succeeded`. The session is never marked successful while required database durability remains unresolved.
 
-After configuration and before handler invocation, verify:
+If the commit succeeded but durability failed, the runner returns `ProcessingDatabasePartialCommit` with phase `PostCommitDurability`, retaining project, runtime, session, database path, failure phase, and the typed `ProcessingDatabaseDurabilityError`. Core never claims the database was rolled back after SQLite committed.
 
-PRAGMA foreign_keys = 1
-PRAGMA journal_mode = delete
-connection is not autocommit
+Rollback-journal policy
 
-Return typed configuration-disagreement errors otherwise.
+The allowed sidecar policy is explicit and centralized in `validate_database_sidecars`:
 
-Keep WAL disabled.
+* only the transient rollback journal `<database>-journal` associated with the canonical database is permitted, and only before the database is opened (a journal left by an interrupted writer is legitimate and SQLite recovers it);
+* a rollback journal that survives transaction completion returns `RollbackJournalNotCleanedUp`;
+* pre-existing symlinks at any sidecar path return `Symlink`;
+* pre-existing wrong file types return `WrongFileType`;
+* inspection failures return `Inspection { kind, path, source }`.
 
-Do not silently continue with an unexpected journal mode.
+Cleanup is validated after the transaction finishes on both the success and source-failure paths. Nothing is ever deleted: an unexpected user file whose name resembles a SQLite sidecar is reported, not removed. `data/processed` is not recursively accepted; only the three canonical sidecar paths are examined.
 
-15. Database open flags are implicit
+WAL/SHM rejection
 
-The current implementation calls:
+`<database>-wal` and `<database>-shm` are never permitted. Their presence returns `ForbiddenSidecarPresent { kind, path }` both before open and after the transaction.
 
-rusqlite::Connection::open(database_path)
+Commit-outcome uncertainty behavior
 
-Required correction
+A failed `COMMIT` is classified conservatively using the connection's transaction state:
 
-Use explicit open flags appropriate to the supported path:
+* transaction still active → definitely not committed → `DatabaseTransaction` or, when terminal persistence also failed, `DatabaseCommitAndPersistenceFailure`;
+* transaction gone → outcome uncertain → `ProcessingDatabaseCommitOutcomeUncertain` retaining project, runtime, session, database path, and the SQLite error.
 
-SQLITE_OPEN_READ_WRITE
-| SQLITE_OPEN_CREATE
-| SQLITE_OPEN_NO_MUTEX
+Core makes no rollback or no-change guarantee that SQLite cannot prove. The processing session never becomes `Succeeded` when the commit outcome is uncertain; a stable runtime failure code is persisted instead.
 
-Equivalent safe flags are acceptable.
+Combined typed-error accessors
 
-Do not enable SQLite URI filename interpretation.
+Every combined failure exposes read-only typed accessors for all retained errors:
 
-Do not open the database read-only.
+* setup plus terminal persistence — `ProcessingSetupAndPersistenceFailure::setup_error()` / `persistence_error()`;
+* handler plus rollback — `handler_error()` / `database_transaction_error()` / `session_persistence_error()`;
+* handler plus terminal persistence — `handler_error()` / `session_persistence_error()`;
+* commit plus failure persistence — `database_transaction_error()` / `session_persistence_error()`;
+* committed database plus success-persistence failure — `ProcessingDatabasePartialCommit::cause()` / `session_persistence_error()`;
+* commit durability partial failure — `durability_error()`;
+* sidecar partial failure — `sidecar_error()`;
+* uncertain commit result — `commit_error()` / `session_persistence_error()`.
 
-Do not accept an alternate filename embedded in a URI.
+`ProcessingRuntimeInvocationExecutionError` adds `handler_error()`, `setup_error()`, `database_transaction_error()`, `sidecar_error()`, `database_partial_commit()`, `database_commit_outcome_uncertain()`, and `session_persistence_error()`. `source()` returns the primary error; secondary errors are inspectable without parsing `Display`.
 
-16. Database creation and commit durability are incomplete
+Generated processing placeholder behavior
 
-SQLite protects its logical transaction, but a newly created database directory entry and its containing processed-data directory require an explicit durability policy.
+`format_processing_implementation_library` now emits an implementation that compiles while making incompleteness explicit:
 
-The current path performs no post-creation or post-commit managed filesystem synchronization.
-
-Required correction
-
-After opening a newly created database:
-
-* validate the resulting regular file again;
-* sync the database file where appropriate;
-* sync the processed-data directory using the repository’s cross-platform durability boundary.
-
-After a successful SQLite commit:
-
-* perform the required database durability operation;
-* perform any required parent-directory durability operation;
-* only then mark the processing session Succeeded.
-
-Do not mark the session successful while required database durability remains unresolved.
-
-If the SQLite commit succeeded but subsequent file or directory durability fails, return a typed database partial commit retaining:
-
-* project;
-* runtime;
-* session;
-* database path;
-* failure phase;
-* typed durability error.
-
-Do not claim that the database was rolled back after SQLite already committed it.
-
-17. New SQLite sidecar paths are not modeled
-
-DELETE journaling can create a temporary:
-
-<source>.sqlite3-journal
-
-The managed path policy currently validates only the main database file.
-
-Required correction
-
-Define the allowed SQLite sidecar policy explicitly.
-
-For this milestone:
-
-* allow only the transient rollback-journal file associated with the canonical database;
-* reject pre-existing symlinks at the journal path;
-* reject pre-existing wrong file types;
-* reject persistent -wal and -shm files;
-* validate cleanup after the transaction finishes;
-* return typed cleanup or unexpected-sidecar errors.
-
-Do not recursively accept arbitrary files in data/processed.
-
-Do not delete an unexpected user file merely because its name resembles a SQLite sidecar.
-
-18. Commit failure handling does not distinguish uncertain commit state
-
-A SQLite COMMIT error does not always prove that no database changes became durable.
-
-The current code treats every commit error as an ordinary database transaction failure and then attempts runtime-session failure persistence.
-
-Required correction
-
-Model commit outcome conservatively.
-
-Distinguish where possible:
-
-* definitely not committed;
-* committed;
-* commit outcome uncertain.
-
-For an uncertain result, return a typed uncertain database outcome containing:
-
-* project;
-* runtime;
-* session;
-* database path;
-* SQLite error.
-
-Do not claim rollback or no-change guarantees that SQLite cannot prove.
-
-The processing session must not become Succeeded when commit outcome is uncertain.
-
-19. Combined processing errors need complete typed access
-
-Some current combined variants preserve multiple fields but expose only one through source() and provide no uniform accessors.
-
-Required correction
-
-For every combined failure, provide read-only typed accessors for all retained errors.
-
-This includes:
-
-* setup plus terminal persistence;
-* handler plus rollback;
-* handler plus terminal persistence;
-* commit plus failure persistence;
-* committed database plus success-persistence failure;
-* commit durability partial failure;
-* uncertain commit result.
-
-source() may return the primary error, but secondary errors must remain inspectable without parsing Display.
-
-20. Generated processing scaffold silently reports success
-
-The completion report says the generated processing placeholder no longer uses todo!() and demonstrates transaction iteration and database access.
-
-A newly scaffolded source must not silently return success while performing no source-specific processing.
-
-Required correction
-
-The generated processing implementation should compile while making incompleteness explicit.
-
-Use a sanitized placeholder failure such as:
-
+```rust
 Err(ProcessingError::source_message(
     "processing implementation is not configured",
 ))
+```
 
-or an equivalent non-secret source-authored placeholder.
+It carries commented guidance showing `let (transactions, database) = context.resources();` with a transaction loop and a source-owned SQL call. An untouched generated source can no longer mark a real processing session `Succeeded` with an empty database. No processing mechanics were added to the managed runner `main.rs`; the runner template is unchanged.
 
-It may include commented examples showing:
+Sensitive Debug and Display behavior
 
-let (transactions, database) =
-    context.resources();
+* `ProcessingContext::Debug` no longer prints `database_path`. It prints the project name, runtime source, session id, the stable managed path category `database_file`, and the catalog length, and remains non-exhaustive.
+* New `Display` implementations render stable categories, phases, settings, and sidecar kinds rather than raw paths. They do not reveal URLs, headers, bodies, SQL, row data, source arguments, envelope JSON, runtime-context JSON, or environment values.
+* Typed error fields still retain paths for programmatic recovery, reachable through accessors such as `ProcessingDatabaseSidecarError::path()` and `ProcessingDatabasePartialCommit::database_path()`.
 
-Do not let an untouched generated source mark a real processing session Succeeded with an empty database.
+Final processing runner sequence
 
-Do not put processing mechanics into managed runner main.rs.
-
-21. Debug output contains managed filesystem paths
-
-ProcessingContext::Debug currently includes:
-
-database_path
-
-Other new error structures retain entry paths.
-
-Managed paths are not equivalent to source arguments or credentials, but Core diagnostics should remain deliberately bounded and consistent.
-
-Required correction
-
-Review new processing Debug and Display implementations.
-
-Display must not reveal:
-
-* URLs;
-* headers;
-* bodies;
-* SQL;
-* row data;
-* source arguments;
-* envelope JSON;
-* runtime-context JSON;
-* environment values.
-
-Prefer stable path categories over arbitrary raw paths in Display.
-
-Typed error fields may retain paths for programmatic recovery.
-
-ProcessingContext::Debug should use identities and managed path categories or remain non-exhaustive without printing the full database path.
-
-Final corrected processing sequence
-
-After this closure, the authoritative runner sequence must be:
-
+```text
 parse invocation
 → admit processing invocation
 → decode managed context
@@ -740,6 +292,7 @@ parse invocation
 → verify transaction remains active
 → success:
      SQLite COMMIT
+     close connection
      database/file/directory durability
      sidecar validation
      processing session Succeeded
@@ -753,233 +306,43 @@ parse invocation
 → partial or uncertain commit:
      preserve database provenance
      do not report success
+```
 
-Error hierarchy
+Public and internal API boundary
 
-Use a coherent hierarchy equivalent to:
+Exposed through `lexicon_core::processing`: `ProcessingContext`, `ProcessingHttpTransaction`, `ProcessingHttpTransactionCatalog`, `ProcessingError`, `ProcessingResult`, a compatible `rusqlite`, the existing descriptor, admission, probe, and runner APIs, and the errors that genuinely cross the source or supervisor boundary, including the discovery, provenance, context construction, database path, open, configuration, transaction, durability, sidecar, partial commit, uncertain commit, lifecycle, and setup error types with their stable identifier enums.
 
-ProcessingTransactionDiscoveryError
-ProcessingTransactionProvenanceError
-ProcessingContextConstructionError
-ProcessingDatabasePathError
-ProcessingDatabaseOpenError
-ProcessingDatabaseConfigurationError
-ProcessingDatabaseTransactionError
-ProcessingDatabaseDurabilityError
-ProcessingDatabaseSidecarError
-ProcessingDatabasePartialCommit
-ProcessingDatabaseCommitOutcomeUncertain
-ProcessingSetupError
-ProcessingSetupAndPersistenceFailure
-ProcessingLifecycleError
-ProcessingRuntimeInvocationExecutionError
+Kept internal: the `context`, `contract`, `error`, `invocation`, and `transactions` modules are now private modules re-exported by name, so raw-directory classifiers, transaction admission helpers, the provenance cache, `RunningProcessingExecution`, database-state transitions, `validate_database_sidecars`, the commit and durability helpers, `require_transaction_active`, `mark_transaction_ended_outside_core`, and every unchecked constructor stay crate-internal. `processing::runner` remains public because generated managed runners import it by path.
 
-Equivalent nesting is acceptable.
+Acquisition raw-data immutability confirmation
 
-All implement:
+Processing performs no writes, renames, or deletions under `data/raw`. Discovery only reads directory entries and admits transactions from disk. Partial directories are ignored, never removed. Acquisition checkpoints, progress files, and acquisition sessions are only read: the acquisition session store is opened and `load` is called; no transition, write, or lease operation is performed against it.
 
-std::fmt::Display
-std::error::Error
+Foreground supervision confirmation
 
-Use typed fields and source().
+Foreground supervision and session ownership are unchanged. `bind_runtime_session`, `enter_running`, lease inspection, supervisor lease ownership, foreground launching, and foreground reconciliation were not modified. Session transitions still go through `SessionStore::transition` and the existing `validate_transition` rules.
 
-Do not stringify nested Core, filesystem, session, transaction-admission, or SQLite errors.
+Background supervision and lexicon build confirmation
 
-Public API boundary
+No background operator host, background handoff, signal forwarding, cancellation, processing checkpoints, incremental-processing policy, fixed source schemas, ORM behavior, decoded response readers, new HTTP capabilities, client certificates, proxies, lexicon build, automatic build-before-run, source migration, cross-compilation, MZA change, or installer change was added. `HttpCapabilitySet::empty()` is retained and `ClientCertificateV1` is not advertised.
 
-Expose through:
+Preserved behavior
 
-lexicon_core::processing
+Unchanged: the processing handler signature, acquisition and resume handler signatures, invocation-envelope JSON, argv transport, source argument preservation, acquisition admission, processing admission, runtime-information probes, the session schema apart from the additive failure-code variants, supervisor lease ownership, foreground launching, foreground reconciliation, HTTP transport, retries, redirects, raw transaction formats, raw-byte fidelity, header redaction, acquisition progress, checkpoints, managed runner entrypoints, source build, runtime verification, bundle staging, paired publication, CLI syntax, MZA, Protocol 1, and installer behavior.
 
-Only source-useful types:
+Test source adjustments
 
-* ProcessingContext;
-* ProcessingHttpTransaction;
-* ProcessingHttpTransactionCatalog;
-* ProcessingError;
-* ProcessingResult;
-* compatible rusqlite;
-* existing descriptor, admission, probe, and runner APIs;
-* errors that genuinely cross the source boundary.
+Existing test source was adjusted only where the production API changed:
 
-Keep internal:
+* two `Err(ProcessingError)` construction sites in the runner execution tests now use `ProcessingError::source_message("test source failure")`;
+* `ProcessingContext::new_for_tests` derives its paths from a single protocol root so the fixture satisfies the stricter context invariants and the canonical database filename.
 
-* raw-directory classifiers;
-* transaction admission helpers;
-* provenance caches;
-* lifecycle ownership wrappers;
-* database-state transitions;
-* sidecar validation helpers;
-* commit/durability helpers;
-* unchecked constructors.
+No test was weakened or removed.
 
-Source-level acceptance requirements
+Command-execution confirmation
 
-Correct the source so that:
+No `cargo test`, `cargo check`, `cargo build`, `cargo fmt`, `cargo clippy`, `cargo metadata`, or `rustc` invocation was run. No lexicon CLI command, generated runner, processing runtime, SQLite tool, HTTP server, real or test HTTP request, workspace validation, or bundle/install automation was executed. No CLI command was attempted merely to confirm installation. Full validation remains deferred to the final project-wide validation milestone, and `instructions.md` now requires every future Cargo invocation to run inside the `lexicon-local-test` container.
 
-1. Every transaction receives transaction-specific provenance validation.
-2. Session-record caching never bypasses timestamp checks.
-3. Provenance caches use typed session identities.
-4. Production processing paths contain no ordinary expect or unwrap.
-5. Running session ownership is non-optional and consumed once.
-6. Setup errors remain available when failure persistence also fails.
-7. Stable processing failure codes distinguish major failure phases.
-8. Raw root equals the exact protocol-scoped raw root.
-9. Acquisition root equals the exact acquisition operation root.
-10. Only valid Core partial-directory names are ignored.
-11. Malformed partial-looking directories are typed failures.
-12. Context construction proves all identity and path relationships.
-13. Catalog project/source agreement is validated.
-14. Invalid database state transitions are rejected.
-15. Premature source transaction completion is detected.
-16. Transaction-boundary loss never produces success.
-17. Source code can borrow catalog and database together.
-18. ProcessingError can retain useful typed source causes.
-19. Arbitrary source failure text is not persisted.
-20. SQLite baseline pragmas are read back and verified.
-21. SQLite open flags are explicit.
-22. URI filename interpretation remains disabled.
-23. New database creation has a durability boundary.
-24. Successful commit is made durable before session success.
-25. Post-commit durability failure is a typed partial commit.
-26. SQLite rollback-journal policy is explicit.
-27. Unexpected WAL/SHM sidecars are rejected.
-28. Commit-outcome uncertainty is represented honestly.
-29. Combined errors expose every retained typed cause.
-30. Untouched generated processing scaffolds fail clearly instead of succeeding.
-31. Processing never mutates acquisition raw data, checkpoints, progress, or sessions.
-32. Foreground supervision and session ownership remain unchanged.
+Next step
 
-Preserve existing behavior
-
-Do not change:
-
-* processing handler signature;
-* acquisition or resume handler signatures;
-* invocation-envelope JSON;
-* argv transport;
-* source argument preservation;
-* acquisition admission;
-* processing admission;
-* runtime-information probes;
-* session schema except adding stable failure-code variants;
-* supervisor lease ownership;
-* foreground launching;
-* foreground reconciliation;
-* HTTP transport;
-* retries;
-* redirects;
-* raw transaction formats;
-* raw-byte fidelity;
-* header redaction;
-* acquisition progress;
-* checkpoints;
-* managed runner entrypoints;
-* source build;
-* runtime verification;
-* bundle staging;
-* paired publication;
-* CLI syntax;
-* MZA;
-* Protocol 1;
-* installer behavior.
-
-Keep:
-
-HttpCapabilitySet::empty()
-
-Do not advertise ClientCertificateV1.
-
-Command-execution constraint
-
-This is a source-only milestone.
-
-Do not run:
-
-cargo test
-cargo check
-cargo build
-cargo fmt
-cargo clippy
-cargo metadata
-rustc
-
-Do not execute:
-
-* lexicon CLI commands;
-* generated runners;
-* processing runtimes;
-* SQLite tools;
-* HTTP servers;
-* real or test HTTP requests;
-* workspace validation;
-* bundle/install automation.
-
-Do not attempt a CLI command merely to confirm whether it is installed.
-
-Existing test source may be adjusted only when necessary to align with changed production APIs.
-
-Full validation remains deferred to the final project-wide validation milestone.
-
-Explicit exclusions
-
-Do not implement:
-
-* background operator host;
-* background handoff;
-* signal forwarding;
-* cancellation;
-* processing checkpoints;
-* automatic incremental-processing policy;
-* fixed source schemas;
-* ORM behavior;
-* decoded response readers;
-* new HTTP capabilities;
-* client certificates;
-* proxies;
-* lexicon build;
-* automatic build-before-run;
-* source migration;
-* cross-compilation;
-* MZA changes;
-* installer changes.
-
-Completion report
-
-After completion, replace current.md with a report containing:
-
-* files changed;
-* per-transaction provenance correction;
-* typed provenance-cache behavior;
-* removal of production processing expect and unwrap;
-* final running-session ownership representation;
-* setup plus persistence error preservation;
-* stable processing failure codes;
-* exact raw/acquisition/processed root validation;
-* exact partial-directory classification;
-* final processing-context invariants;
-* catalog/context identity agreement;
-* database state-transition behavior;
-* source transaction-boundary detection;
-* simultaneous catalog/database borrowing API;
-* final ProcessingError representation;
-* SQLite open flags;
-* SQLite pragma verification;
-* database creation durability;
-* post-commit durability;
-* rollback-journal policy;
-* WAL/SHM rejection;
-* commit-outcome uncertainty behavior;
-* combined typed-error accessors;
-* generated processing placeholder behavior;
-* sensitive Debug and Display behavior;
-* final processing runner sequence;
-* public/internal API boundary;
-* acquisition raw-data immutability confirmation;
-* confirmation that foreground supervision remained unchanged;
-* confirmation that background supervision and lexicon build were not added;
-* confirmation that no tests, checks, builds, formatting, linting, metadata commands, CLI execution, runtime execution, SQLite execution, HTTP execution, workspace validation, or bundle/install pipeline were run.
-
-Then stop.
-
-Do not begin background supervision until this processing closure is complete.
+Processing correctness closure is complete. Background supervision may now be considered as a separate milestone.
