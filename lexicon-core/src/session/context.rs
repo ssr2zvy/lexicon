@@ -29,6 +29,7 @@ pub struct RuntimeContextPaths {
     session_directory: PathBuf,
     raw_data_directory: PathBuf,
     processed_data_directory: PathBuf,
+    source_state_directory: Option<PathBuf>,
 }
 
 impl RuntimeContextPaths {
@@ -51,6 +52,12 @@ impl RuntimeContextPaths {
     /// raw_data_directory     = protocol_root/data/raw
     /// processed_data_directory = protocol_root/data/processed
     /// ```
+    ///
+    /// `source_state_directory` is the contract-reserved durable-state boundary for an
+    /// acquisition source (contract.md §9). It must be `Some(operation_root/state)` when
+    /// `operation` is [`RuntimeOperation::Acquisition`], and `None` for
+    /// [`RuntimeOperation::Processing`], which has no source-state directory.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         project_root: PathBuf,
         protocol_root: PathBuf,
@@ -58,6 +65,7 @@ impl RuntimeContextPaths {
         session_directory: PathBuf,
         raw_data_directory: PathBuf,
         processed_data_directory: PathBuf,
+        source_state_directory: Option<PathBuf>,
         operation: RuntimeOperation,
         session: &SessionIdentity,
     ) -> Result<Self, RuntimeContextError> {
@@ -70,6 +78,9 @@ impl RuntimeContextPaths {
         reject_traversal(&session_directory, "session_directory")?;
         reject_traversal(&raw_data_directory, "raw_data_directory")?;
         reject_traversal(&processed_data_directory, "processed_data_directory")?;
+        if let Some(ref source_state_directory) = source_state_directory {
+            reject_traversal(source_state_directory, "source_state_directory")?;
+        }
 
         // Validate operation root against protocol root
         let expected_op_name = match operation {
@@ -105,6 +116,15 @@ impl RuntimeContextPaths {
             return Err(RuntimeContextError::SessionDirectoryDisagreement);
         }
 
+        // Validate the durable source-state directory: reserved for acquisition only.
+        let expected_source_state_directory = match operation {
+            RuntimeOperation::Acquisition => Some(operation_root.join("state")),
+            RuntimeOperation::Processing => None,
+        };
+        if source_state_directory != expected_source_state_directory {
+            return Err(RuntimeContextError::SourceStateDirectoryDisagreement);
+        }
+
         Ok(Self {
             project_root,
             protocol_root,
@@ -112,6 +132,7 @@ impl RuntimeContextPaths {
             session_directory,
             raw_data_directory,
             processed_data_directory,
+            source_state_directory,
         })
     }
 
@@ -121,6 +142,9 @@ impl RuntimeContextPaths {
     pub fn session_directory(&self) -> &Path { &self.session_directory }
     pub fn raw_data_directory(&self) -> &Path { &self.raw_data_directory }
     pub fn processed_data_directory(&self) -> &Path { &self.processed_data_directory }
+    /// The contract-reserved durable-state directory for an acquisition source
+    /// (`get-raw-data/state/`). `None` for processing, which has no source-state directory.
+    pub fn source_state_directory(&self) -> Option<&Path> { self.source_state_directory.as_deref() }
 }
 
 fn reject_traversal(path: &Path, field: &'static str) -> Result<(), RuntimeContextError> {
@@ -151,6 +175,10 @@ struct RuntimeContextDocumentV1 {
     session_directory: EncodedNativePathDocument,
     raw_data_directory: EncodedNativePathDocument,
     processed_data_directory: EncodedNativePathDocument,
+    /// The contract-reserved durable-state directory (`get-raw-data/state/`).
+    /// `None` for processing invocations, which have no source-state directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_state_directory: Option<EncodedNativePathDocument>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -213,6 +241,10 @@ pub fn encode_runtime_context(
         session_directory: encode_native_path(paths.session_directory())?,
         raw_data_directory: encode_native_path(paths.raw_data_directory())?,
         processed_data_directory: encode_native_path(paths.processed_data_directory())?,
+        source_state_directory: paths
+            .source_state_directory()
+            .map(encode_native_path)
+            .transpose()?,
     };
 
     serde_json::to_string(&doc).map_err(|e| {
@@ -235,6 +267,7 @@ pub struct SessionDataPaths {
     processed_data_directory: std::path::PathBuf,
     operation_root: std::path::PathBuf,
     session_directory: std::path::PathBuf,
+    source_state_directory: Option<std::path::PathBuf>,
 }
 
 impl SessionDataPaths {
@@ -246,6 +279,7 @@ impl SessionDataPaths {
             processed_data_directory: paths.processed_data_directory().to_path_buf(),
             operation_root: paths.operation_root().to_path_buf(),
             session_directory: paths.session_directory().to_path_buf(),
+            source_state_directory: paths.source_state_directory().map(|p| p.to_path_buf()),
         }
     }
 
@@ -262,6 +296,7 @@ impl SessionDataPaths {
             processed_data_directory,
             operation_root,
             session_directory,
+            source_state_directory: None,
         }
     }
 
@@ -270,6 +305,11 @@ impl SessionDataPaths {
     pub fn processed_data_directory(&self) -> &std::path::Path { &self.processed_data_directory }
     pub fn operation_root(&self) -> &std::path::Path { &self.operation_root }
     pub fn session_directory(&self) -> &std::path::Path { &self.session_directory }
+    /// The contract-reserved durable-state directory for an acquisition source
+    /// (`get-raw-data/state/`). `None` for processing and for the legacy path.
+    pub fn source_state_directory(&self) -> Option<&std::path::Path> {
+        self.source_state_directory.as_deref()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +447,11 @@ pub fn decode_runtime_context(
     let session_directory = decode_native_path(&doc.session_directory)?;
     let raw_data_directory = decode_native_path(&doc.raw_data_directory)?;
     let processed_data_directory = decode_native_path(&doc.processed_data_directory)?;
+    let source_state_directory = doc
+        .source_state_directory
+        .as_ref()
+        .map(decode_native_path)
+        .transpose()?;
 
     let paths = RuntimeContextPaths::new(
         project_root,
@@ -415,6 +460,7 @@ pub fn decode_runtime_context(
         session_directory,
         raw_data_directory,
         processed_data_directory,
+        source_state_directory,
         op,
         &session,
     )
@@ -479,4 +525,166 @@ fn decode_native_path(doc: &EncodedNativePathDocument) -> Result<PathBuf, Runtim
         RuntimeContextError::Decoding(RuntimeContextDecodingError::Json(e))
     })?;
     Ok(PathBuf::from(std::ffi::OsString::from_wide(&units)))
+}
+
+#[cfg(test)]
+mod source_state_directory_tests {
+    use super::*;
+
+    fn project() -> ProjectIdentity {
+        ProjectInvocationIdentity::new("example-project").unwrap()
+    }
+
+    fn session() -> SessionIdentity {
+        SessionInvocationIdentity::new("session-abc").unwrap()
+    }
+
+    fn roots() -> (PathBuf, PathBuf) {
+        (PathBuf::from("/tmp/example-project"), PathBuf::from("/tmp/example-project/sources/example-source/http"))
+    }
+
+    /// Build a valid, fully-consistent `RuntimeContextPaths` for `operation`, with
+    /// `source_state_directory` overridden to `override_state_dir` instead of the
+    /// operation-correct default, so tests can probe validation independently.
+    fn build_paths(
+        operation: RuntimeOperation,
+        override_state_dir: Option<Option<PathBuf>>,
+    ) -> Result<RuntimeContextPaths, RuntimeContextError> {
+        let (project_root, protocol_root) = roots();
+        let session = session();
+        let op_name = match operation {
+            RuntimeOperation::Acquisition => "get-raw-data",
+            RuntimeOperation::Processing => "process-data",
+        };
+        let operation_root = protocol_root.join(op_name);
+        let session_directory = operation_root.join("sessions").join(session.id());
+        let raw_data_directory = protocol_root.join("data/raw");
+        let processed_data_directory = protocol_root.join("data/processed");
+        let default_state_dir = match operation {
+            RuntimeOperation::Acquisition => Some(operation_root.join("state")),
+            RuntimeOperation::Processing => None,
+        };
+        let source_state_directory = override_state_dir.unwrap_or(default_state_dir);
+
+        RuntimeContextPaths::new(
+            project_root,
+            protocol_root,
+            operation_root,
+            session_directory,
+            raw_data_directory,
+            processed_data_directory,
+            source_state_directory,
+            operation,
+            &session,
+        )
+    }
+
+    #[test]
+    fn acquisition_source_state_directory_is_operation_root_join_state() {
+        let paths = build_paths(RuntimeOperation::Acquisition, None).expect("valid paths");
+        assert_eq!(
+            paths.source_state_directory(),
+            Some(paths.operation_root().join("state").as_path())
+        );
+    }
+
+    #[test]
+    fn processing_has_no_source_state_directory() {
+        let paths = build_paths(RuntimeOperation::Processing, None).expect("valid paths");
+        assert_eq!(paths.source_state_directory(), None);
+    }
+
+    #[test]
+    fn rejects_disagreeing_source_state_directory_for_acquisition() {
+        let (_, protocol_root) = roots();
+        let wrong = Some(protocol_root.join("get-raw-data").join("not-state"));
+        let error = build_paths(RuntimeOperation::Acquisition, Some(wrong)).unwrap_err();
+        assert!(matches!(error, RuntimeContextError::SourceStateDirectoryDisagreement));
+    }
+
+    #[test]
+    fn rejects_missing_source_state_directory_for_acquisition() {
+        let error = build_paths(RuntimeOperation::Acquisition, Some(None)).unwrap_err();
+        assert!(matches!(error, RuntimeContextError::SourceStateDirectoryDisagreement));
+    }
+
+    #[test]
+    fn rejects_present_source_state_directory_for_processing() {
+        let (_, protocol_root) = roots();
+        let present = Some(Some(protocol_root.join("process-data").join("state")));
+        let error = build_paths(RuntimeOperation::Processing, present).unwrap_err();
+        assert!(matches!(error, RuntimeContextError::SourceStateDirectoryDisagreement));
+    }
+
+    #[test]
+    fn rejects_traversal_in_source_state_directory() {
+        let (project_root, protocol_root) = roots();
+        let session = session();
+        let operation_root = protocol_root.join("get-raw-data");
+        let error = RuntimeContextPaths::new(
+            project_root,
+            protocol_root.clone(),
+            operation_root.clone(),
+            operation_root.join("sessions").join(session.id()),
+            protocol_root.join("data/raw"),
+            protocol_root.join("data/processed"),
+            Some(operation_root.join("..").join("state")),
+            RuntimeOperation::Acquisition,
+            &session,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeContextError::PathTraversal { field: "source_state_directory" }
+        ));
+    }
+
+    #[test]
+    fn encode_decode_round_trips_source_state_directory_for_acquisition() {
+        let paths = build_paths(RuntimeOperation::Acquisition, None).expect("valid paths");
+        let project = project();
+        let session = session();
+        let runtime = OwnedRuntimeIdentity::http_acquisition("example-source", 1);
+
+        let json = encode_runtime_context(&project, &runtime, &session, &paths).expect("encode");
+        let decoded = decode_runtime_context(&json, &project, &runtime, &session).expect("decode");
+
+        assert_eq!(
+            decoded.paths.source_state_directory(),
+            paths.source_state_directory()
+        );
+        assert!(decoded.paths.source_state_directory().is_some());
+    }
+
+    #[test]
+    fn encode_decode_round_trips_absent_source_state_directory_for_processing() {
+        let paths = build_paths(RuntimeOperation::Processing, None).expect("valid paths");
+        let project = project();
+        let session = session();
+        let runtime = OwnedRuntimeIdentity::http_processing("example-source", 1);
+
+        let json = encode_runtime_context(&project, &runtime, &session, &paths).expect("encode");
+        assert!(
+            !json.contains("source_state_directory"),
+            "processing envelope must not encode a source_state_directory field: {json}"
+        );
+
+        let decoded = decode_runtime_context(&json, &project, &runtime, &session).expect("decode");
+        assert_eq!(decoded.paths.source_state_directory(), None);
+    }
+
+    #[test]
+    fn session_data_paths_from_context_paths_preserves_source_state_directory() {
+        let acquisition = build_paths(RuntimeOperation::Acquisition, None).expect("valid paths");
+        let processing = build_paths(RuntimeOperation::Processing, None).expect("valid paths");
+
+        assert_eq!(
+            SessionDataPaths::from_context_paths(&acquisition).source_state_directory(),
+            acquisition.source_state_directory()
+        );
+        assert_eq!(
+            SessionDataPaths::from_context_paths(&processing).source_state_directory(),
+            None
+        );
+    }
 }

@@ -226,6 +226,7 @@ pub enum RuntimeContextError {
     OperationRootDisagreement,
     ProtocolRootDisagreement,
     SessionDirectoryDisagreement,
+    SourceStateDirectoryDisagreement,
 }
 
 #[derive(Debug)]
@@ -319,6 +320,9 @@ impl fmt::Display for RuntimeContextError {
             Self::SessionDirectoryDisagreement => {
                 f.write_str("runtime context session directory does not match session identity")
             }
+            Self::SourceStateDirectoryDisagreement => f.write_str(
+                "runtime context source-state directory does not match operation (must be Some(operation_root/state) for acquisition and None for processing)",
+            ),
         }
     }
 }

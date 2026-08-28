@@ -58,6 +58,17 @@ impl RuntimeContextEnvGuard {
             previous,
         }
     }
+
+    /// Overwrite the environment value for a second invocation, without releasing or
+    /// re-acquiring the serialization lock (`self` already holds it for its lifetime).
+    /// The original pre-fixture value captured by `set` is still what gets restored on
+    /// drop, which is correct: it predates both invocations.
+    fn replace(&self, value: &str) {
+        // SAFETY: see `set`; still covered by the held `_lock`.
+        unsafe {
+            std::env::set_var(RUNTIME_CONTEXT_ENVIRONMENT_VARIABLE, value);
+        }
+    }
 }
 
 impl Drop for RuntimeContextEnvGuard {
@@ -83,6 +94,8 @@ pub(crate) struct RuntimeInvocationFixture {
     _env_guard: RuntimeContextEnvGuard,
     store: SessionStore,
     project: ProjectInvocationIdentity,
+    project_root: std::path::PathBuf,
+    protocol_root: std::path::PathBuf,
     runtime_identity: RuntimeIdentity,
     session: SessionInvocationIdentity,
     execution_mode: RuntimeExecutionMode,
@@ -147,13 +160,18 @@ impl RuntimeInvocationFixture {
             .expect("acquire session lease");
 
         let session_directory = operation_root.join("sessions").join(session.id());
+        let source_state_directory = match operation {
+            RuntimeOperation::Acquisition => Some(operation_root.join("state")),
+            RuntimeOperation::Processing => None,
+        };
         let paths = RuntimeContextPaths::new(
-            project_root,
-            protocol_root,
+            project_root.clone(),
+            protocol_root.clone(),
             operation_root,
             session_directory,
             raw_data_directory,
             processed_data_directory,
+            source_state_directory,
             operation,
             &session,
         )
@@ -170,11 +188,74 @@ impl RuntimeInvocationFixture {
             _env_guard: env_guard,
             store,
             project,
+            project_root,
+            protocol_root,
             runtime_identity,
             session,
             execution_mode,
             supervision_mode,
         }
+    }
+
+    /// Create a second `Prepared` session against this fixture's *same* underlying
+    /// `SessionStore` (same protocol/operation/raw/processed/state directories), and
+    /// switch the fixture's active environment/lease/session to it. Used by tests that
+    /// prove durable state (`source_state_directory()`) persists across sessions,
+    /// rather than being tied to a single session's lifecycle.
+    ///
+    /// The first session's lease is released (dropped) when this reassigns `_lease`,
+    /// mirroring one supervised session ending before the next begins.
+    pub(crate) fn advance_to_new_session(&mut self) {
+        let operation = self.runtime_identity.operation();
+        let prepared = self
+            .store
+            .create_prepared(NewSessionRecord {
+                project: self.project.clone(),
+                runtime: self.runtime_identity.into_owned_identity(),
+                operation: SessionOperation::from_runtime_operation(operation),
+                execution_mode: self.execution_mode,
+                supervision_mode: self.supervision_mode,
+            })
+            .expect("create second prepared session");
+        let new_session = prepared.record().session().clone();
+        let new_lease = self
+            .store
+            .acquire_lease(&new_session)
+            .expect("acquire second session lease");
+
+        let operation_root = self.store.operation_root().path().to_path_buf();
+        let raw_data_directory = self.protocol_root.join("data").join("raw");
+        let processed_data_directory = self.protocol_root.join("data").join("processed");
+        let source_state_directory = match operation {
+            RuntimeOperation::Acquisition => Some(operation_root.join("state")),
+            RuntimeOperation::Processing => None,
+        };
+        let session_directory = operation_root.join("sessions").join(new_session.id());
+
+        let paths = RuntimeContextPaths::new(
+            self.project_root.clone(),
+            self.protocol_root.clone(),
+            operation_root,
+            session_directory,
+            raw_data_directory,
+            processed_data_directory,
+            source_state_directory,
+            operation,
+            &new_session,
+        )
+        .expect("valid runtime context paths for second session");
+
+        let env_value = encode_runtime_context(
+            &self.project,
+            &self.runtime_identity.into_owned_identity(),
+            &new_session,
+            &paths,
+        )
+        .expect("encode runtime context for second session");
+        self._env_guard.replace(&env_value);
+
+        self._lease = new_lease;
+        self.session = new_session;
     }
 
     /// Convenience constructor for `RuntimeExecutionMode::Run` + `Foreground`.

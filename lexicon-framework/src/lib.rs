@@ -3301,14 +3301,25 @@ mod tests {
     /// process-wide current working directory. Under heavy parallel load in this
     /// crate's test binary, a transient container/overlay-filesystem condition can
     /// occasionally leave `getcwd()` failing for that inherited directory even
-    /// though it exists on disk, which `cargo metadata` reports as "Could not
-    /// locate working directory". This is unrelated to `validate_managed_workspace_metadata`'s
+    /// though it exists on disk. This is unrelated to `validate_managed_workspace_metadata`'s
     /// own logic (it passes reliably in isolation and under `--test-threads=1`).
+    ///
+    /// Observed manifestations of this same race include distinct message text
+    /// depending on which layer first calls `getcwd()`: Cargo's own "Could not
+    /// locate working directory", and the OS-level "couldn't get the current
+    /// directory of the process ... No such file or directory (os error 2)".
     fn is_transient_working_directory_error(error: &ManagedWorkspaceMetadataError) -> bool {
+        const TRANSIENT_MESSAGE_FRAGMENTS: [&str; 3] = [
+            "Could not locate working directory",
+            "couldn't get the current directory of the process",
+            "getcwd() failed",
+        ];
         matches!(
             error,
             ManagedWorkspaceMetadataError::CommandFailed(message)
-                if message.contains("Could not locate working directory")
+                if TRANSIENT_MESSAGE_FRAGMENTS
+                    .iter()
+                    .any(|fragment| message.contains(fragment))
         )
     }
 
