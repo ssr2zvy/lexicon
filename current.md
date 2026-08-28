@@ -1,975 +1,523 @@
-Current implementation milestone: durable acquisition checkpoints and historical transaction lookup
+# Completion report — Durable HTTP Acquisition Checkpoints and Historical Lookup
 
-Objective
+## Files created
 
-Implement the Core-owned durable checkpoint primitives required by workspace/specs/contract.md.
+- `lexicon-core/src/protocols/http/checkpoint/mod.rs`  
+  Module root; re-exports all public types from `error` and `model`.
 
-The completed acquisition path already provides:
+- `lexicon-core/src/protocols/http/checkpoint/error.rs`  
+  All seven checkpoint error types (see below).
 
-session-bound HTTP context
-→ Core-mediated HTTP execution
-→ immutable finalized raw transaction
-→ durable acquisition progress
-→ source-visible RecordedTransaction
+- `lexicon-core/src/protocols/http/checkpoint/model.rs`  
+  Checkpoint document schema, `CommittedHttpCheckpoint` opaque type, admission
+  logic, and atomic publication helper.
 
-This milestone adds:
+## Files changed
 
-verified source-specific work
-→ durable checkpoint commit
-→ checkpoint discovery across acquisition sessions
-→ historical transaction lookup by logical request key
-→ source-defined resume behavior
+- `lexicon-core/src/protocols/http/transaction/mod.rs`  
+  `HttpLogicalRequestKey` character rejection corrected (see below).
 
-The source decides what a checkpoint means.
+- `lexicon-core/src/protocols/http/context.rs`  
+  `HttpAcquisitionContext` extended with transaction registry, `execute`
+  wrapper/impl split, and four new public methods.
 
-Core owns:
+- `lexicon-core/src/protocols/http/error.rs`  
+  `AcquisitionError` extended with `CheckpointCommit`, `CheckpointLookup`, and
+  `TransactionAdmission` variants.
 
-* checkpoint identity validation;
-* durable checkpoint persistence;
-* checkpoint/session/transaction provenance;
-* atomic publication;
-* checkpoint admission;
-* cross-session discovery;
-* historical finalized-transaction lookup;
-* safe response-header lookup.
+- `lexicon-core/src/protocols/http/mod.rs`  
+  Added `pub mod checkpoint` and re-exported all public checkpoint types.
 
-Do not implement automatic source workflow resumption. The registered resume handler remains ordinary sequential Rust and decides what to skip, repeat, or continue.
+---
 
-Contract authority
+## Final checkpoint module structure
 
-Follow:
+```
+lexicon-core/src/protocols/http/checkpoint/
+  mod.rs      — public re-exports
+  error.rs    — all error enums
+  model.rs    — document schema, CommittedHttpCheckpoint, admission, helpers
+```
 
-workspace/specs/contract.md
+---
 
-The intended source-facing pattern is:
+## Logical-request-key correction
 
-let checkpoint = format!("item/{}", item.id);
-if context.has_checkpoint(&checkpoint)? {
-    continue;
-}
-let transaction = context.execute(
-    HttpRequest::get(&item.url)?
-        .logical_key(&checkpoint),
-)?;
-transaction.response().require_success()?;
-// Source-specific verification occurs here.
-context.commit_checkpoint(&checkpoint)?;
+`HttpLogicalRequestKey::new` previously rejected `/` and `\` as invalid
+characters.  The rejection predicate now only rejects:
 
-For conditional requests:
+- empty string;
+- strings longer than 512 bytes (UTF-8);
+- strings containing NUL bytes (`\x00`);
+- strings containing ASCII control characters (bytes `\x01`–`\x1f` and
+  `\x7f`).
 
-if let Some(etag) =
-    context.latest_response_header(&checkpoint, "ETag")?
+Path-separator characters `/` and `\` are now accepted as ordinary characters
+in logical request keys.
+
+---
+
+## Checkpoint key representation
+
+The checkpoint key is the `HttpLogicalRequestKey` string value stored verbatim
+in the checkpoint document (`"key"` field).  The key is never used directly as
+a filesystem path component.
+
+---
+
+## Checkpoint schema version
+
+`HTTP_CHECKPOINT_SCHEMA_VERSION = 1` (exported constant from `checkpoint`
+module).
+
+---
+
+## Checkpoint document size limit
+
+`MAX_HTTP_CHECKPOINT_DOCUMENT_BYTES = 65536` (64 KiB, exported constant).
+Documents exceeding this size are rejected during admission.
+
+---
+
+## Checkpoint storage layout
+
+```
+<operation_root>/sessions/<session-id>/checkpoints/<key-sha256>.json
+```
+
+The `checkpoints/` directory is created lazily by `commit_checkpoint` before
+first write.
+
+---
+
+## Checkpoint document fields
+
+```json
 {
-    request = request.header("If-None-Match", etag)?;
+  "schema_version":          1,
+  "key":                     "<logical key string>",
+  "key_sha256":              "<64-char lowercase hex SHA-256 of key UTF-8 bytes>",
+  "project_name":            "<project name string>",
+  "runtime_protocol":        "http",
+  "runtime_operation":       "acquisition",
+  "session_id":              "<session UUID string>",
+  "transaction_id":          "<transaction UUID string>",
+  "physical_attempt_index":  0,
+  "redirect_index":          0,
+  "retry_index":             0,
+  "committed_at_unix_nanos": 1234567890000000000
 }
+```
+
+Unknown fields are rejected on decode (`serde deny_unknown_fields`).
+
+---
+
+## Checkpoint filename derivation
+
+The filename is the lowercase hex SHA-256 digest of the exact UTF-8 byte
+representation of the logical key string, with a `.json` suffix:
+
+```
+<64-char hex SHA-256 of key bytes>.json
+```
+
+The filename stem must consist of exactly 64 lowercase hexadecimal digits.
+Any other filename is rejected by `extract_layout_parts`.
+
+---
+
+## Context transaction registry behavior
+
+`HttpAcquisitionContext` now holds an internal `HashMap<String,
+TransactionRegistryEntry>` keyed by the logical request key string.
+
+After every call to `execute`, if the result is `Ok(tx)` and the transaction
+has a logical key and its outcome is `HttpRecordedOutcome::Response`, the
+registry is updated (inserting or replacing) with a
+`TransactionRegistryEntry { transaction_identity, attempt_identity,
+transaction_path }`.
+
+Transport failures and transactions without a logical key are never registered.
+The registry survives across multiple `execute` calls; the entry for a key is
+always replaced with the latest successful response for that key.
+
+---
+
+## `has_checkpoint(key: impl AsRef<str>) -> AcquisitionResult<bool>`
+
+1. Requires a managed context (`session_identity` is `Some`); returns
+   `AcquisitionError::CheckpointLookup(UnmanagedContext)` otherwise.
+2. Validates and constructs `HttpLogicalRequestKey`; returns
+   `InvalidKey` on failure.
+3. Loads the current session record to obtain the `project_name` for
+   cross-session identity filtering.
+4. Computes `checkpoint_filename(key)`.
+5. Reads `<operation_root>/sessions/` directory entries (non-symlink
+   directories only).
+6. For each session subdirectory, checks whether
+   `<session_dir>/checkpoints/<filename>` exists.
+7. If the file exists, calls `admit_http_checkpoint_from_disk` with
+   `expected_session_id = None` (accepts any session).
+   - On success: returns `Ok(true)`.
+   - On admission error: returns `Err(AcquisitionError::CheckpointLookup(
+     CorruptCandidate { session_id, source }))`.
+8. If no session has a matching checkpoint, returns `Ok(false)`.
+
+---
+
+## `commit_checkpoint(key: impl AsRef<str>) -> AcquisitionResult<CommittedHttpCheckpoint>`
+
+1. Requires managed context; returns `UnmanagedContext` otherwise.
+2. Validates and constructs `HttpLogicalRequestKey`.
+3. Loads the current session record; verifies state is `Running`, operation
+   is `Acquisition`, runtime is HTTP/acquisition, session identity matches,
+   and lease is `Owned`.
+4. Looks up the transaction registry for the key; returns `NoTransactionForKey`
+   if absent.
+5. Re-admits the transaction from disk via `admit_transaction_from_disk`.
+6. Reads `request/metadata.json` from the transaction directory; verifies the
+   `session_id` field matches the current session.
+7. Verifies the transaction's logical key matches the checkpoint key.
+8. Verifies the transaction outcome is `HttpRecordedOutcome::Response` (not a
+   transport failure).
+9. Computes `key_sha256_hex(key)` and the target path
+   `<session_directory>/checkpoints/<sha256>.json`.
+10. Validates both `checkpoints/` directory and `target_path` as managed paths
+    under `protocol_root`.
+11. Creates `checkpoints/` directory if absent.
+12. **Idempotency check**: if `target_path` already exists, calls
+    `admit_http_checkpoint_from_disk` on it with `expected_session_id =
+    Some(session_id)`; if the admitted checkpoint's key, key_sha256, session_id,
+    transaction_identity, and attempt_identity all match the current commit
+    request, returns `Ok(existing)` immediately.  If fields disagree, returns
+    `ExistingIdentityMismatch`.
+13. Acquires `committed_at_unix_nanos` from the monotonic wall clock.
+14. Re-validates the session and lease immediately before publication.
+15. Serializes `HttpCheckpointDocumentV1` to JSON; writes to a temp file in
+    `checkpoints/`; syncs; publishes atomically with no-replace semantics (see
+    below).
+16. Syncs the `checkpoints/` directory; if directory sync fails, returns
+    `PartialCommit(HttpCheckpointPartialCommitError)` (the checkpoint file
+    itself was successfully written).
+17. Constructs and returns `CommittedHttpCheckpoint`.
+
+---
+
+## Committed checkpoint representation
+
+`CommittedHttpCheckpoint` is an opaque `pub struct` with read-only accessors:
+
+- `key() -> &HttpLogicalRequestKey`
+- `key_sha256() -> &str`
+- `session_id() -> &str`
+- `transaction_identity() -> &HttpTransactionIdentity`
+- `attempt_identity() -> &HttpAttemptIdentity`
+- `checkpoint_path() -> &Path`
+- `committed_at_unix_nanos() -> u64`
 
-Preserve that ordinary-Rust model.
+There is no public constructor.  `CommittedHttpCheckpoint` can only be obtained
+from `commit_checkpoint` or `admit_http_checkpoint_from_disk`.
 
-Repository-grounded starting point
+---
 
-At commit:
+## Exact checkpoint validation order (admission)
 
-2d6b03b53a3e5731e7855f7db5b72b169863ec71
+`admit_http_checkpoint_from_disk` performs checks in this order:
 
-the following already exist:
+1. Validate `trusted_operation_root` as an existing managed directory.
+2. Check no symlinks on any component of `checkpoint_path`.
+3. Confirm `checkpoint_path` is a regular file (not a directory or symlink).
+4. Extract layout parts: confirm path matches
+   `…/sessions/<id>/checkpoints/<64-hex>.json`.
+5. Read file; reject if exceeds `MAX_HTTP_CHECKPOINT_DOCUMENT_BYTES`.
+6. Deserialize JSON; verify `schema_version == 1`; reject unknown fields.
+7. Verify `doc.key_sha256 == sha256_hex(doc.key)`.
+8. Verify `doc.project_name == expected_project_name`.
+9. Verify `doc.runtime_protocol` parses to `RuntimeProtocol::Http`.
+10. Verify `doc.runtime_operation` parses to `RuntimeOperation::Acquisition`.
+11. Verify `doc.session_id == layout_session_id` (path consistency).
+12. If `expected_session_id` is `Some(s)`, verify `doc.session_id == s`.
+13. Load the session record for `doc.session_id`; verify project, runtime, and
+    that the session was started (`state != Prepared` and `started_at.is_some()`).
+14. Find and admit the transaction from `trusted_raw_root` by scanning for a
+    directory whose name ends with `doc.transaction_id`; verify session_id in
+    request metadata.
+15. Verify `transaction.logical_request_key() == doc.key`.
+16. Verify transaction outcome is `Response`.
+17. Verify `transaction.attempt_identity()` fields match
+    `doc.physical_attempt_index`, `doc.redirect_index`, `doc.retry_index`.
+18. Reconstruct and return `CommittedHttpCheckpoint`.
 
-* acquisition and resume handler registration;
-* run/resume admission;
-* session-bound HttpAcquisitionContext;
-* finalized immutable HTTP transactions;
-* typed transaction identities;
-* typed attempt identities;
-* typed logical request keys;
-* strict transaction admission from disk;
-* transaction body length and SHA-256 verification;
-* acquisition progress persistence;
-* foreground session creation and resume selection.
+---
 
-The following remain absent:
+## Transaction provenance requirements
 
-* has_checkpoint(...);
-* commit_checkpoint(...);
-* checkpoint schema and durable files;
-* checkpoint admission;
-* cross-session checkpoint discovery;
-* historical transaction lookup by logical key;
-* latest_response_header(...);
-* an in-memory association between successful execute(...) results and logical request keys.
+Before `commit_checkpoint` will proceed, the referenced transaction must:
 
-Implement those missing boundaries.
+- be recorded in the in-memory transaction registry for the current context
+  (registered by a prior successful `execute` call in this session);
+- admit successfully from disk;
+- have its `request/metadata.json` `session_id` equal to the current session;
+- have a logical key equal to the checkpoint key;
+- have an outcome of `HttpRecordedOutcome::Response`.
 
-Logical request key correction
+---
 
-The current HttpLogicalRequestKey rejects:
+## Checkpoint atomic no-replace publication behavior
 
-/
-\
+On Unix: creates a hard link from the temp file to the target path, then
+removes the temp file.  If `hard_link` fails with `AlreadyExists`, the error
+is propagated as `AtomicPublication`.
 
-because it was initially treated as if it might become a raw filesystem component.
+On non-Unix: checks if the target file exists; if so, returns `AlreadyExists`
+error; otherwise calls `TempPath::persist` (atomic rename).
 
-The contract explicitly uses logical keys such as:
+---
 
-item/<id>
-manifest/page/2
-archive/2026-08
+## Checkpoint idempotency behavior
 
-Logical request keys must never be used directly as filesystem paths.
+If the target path already exists when `commit_checkpoint` is called, the
+existing checkpoint is admitted and its identity fields are compared to the
+current request.  If all fields agree (key, key_sha256, session_id,
+transaction_identity, attempt_identity), the existing committed checkpoint is
+returned directly without re-writing.  Field disagreement returns
+`ExistingIdentityMismatch`.
 
-Required correction
+---
 
-Allow / and \ as ordinary logical-key characters.
+## Checkpoint partial-commit behavior
 
-Continue rejecting:
+If the checkpoint file was successfully published (atomic no-replace succeeded)
+but the directory sync step fails, `commit_checkpoint` returns
+`Err(AcquisitionError::CheckpointCommit(PartialCommit(
+HttpCheckpointPartialCommitError { directory_sync_error })))`.  
 
-* empty keys;
-* control characters;
-* NUL;
-* values exceeding the configured UTF-8 byte maximum.
+`HttpCheckpointPartialCommitError` is `pub` and exposes `directory_sync_error:
+std::io::Error`.  A subsequent `has_checkpoint` or `commit_checkpoint` call may
+succeed or observe the idempotency path if the file survived the partial
+commit.
 
-Do not trim or normalize the key.
+---
 
-Do not interpret:
+## Checkpoint admission behavior
 
-/
-\
-.
-..
-:
+See "Exact checkpoint validation order" above.  Any validation failure results
+in a typed `HttpCheckpointAdmissionError` variant; no silent ignoring of
+malformed checkpoints.
 
-as path syntax.
+---
 
-The exact logical key is metadata, not a path.
+## Historical session-state behavior
 
-Checkpoint filenames must be derived from a cryptographic hash of the exact UTF-8 key bytes.
+A historical session record is considered valid for checkpoint lookup if:
 
-Canonical checkpoint key
+- `state != SessionState::Prepared` (session was started at least once), and
+- `started_at.is_some()`.
 
-Use the same validated logical identity for:
+Sessions with state `Running`, `Succeeded`, `Failed`, or `Abandoned` that have
+a `started_at` timestamp are all accepted.  `Prepared` sessions (never started)
+are rejected with `SessionNotStarted`.
 
-* HttpRequest::logical_key(...);
-* checkpoint lookup;
-* checkpoint commit;
-* transaction lookup.
+---
 
-A checkpoint key may be represented by:
+## Cross-session lookup behavior
 
-HttpLogicalRequestKey
+`has_checkpoint` enumerates all entries in `<operation_root>/sessions/`,
+skipping non-directory entries and symlinks.  For each session directory, it
+checks for `checkpoints/<key-sha256>.json`.  If such a file exists, it is
+admitted using `admit_http_checkpoint_from_disk` with `expected_session_id =
+None`, which accepts checkpoints from any session so long as project name and
+runtime metadata agree and the referenced transaction is valid.
 
-or a narrow wrapper:
+---
 
-pub struct HttpCheckpointKey(
-    HttpLogicalRequestKey,
-);
+## Corrupt checkpoint behavior
 
-Do not introduce two incompatible validation rules for logical request and checkpoint keys.
+`has_checkpoint`: if admission of a found candidate file fails, the function
+returns `Err(AcquisitionError::CheckpointLookup(CorruptCandidate {
+session_id, source: Box<HttpCheckpointAdmissionError> }))`.  There is no
+silent skipping of corrupt candidates.
 
-Provide source-facing APIs that continue accepting &str or impl AsRef<str> for convenience and return typed validation errors.
+`commit_checkpoint` (idempotency path): if the existing file at the target
+path fails admission, `ExistingCorrupt(HttpCheckpointAdmissionError)` is
+returned.
 
-Checkpoint schema version
+---
 
-Define a schema version independent from:
+## Referenced transaction admission behavior
 
-* raw transaction schema;
-* acquisition progress schema;
-* session schema;
-* invocation schema;
-* runtime-information schema.
+`admit_http_checkpoint_from_disk` re-admits the referenced transaction by
+scanning `trusted_raw_root` for a directory name ending with the
+`transaction_id` from the checkpoint document.  It then:
 
-For example:
+- calls `admit_transaction_from_disk` on the found path;
+- reads `request/metadata.json` and verifies `session_id`;
+- verifies `logical_request_key`, outcome, and attempt identity against the
+  checkpoint document.
 
-pub const HTTP_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+Any failure returns `ReferencedTransaction(HttpTransactionAdmissionError)` or
+`TransactionSessionMismatch` / `TransactionKeyMismatch` /
+`TransactionNotResponse` / `AttemptMismatch` as appropriate.
 
-Use strict decoding:
+---
 
-#[serde(deny_unknown_fields)]
+## `latest_transaction(key: impl AsRef<str>) -> AcquisitionResult<Option<RecordedTransaction>>`
 
-Unknown schema versions must be typed.
+Scans `raw_data_directory()` for finalized (non-`.partial-`) transaction
+directories whose admitted `logical_request_key` equals `key` and whose
+outcome is `HttpRecordedOutcome::Response` (transport failures skipped).
 
-Checkpoint storage layout
+Selection rule (deterministic; most-recent wins):
 
-Store checkpoint records below the acquisition session that committed them:
+1. Primary: numeric timestamp prefix of directory name (higher = newer).
+2. Secondary: `physical_attempt_index` (higher = newer).
+3. Tertiary: lexicographic comparison of transaction ID string (higher = newer).
 
-get-raw-data/
-└── sessions/
-    └── <session-id>/
-        └── checkpoints/
-            └── <sha256-of-logical-key>.json
+Returns `Ok(None)` if no matching transaction exists.  Returns
+`Err(AcquisitionError::TransactionAdmission(...))` if a candidate directory
+fails admission.
 
-Requirements:
+Does not require a managed context.
 
-* checkpoint files remain part of detailed durable session history;
-* checkpoint keys are never used directly as path components;
-* the filename is lowercase hexadecimal SHA-256 of the exact logical-key UTF-8 bytes;
-* each checkpoint file is immutable after successful publication;
-* checkpoint files from failed, stale-reconciled, succeeded, or later abandoned sessions remain durable;
-* no operation-root global mutable checkpoint index is required in this milestone;
-* cross-session lookup derives state from admitted immutable checkpoint records.
+---
 
-Do not place checkpoint files inside:
+## Deterministic latest-selection rule
 
-data/raw/
-data/processed/
-runtime/
+As above: `(dir_timestamp_nanos DESC, physical_attempt_index DESC, transaction_id DESC)`.
 
-Do not add a mutable root-level checkpoint summary.
+---
 
-Checkpoint document
+## `latest_response_header(key, header_name) -> AcquisitionResult<Option<String>>`
 
-Define an opaque checkpoint document equivalent to:
+1. Validates `header_name` with `reqwest::header::HeaderName::from_bytes`; 
+   returns `source_message` error on invalid name.
+2. Calls `latest_transaction(key)`; returns `Ok(None)` if no transaction.
+3. Normalizes `header_name` to lowercase.
+4. Silently returns `Ok(None)` (never returns a value) for headers:
+   `set-cookie`, `authorization`, `proxy-authorization`, `cookie`.
+5. Searches `RecordedHttpResponse::headers()` for the first matching
+   (case-insensitive) header.
+6. If the value is `RecordedHeaderValue::Utf8(text)` and `text == "<redacted>"`,
+   returns `Ok(None)`.
+7. If the value is `RecordedHeaderValue::Utf8(text)` and not redacted, returns
+   `Ok(Some(text))`.
+8. If the value is `RecordedHeaderValue::Base64(_)`, returns
+   `Err(AcquisitionError::source_message(...))`.
+9. If no matching header is found, returns `Ok(None)`.
 
-pub struct HttpCheckpointV1 {
-    schema_version: u32,
-    key: HttpLogicalRequestKey,
-    key_sha256: String,
-    project: ProjectIdentity,
-    runtime: OwnedRuntimeIdentity,
-    session: SessionIdentity,
-    transaction: HttpTransactionIdentity,
-    attempt: HttpAttemptIdentity,
-    committed_at_unix_nanos: u64,
-}
+---
 
-Equivalent naming is acceptable.
+## Non-UTF-8 header behavior
 
-Include at least:
+If the matching response header carries a `RecordedHeaderValue::Base64` value
+(non-UTF-8 bytes encoded as base64), `latest_response_header` returns
+`Err(AcquisitionError::source_message("response header value is non-UTF-8 encoded bytes"))`.
 
-* schema version;
-* exact logical key;
-* SHA-256 of the key;
-* project identity;
-* runtime identity;
-* committing session identity;
-* finalized transaction identity;
-* attempt identity;
-* commit timestamp.
+---
 
-The runtime identity must represent:
+## Managed-redacted header behavior
 
-HTTP acquisition
+The headers `set-cookie`, `authorization`, `proxy-authorization`, and `cookie`
+are always suppressed: `latest_response_header` returns `Ok(None)` for these
+regardless of the recorded value.
 
-Do not persist:
+Any header whose recorded `Utf8` value equals the literal string `<redacted>`
+is also suppressed (returns `Ok(None)`).
 
-* source arguments;
-* invocation-envelope JSON;
-* runtime-context JSON;
-* URLs;
-* headers;
-* body contents;
-* arbitrary source error messages;
-* filesystem paths.
+---
 
-Checkpoint provenance
+## Run-handler checkpoint behavior
 
-A checkpoint commit must refer to a finalized, progress-published transaction from the current managed context.
+An `HttpAcquireFn` (run handler) may call `ctx.has_checkpoint(key)` to
+determine whether a prior session committed a checkpoint for a given key, and
+`ctx.commit_checkpoint(key)` to durably record that the logical step
+corresponding to `key` has been completed.  The handler receives an `Ok` result
+containing a `CommittedHttpCheckpoint` on success.
 
-The transaction must:
+---
 
-* belong to the current session;
-* have a logical request key;
-* use the same exact logical key as the checkpoint;
-* represent a finalized response transaction;
-* have completed acquisition-progress publication;
-* still pass strict transaction admission from disk;
-* remain below the context’s trusted raw-data root.
+## Resume-handler checkpoint behavior
 
-Do not allow a source to commit a checkpoint for:
+An `HttpResumeFn` (resume handler) may use the same `has_checkpoint` and
+`commit_checkpoint` APIs.  Checkpoint semantics are identical across run and
+resume contexts; there is no separate resume-specific checkpoint path.
 
-* an arbitrary transaction identity;
-* a transaction from another session;
-* a transport-failure transaction;
-* a partial transaction;
-* a transaction whose logical key differs;
-* a transaction that failed strict admission;
-* a transaction path supplied by source code.
+---
 
-The source remains responsible for interpreting the response and deciding whether its source-specific verification succeeded before calling commit_checkpoint(...).
+## Core does not interpret checkpoint meaning
 
-Core proves only durable transaction provenance and checkpoint publication.
+`lexicon-core` records and retrieves checkpoints as opaque identity markers.
+The semantic meaning of a checkpoint (what work it represents, how it affects
+source behavior) is determined entirely by the source handler.  Core does not
+inspect the logical key string for semantic content.
 
-Context transaction registry
+---
 
-Extend HttpAcquisitionContext with private in-memory state tracking successfully returned transactions by logical request key.
+## No checkpoint payload API
 
-After:
+No arbitrary payload (JSON body, metadata map, or any structured content beyond
+the identity fields in `HttpCheckpointDocumentV1`) was added.  The
+`CommittedHttpCheckpoint` exposes only identity and provenance fields.
 
-context.execute(request)
+---
 
-returns Ok(RecordedTransaction), register that finalized progress-published transaction when it has a logical key.
+## Session lifecycle files not mutated
 
-Requirements:
+`commit_checkpoint` creates files under
+`<session_directory>/checkpoints/<sha256>.json`.  It does not read or write:
 
-* store typed transaction identity and attempt identity;
-* store or retain the admitted final transaction path internally;
-* update the entry when a later successful execution uses the same key;
-* never register transport-failure errors;
-* never register retry/redirect attempts that were not returned as the final successful execute(...) result;
-* never register a transaction before progress publication succeeds.
+- `session.json` (session record);
+- `status.json` (session status);
+- the session lease file;
+- any progress or metadata files.
 
-Do not expose a mutable registry.
+Session lifecycle files are not mutated by checkpoint operations.
 
-Do not make checkpoint correctness depend only on the in-memory value; re-admit the transaction from disk during commit.
+---
 
-Source-facing checkpoint APIs
+## Capability-set result
 
-Add:
+`HttpCapabilitySet::empty()` retained unchanged.  `ClientCertificateV1` was
+not advertised.  No capability identifiers were modified.
 
-impl HttpAcquisitionContext {
-    pub fn has_checkpoint(
-        &self,
-        key: impl AsRef<str>,
-    ) -> AcquisitionResult<bool>;
-    pub fn commit_checkpoint(
-        &mut self,
-        key: impl AsRef<str>,
-    ) -> AcquisitionResult<CommittedHttpCheckpoint>;
-}
+---
 
-Equivalent borrowing is acceptable if required by internal caching.
+## Explicitly not implemented
 
-Provide an opaque returned value:
+The following behaviors were explicitly not implemented in this milestone:
 
-pub struct CommittedHttpCheckpoint {
-    // private
-}
+- arbitrary checkpoint payloads;
+- automatic workflow resumption;
+- automatic source-loop reconstruction;
+- processing transaction discovery;
+- processing SQLite behavior;
+- decoded response readers;
+- client certificates;
+- proxy configuration;
+- background operator host;
+- signal forwarding;
+- background supervision;
+- lexicon build;
+- automatic build-before-run;
+- source migration;
+- cross-compilation;
+- MZA changes;
+- installer changes.
 
-Expose read-only accessors for:
+---
 
-* key;
-* key hash;
-* committing session identity;
-* transaction identity;
-* attempt identity;
-* checkpoint file path;
-* commit timestamp.
+## Test source adjustments
 
-Do not provide a public unchecked constructor.
+No existing test source was modified.  The logical-request-key correction
+(allowing `/` and `\`) is backward-compatible; any existing key that was
+previously valid remains valid.
 
-Ignoring the returned value with:
+---
 
-context.commit_checkpoint(&key)?;
+## Confirmation: no tests, checks, builds, or tooling was run
 
-must remain ergonomic.
-
-Checkpoint commit validation order
-
-Use this deterministic order:
-
-1. Require a managed session context.
-2. Validate the key.
-3. Revalidate the current session record.
-4. Require session state Running.
-5. Require acquisition operation.
-6. Require HTTP acquisition runtime identity.
-7. Require matching session identity.
-8. Require external supervisor lease ownership.
-9. Locate the current context’s latest returned transaction for the key.
-10. Re-admit that transaction from the trusted raw-data root.
-11. Require transaction session identity matches the current session.
-12. Require transaction logical key matches the checkpoint key.
-13. Require the transaction outcome is an HTTP response.
-14. Compute checkpoint filename from the exact key bytes.
-15. Validate the checkpoint directory and target path.
-16. Publish the immutable checkpoint atomically with no replacement.
-17. Perform the platform-appropriate session/checkpoint directory durability step.
-18. Return CommittedHttpCheckpoint.
-
-Do not reorder filesystem publication ahead of provenance validation.
-
-Checkpoint atomic publication
-
-Checkpoint files are immutable.
-
-Use this sequence:
-
-create or validate checkpoints directory
-→ serialize complete checkpoint document
-→ create unique temporary file in checkpoints directory
-→ write complete bytes
-→ flush
-→ sync file
-→ atomically publish only if final checkpoint path does not exist
-→ sync checkpoints directory
-→ return committed checkpoint
-
-Use the same cross-platform no-replace principles already established for transaction publication.
-
-Do not use ordinary overwrite-capable rename.
-
-Do not use NamedTempFile::persist(...) if it may replace an existing checkpoint.
-
-A checkpoint target collision is not automatically an error; first admit the existing checkpoint.
-
-Idempotent checkpoint behavior
-
-Checkpoint commit must be idempotent.
-
-If the current session already contains a checkpoint at the derived path:
-
-1. strictly admit it;
-2. require its exact logical key and key hash match;
-3. require its project, runtime, and session identities match;
-4. require its transaction and attempt identities match the current commit candidate;
-5. return the existing admitted checkpoint.
-
-If the derived path exists with incompatible contents, return a typed collision/corruption error.
-
-Across different sessions, the same logical key may have one committed record per session.
-
-Do not overwrite an existing checkpoint.
-
-Cross-session checkpoint lookup
-
-has_checkpoint(...) must search immutable checkpoint records across acquisition sessions below the operation root.
-
-Required behavior:
-
-1. Validate the current managed context and logical key.
-2. Enumerate direct child session directories under:
-
-get-raw-data/sessions/
-
-3. Do not follow symlinks.
-4. Derive the checkpoint filename from the key hash.
-5. Inspect only that exact file within each session.
-6. Strictly admit every existing candidate.
-7. Require project identity agreement.
-8. Require HTTP acquisition runtime identity agreement.
-9. Require logical key and key hash agreement.
-10. Require the referenced transaction still passes strict admission.
-11. Require transaction/session/logical-key provenance agreement.
-12. Return true when at least one valid committed checkpoint exists.
-13. Return false when no candidate exists.
-
-A malformed existing candidate is not equivalent to absence.
-
-Return a typed corruption/admission error rather than silently skipping it.
-
-Which historical session states count
-
-A successfully committed checkpoint remains valid when its committing session later becomes:
-
-* Succeeded;
-* Failed;
-* stale-reconciled Failed;
-* Abandoned.
-
-A checkpoint committed while the session was durably Running represents source-confirmed completed work and remains useful after ordinary or abnormal failure.
-
-Do not require the historical session to have succeeded.
-
-Reject a checkpoint whose referenced session record:
-
-* is missing;
-* cannot be decoded;
-* belongs to another project/runtime/operation;
-* never reached Running;
-* disagrees with the checkpoint identity.
-
-A checkpoint found in the current running session is also valid.
-
-Checkpoint admission API
-
-Provide a Core-owned admission API equivalent to:
-
-pub fn admit_http_checkpoint_from_disk(
-    trusted_operation_root: &Path,
-    trusted_raw_root: &Path,
-    checkpoint_path: &Path,
-) -> Result<
-    CommittedHttpCheckpoint,
-    HttpCheckpointAdmissionError,
->;
-
-Equivalent organization is acceptable.
-
-Admission must validate:
-
-* checkpoint path containment;
-* exact sessions/<session-id>/checkpoints/<key-hash>.json layout;
-* no symlinks;
-* regular file type;
-* document size limit;
-* UTF-8 JSON;
-* strict schema;
-* supported schema version;
-* logical-key validity;
-* key hash correctness;
-* filename/hash agreement;
-* project identity;
-* runtime identity;
-* session identity;
-* transaction identity;
-* attempt identity;
-* timestamp validity;
-* session-record agreement;
-* referenced transaction admission;
-* transaction/session agreement;
-* transaction/logical-key agreement;
-* transaction/attempt agreement;
-* response outcome requirement.
-
-Do not trust a checkpoint merely because its JSON parses.
-
-Checkpoint size limit
-
-Define a bounded metadata limit, for example:
-
-pub const MAX_HTTP_CHECKPOINT_DOCUMENT_BYTES: usize =
-    64 * 1024;
-
-The limit applies only to checkpoint metadata.
-
-Reject oversized documents before deserialization.
-
-Checkpoint error hierarchy
-
-Add typed errors equivalent to:
-
-HttpCheckpointKeyError
-HttpCheckpointEncodingError
-HttpCheckpointDecodingError
-HttpCheckpointAdmissionError
-HttpCheckpointCommitError
-HttpCheckpointLookupError
-
-Equivalent nesting is acceptable.
-
-Distinguish at least:
-
-* unmanaged context;
-* invalid key;
-* session validation;
-* supervisor lease unavailable;
-* no current transaction for key;
-* transaction admission;
-* transaction session mismatch;
-* transaction key mismatch;
-* non-response transaction;
-* managed-path validation;
-* checkpoint-directory creation;
-* encoding;
-* temporary-file creation;
-* write;
-* file sync;
-* atomic no-replace publication;
-* directory sync;
-* existing checkpoint corruption;
-* identity mismatch;
-* schema mismatch;
-* key-hash mismatch;
-* filename mismatch;
-* oversized document;
-* session-record admission;
-* cross-session enumeration;
-* referenced transaction missing or corrupt.
-
-Implement:
-
-std::fmt::Display
-std::error::Error
-
-Use source().
-
-Integrate them into AcquisitionError without converting them to strings.
-
-Historical finalized-transaction lookup
-
-Add Core-owned lookup by logical request key.
-
-Provide an API equivalent to:
-
-impl HttpAcquisitionContext {
-    pub fn latest_transaction(
-        &self,
-        key: impl AsRef<str>,
-    ) -> AcquisitionResult<Option<RecordedTransaction>>;
-}
-
-Search only finalized transaction directories that pass:
-
-admit_transaction_from_disk(...)
-
-Ignore recognizable .partial-* directories.
-
-Do not ignore malformed finalized-looking transaction directories.
-
-Return a typed corruption/admission error if such a candidate must be considered but cannot be admitted.
-
-Filter admitted transactions by:
-
-* matching logical request key;
-* matching project/protocol source scope through the trusted context;
-* response outcome.
-
-Do not return transport-failure transactions from this convenience API.
-
-Deterministic latest-transaction selection
-
-Select the latest matching response transaction using a deterministic tuple equivalent to:
-
-request creation timestamp
-physical attempt index
-transaction identity
-
-Do not rely on:
-
-* directory enumeration order;
-* filesystem modification time;
-* lexical UUID ordering alone.
-
-If two candidates have identical timestamp and attempt index, use canonical transaction identity as the final stable tie-breaker.
-
-Latest response header API
-
-Add:
-
-impl HttpAcquisitionContext {
-    pub fn latest_response_header(
-        &self,
-        key: impl AsRef<str>,
-        header_name: impl AsRef<str>,
-    ) -> AcquisitionResult<Option<String>>;
-}
-
-Required behavior:
-
-1. Validate the logical key.
-2. Validate the header name using the HTTP header-name parser.
-3. Find the latest admitted response transaction for the key.
-4. Search response headers case-insensitively.
-5. Preserve repeated-header order.
-6. Return the first matching value unless another exact policy is documented.
-7. Return None if no transaction or header exists.
-8. Return a typed non-UTF-8 error when the recorded value is encoded native bytes.
-9. Reject access to managed-redacted headers.
-
-At minimum, never return a usable value for:
-
-* Set-Cookie;
-* another header represented as the managed redaction marker.
-
-Do not return the literal string:
-
-<redacted>
-
-as though it were a real historical header value.
-
-Do not inspect partial transactions.
-
-Historical metadata redaction boundary
-
-Historical lookup uses the persisted admitted representation.
-
-Therefore:
-
-* source code can recover non-sensitive recorded headers such as ETag or Last-Modified;
-* managed-sensitive headers remain unavailable;
-* raw body files remain available through RecordedTransaction;
-* no unredacted transport-only metadata is reconstructed;
-* no live HTTP response is involved.
-
-Do not weaken redaction to support conditional requests.
-
-Resume behavior
-
-The existing framework already:
-
-* selects resume only for acquisition;
-* requires a prior failed or stale-reconciled session;
-* creates a new session with execution mode Resume;
-* selects the registered resume handler;
-* passes the same native source arguments.
-
-Preserve that behavior.
-
-The resume handler receives the same HttpAcquisitionContext APIs:
-
-has_checkpoint
-latest_transaction
-latest_response_header
-execute
-commit_checkpoint
-
-Core does not automatically invoke the acquisition handler from the resume handler.
-
-Core does not interpret checkpoint keys.
-
-Core does not automatically skip requests.
-
-Core does not reconstruct source-local variables or loop state.
-
-Run behavior
-
-The normal acquisition handler may also use checkpoint and historical lookup APIs.
-
-This supports incremental acquisition across successful runs.
-
-Do not artificially restrict checkpoint lookup to resume mode.
-
-Checkpoint commit remains restricted to the current running managed acquisition session.
-
-Session lifecycle interaction
-
-Checkpoint publication does not transition the session lifecycle state.
-
-It requires the session to remain:
-
-Running
-
-Checkpoint commit must revalidate session and supervisor ownership immediately before final publication.
-
-If the session or lease changes:
-
-* do not publish the checkpoint;
-* preserve the already finalized transaction;
-* return a typed checkpoint commit failure.
-
-Checkpoint publication does not update:
-
-session.json
-session_status.json
-acquisition_progress.json
-
-The immutable checkpoint file is the durable checkpoint record.
-
-Do not introduce Running → Running session transitions.
-
-Checkpoint visibility boundary
-
-A checkpoint becomes visible to has_checkpoint(...) only after:
-
-* its complete file is written;
-* file sync succeeds;
-* no-replace publication succeeds;
-* checkpoint-directory durability step succeeds.
-
-If publication succeeds but directory sync fails:
-
-* preserve the published checkpoint;
-* return a typed checkpoint partial commit;
-* include the admitted or reconstructable checkpoint identity and path;
-* do not delete it.
-
-Later lookup may admit the checkpoint normally if it is present and valid.
-
-Crash behavior
-
-Required behavior:
-
-* crash before checkpoint publication: no committed checkpoint is visible;
-* crash after temp-file write: temporary file is ignored and cleaned when possible;
-* crash after no-replace publication: valid checkpoint may be discovered later;
-* checkpoint directory-sync uncertainty: typed partial commit;
-* previously committed checkpoints remain immutable;
-* finalized HTTP transactions remain unaffected.
-
-Temporary checkpoint files must not be treated as committed records.
-
-No checkpoint payload in this milestone
-
-A checkpoint is a durable completion marker linked to one finalized transaction.
-
-Do not add arbitrary checkpoint payload bytes or JSON in this milestone.
-
-Sources may encode safe source-defined meaning in the logical key.
-
-If arbitrary durable source state becomes necessary, it must be introduced later through an explicit size, redaction, and compatibility contract.
-
-Source-facing exports
-
-Export the supported checkpoint API through:
-
-lexicon_core::http
-
-At minimum export:
-
-* committed checkpoint representation;
-* checkpoint schema version;
-* checkpoint size limit;
-* checkpoint key/admission/commit/lookup errors;
-* checkpoint admission function if intended for processing/framework use.
-
-Do not expose internal unchecked document constructors.
-
-Source-level acceptance requirements
-
-Implement source and API coverage for the following behavior. Do not execute tests now.
-
-1. Logical keys permit contract values such as item/123.
-2. Logical keys are never used directly as paths.
-3. Checkpoint filenames are SHA-256 of exact logical-key bytes.
-4. Checkpoint documents are strict and versioned.
-5. Checkpoint documents contain no URLs, headers, bodies, or source arguments.
-6. Commit requires a managed running acquisition session.
-7. Commit requires active supervisor ownership.
-8. Commit requires a progress-published transaction from the current context.
-9. Commit re-admits the transaction from disk.
-10. Transaction and checkpoint session identities agree.
-11. Transaction and checkpoint logical keys agree.
-12. Transaction and checkpoint attempt identities agree.
-13. Transport-failure transactions cannot be checkpointed.
-14. Partial transactions cannot be checkpointed.
-15. Checkpoint publication is atomic and no-replace.
-16. Existing compatible checkpoint commit is idempotent.
-17. Existing incompatible checkpoint is typed corruption.
-18. Checkpoint directory sync failure is a typed partial commit.
-19. has_checkpoint searches across session directories.
-20. Directory enumeration order does not affect results.
-21. Symlinked session/checkpoint paths are rejected.
-22. Historical failed-session checkpoints remain valid.
-23. Historical abandoned-session checkpoints remain valid.
-24. Missing referenced transactions are typed.
-25. Corrupt referenced transactions are typed.
-26. latest_transaction admits files before returning them.
-27. Partial transaction directories are ignored.
-28. Malformed finalized transactions are not silently skipped.
-29. Latest selection is deterministic.
-30. latest_response_header supports ETag.
-31. Header matching is case-insensitive.
-32. Non-UTF-8 header values are typed.
-33. Managed-redacted headers are never returned as secrets.
-34. Run handlers may use checkpoints.
-35. Resume handlers may use checkpoints.
-36. Core does not interpret checkpoint meaning.
-37. Checkpoint publication does not mutate session lifecycle state.
-38. No checkpoint payload API is introduced.
-39. Existing HTTP execution behavior remains unchanged.
-40. Existing foreground and session ownership remains unchanged.
-
-Command-execution constraint
-
-This is a source-only milestone.
-
-Do not run:
-
-cargo test
-cargo check
-cargo build
-cargo fmt
-cargo clippy
-cargo metadata
-rustc
-
-Do not execute:
-
-* Lexicon CLI commands;
-* generated runners;
-* HTTP servers;
-* real or test HTTP requests;
-* workspace validation;
-* bundle/install automation.
-
-Existing test source may be adjusted only where production API alignment requires it.
-
-Do not add or execute the broad validation matrix now.
-
-Preserve existing behavior
-
-Do not change:
-
-* raw transaction schema except where a narrowly required admitted accessor is needed;
-* exact request-body recording;
-* exact response-body recording;
-* metadata redaction;
-* HTTP retry behavior;
-* HTTP redirect behavior;
-* transaction publication;
-* acquisition progress behavior;
-* source handler signatures;
-* resume registration;
-* invocation-envelope JSON;
-* argv transport;
-* source arguments;
-* HTTP admission;
-* processing admission;
-* session creation;
-* session lease ownership;
-* foreground launch;
-* foreground reconciliation;
-* runtime-information probes;
-* capability identifiers;
-* managed runner layout;
-* source creation;
-* source build;
-* verification;
-* staging;
-* bundle admission;
-* paired publication;
-* CLI syntax;
-* MZA;
-* Protocol 1;
-* installer behavior.
-
-Keep:
-
-HttpCapabilitySet::empty()
-
-Do not advertise ClientCertificateV1.
-
-Explicit exclusions
-
-Do not implement:
-
-* arbitrary checkpoint payloads;
-* automatic workflow resumption;
-* automatic source-loop reconstruction;
-* processing transaction discovery;
-* processing SQLite behavior;
-* decoded response readers;
-* client certificates;
-* proxy configuration;
-* background operator host;
-* signal forwarding;
-* background supervision;
-* lexicon build;
-* automatic build-before-run;
-* source migration;
-* cross-compilation;
-* MZA changes;
-* installer changes.
-
-Completion report
-
-After completion, replace current.md with a report containing:
-
-* files created and changed;
-* final checkpoint module structure;
-* logical-request-key correction;
-* checkpoint key representation;
-* checkpoint schema version;
-* checkpoint document size limit;
-* checkpoint storage layout;
-* checkpoint document fields;
-* checkpoint filename derivation;
-* context transaction registry behavior;
-* has_checkpoint(...) API;
-* commit_checkpoint(...) API;
-* committed checkpoint representation;
-* exact checkpoint validation order;
-* transaction provenance requirements;
-* checkpoint atomic no-replace publication behavior;
-* checkpoint idempotency behavior;
-* checkpoint partial-commit behavior;
-* checkpoint admission behavior;
-* historical session-state behavior;
-* cross-session lookup behavior;
-* corrupt checkpoint behavior;
-* referenced transaction admission behavior;
-* latest_transaction(...) API;
-* deterministic latest-selection rule;
-* latest_response_header(...) API;
-* non-UTF-8 header behavior;
-* managed-redacted header behavior;
-* run-handler checkpoint behavior;
-* resume-handler checkpoint behavior;
-* confirmation that Core does not interpret checkpoint meaning;
-* confirmation that no checkpoint payload API was added;
-* confirmation that session lifecycle files are not mutated by checkpoint commit;
-* capability-set result;
-* confirmation that processing, SQLite, background supervision, and build behavior were not added;
-* existing test source adjusted only for API alignment, if applicable;
-* confirmation that no tests, checks, builds, formatting, linting, metadata commands, CLI execution, runtime execution, HTTP execution, workspace validation, or bundle/install pipeline were run.
-
-Then stop.
-
-Do not begin processing behavior until durable checkpoints and historical lookup are complete.
+No tests, checks, builds, formatting passes, linting passes, metadata
+commands, CLI execution, runtime execution, HTTP execution, workspace
+validation, or bundle/install pipeline steps were executed as part of this
+implementation.
