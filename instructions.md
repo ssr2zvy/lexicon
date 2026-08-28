@@ -1,11 +1,14 @@
 # Continuous implementation workflow
 
+This workflow runs in a loop. Each iteration executes one `current.md`, merges the result into `main`, then derives the next `current.md` from `workspace/specs/contract.md` and `workspace/specs/specs.md` (and `workspace/specs/issues.md` when relevant). The loop repeats until the project fully satisfies the contract and specs, with no remaining gap left to correct.
+
 Authority order:
 
-1. This file defines the workflow steps.
-2. `current.md` defines the actual implementation request, constraints, exclusions, and completion criteria for this run.
-3. Always route planning, implementation scope, validation policy, and the final report through `current.md`.
-4. If any general step below conflicts with `current.md`, follow `current.md`.
+1. This file defines the workflow steps and the loop mechanics.
+2. `workspace/specs/contract.md` and `workspace/specs/specs.md` are the ultimate authority on what "complete" means and what the next `current.md` must contain.
+3. `current.md` defines the actual implementation request, constraints, exclusions, and completion criteria for the current iteration only.
+4. Always route planning, implementation scope, validation policy, and the final report for the current iteration through `current.md`.
+5. If any general step below conflicts with `current.md`, follow `current.md` for the current iteration. If `current.md` conflicts with the contract or specs, flag this explicitly in the report instead of silently resolving it.
 
 ## 1. Fetch the latest remote state
 
@@ -107,15 +110,59 @@ podman exec lexicon-local-test bash -lc 'cd /lexicon && cargo test -p <crate>'
 - Include every completion-report field required by that `current.md`.
 - Confirm constraints and exclusions from that `current.md`, including any ban on host-local toolchain use and any deferred validation.
 
-## 9. Commit and push the updated report and/or make a merge request from the feature branch
+## 9. Commit and push the feature branch
 
 ```bash
 git add -A
 git commit -m "update current report"
-git push
+git push -u origin <feature-branch-name>
 ```
 
-## 10. Report to the user
+- If a merge request/pull request workflow is available, open it from the feature branch targeting `main`.
+- Do not merge into `main` if the `current.md` completion criteria for this iteration were not met, or if validation failed and was not explicitly deferred by `current.md`. Stop and report instead.
 
-- Share the outcome, the validation result or explicitly deferred validation per `current.md`, and any remaining blockers.
-- Stop when the `current.md` completion criteria are satisfied.
+## 10. Merge the feature branch into `main`
+
+- Once the iteration's `current.md` completion criteria are satisfied (validation passed, or was explicitly deferred per `current.md`), merge the feature branch into `main`.
+- Prefer merging through the pull/merge request created in Step 9 when that workflow is available.
+- Otherwise, merge locally and push:
+
+```bash
+git switch main
+git pull --ff-only origin main
+git merge --no-ff <feature-branch-name> -m "merge: <feature-branch-name>"
+git push origin main
+```
+
+- This merge carries the just-written implementation report (the replaced `current.md`) onto `main`, alongside the source changes.
+
+## 11. Derive the next `current.md` from the contract and specs
+
+- Read `workspace/specs/contract.md` and `workspace/specs/specs.md` in full (and `workspace/specs/issues.md` when it tracks open work).
+- Compare them against the current state of the source tree on `main`, including the implementation report that Step 10 just merged.
+- Identify the next concrete, well-scoped gap between the implementation and the contract/specs: a missing guarantee, an unmet requirement, an unresolved defect, or the next milestone the contract implies.
+- Write a new `current.md` on `main` describing that gap as a corrective or additive milestone, using the same structure as prior `current.md` iterations (objective, contract authority, repository-grounded defects or requirements, required corrections, preserved behavior, explicit exclusions, command-execution constraints, and completion-report requirements).
+- Scope each new `current.md` to one coherent milestone. Do not try to close every remaining gap in a single iteration.
+- If, after this comparison, the implementation already fully satisfies `workspace/specs/contract.md` and `workspace/specs/specs.md` with no remaining gap, do not write a new corrective `current.md`. Instead:
+  - write a final `current.md` (or a completion note in its place) stating that the project is complete against the contract and specs, with a rationale;
+  - commit and push this final state directly to `main`;
+  - stop the loop and report completion to the user.
+
+## 12. Commit and push the new `current.md` on `main`
+
+```bash
+git add current.md
+git commit -m "plan: next current.md milestone"
+git push origin main
+```
+
+## 13. Loop
+
+- Unless Step 11 concluded the project is complete, return to Step 1 and begin a new iteration against the `current.md` just pushed in Step 12.
+- Each iteration uses a freshly created feature branch from the up-to-date `main` (Step 2), so branches are never reused across iterations.
+
+## 14. Report to the user
+
+- After each iteration (Steps 1 through 12 or 13), share the outcome, the validation result or explicitly deferred validation per that iteration's `current.md`, whether the feature branch was merged into `main`, and any remaining blockers.
+- When Step 11 concludes the project is complete, report that explicitly and stop the loop instead of proceeding to Step 13.
+- If a blocker prevents completing Steps 9 through 12 (for example, missing merge permissions), stop the loop, report the blocker, and wait for the user before resuming.
