@@ -3,11 +3,15 @@ use std::io::Read;
 
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::Policy;
+use serde::{Deserialize, Serialize};
 
 use super::request::FinalizedHttpRequest;
 
 pub(crate) trait HttpTransport: Send + Sync {
-    fn execute(&self, request: &FinalizedHttpRequest) -> Result<HttpTransportResponse, HttpTransportFailure>;
+    fn execute(
+        &self,
+        request: &FinalizedHttpRequest,
+    ) -> Result<HttpTransportResponse, HttpTransportFailure>;
 }
 
 pub(crate) struct ReqwestHttpTransport {
@@ -26,7 +30,10 @@ impl ReqwestHttpTransport {
 }
 
 impl HttpTransport for ReqwestHttpTransport {
-    fn execute(&self, request: &FinalizedHttpRequest) -> Result<HttpTransportResponse, HttpTransportFailure> {
+    fn execute(
+        &self,
+        request: &FinalizedHttpRequest,
+    ) -> Result<HttpTransportResponse, HttpTransportFailure> {
         let method = reqwest::Method::from_bytes(request.method.as_bytes())
             .map_err(|_| HttpTransportFailure::RequestBuild)?;
         let mut builder = self.client.request(method, request.url.clone());
@@ -51,10 +58,14 @@ impl HttpTransport for ReqwestHttpTransport {
 fn classify_send_error(error: reqwest::Error) -> HttpTransportFailure {
     if error.is_timeout() {
         HttpTransportFailure::Timeout
-    } else if error.is_connect() {
-        HttpTransportFailure::Connect
+    } else if error.is_body() {
+        HttpTransportFailure::BodyWrite
     } else if error.is_request() || error.is_builder() {
         HttpTransportFailure::RequestBuild
+    } else if error.is_connect() && error.to_string().to_ascii_lowercase().contains("tls") {
+        HttpTransportFailure::Tls
+    } else if error.is_connect() {
+        HttpTransportFailure::Connect
     } else {
         HttpTransportFailure::ExchangeIo
     }
@@ -62,27 +73,27 @@ fn classify_send_error(error: reqwest::Error) -> HttpTransportFailure {
 
 pub(crate) struct HttpTransportResponse {
     pub(crate) status: u16,
-    pub(crate) version: Option<String>,
+    pub(crate) version: Option<StoredHttpVersion>,
     pub(crate) headers: Vec<(String, Vec<u8>)>,
     pub(crate) body: Box<dyn Read + Send>,
-    /// Raw Location header value from the actual transport response, for redirect control.
-    pub(crate) location_header: Option<String>,
+    pub(crate) location_header: HttpLocationHeader,
 }
 
 impl HttpTransportResponse {
     fn from_response(response: Response) -> Self {
         let status = response.status().as_u16();
-        let version = Some(format!("{:?}", response.version()));
+        let version = Some(StoredHttpVersion::from(response.version()));
 
         let mut headers = Vec::new();
-        let mut location_header: Option<String> = None;
+        let mut location_header = HttpLocationHeader::Missing;
 
         for (name, value) in response.headers() {
             let name_lower = name.as_str().to_ascii_lowercase();
-            if name_lower == "location" && location_header.is_none() {
-                if let Ok(text) = std::str::from_utf8(value.as_bytes()) {
-                    location_header = Some(text.to_string());
-                }
+            if name_lower == "location" && matches!(location_header, HttpLocationHeader::Missing) {
+                location_header = match std::str::from_utf8(value.as_bytes()) {
+                    Ok(text) => HttpLocationHeader::Present(text.to_string()),
+                    Err(_) => HttpLocationHeader::InvalidEncoding,
+                };
             }
             headers.push((name.to_string(), value.as_bytes().to_vec()));
         }
@@ -97,7 +108,36 @@ impl HttpTransportResponse {
     }
 }
 
-/// Opaque transport configuration error. Does not expose internal details.
+pub(crate) enum HttpLocationHeader {
+    Missing,
+    InvalidEncoding,
+    Present(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredHttpVersion {
+    Http09,
+    Http10,
+    Http11,
+    Http2,
+    Http3,
+    Unknown,
+}
+
+impl From<reqwest::Version> for StoredHttpVersion {
+    fn from(version: reqwest::Version) -> Self {
+        match version {
+            reqwest::Version::HTTP_09 => Self::Http09,
+            reqwest::Version::HTTP_10 => Self::Http10,
+            reqwest::Version::HTTP_11 => Self::Http11,
+            reqwest::Version::HTTP_2 => Self::Http2,
+            reqwest::Version::HTTP_3 => Self::Http3,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpTransportConfigurationError(pub(crate) String);
 
@@ -109,33 +149,22 @@ impl fmt::Display for HttpTransportConfigurationError {
 
 impl std::error::Error for HttpTransportConfigurationError {}
 
-/// Stable typed transport failure classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpTransportFailure {
-    /// Client configuration prevented the request from being built.
     Configuration,
-    /// Request construction failed (invalid method, header, or body conversion).
     RequestBuild,
-    /// Connection to the server could not be established.
     Connect,
-    /// The request or connection timed out.
     Timeout,
-    /// An I/O error occurred while writing the request body.
     BodyWrite,
-    /// An I/O error occurred during the HTTP exchange.
     ExchangeIo,
-    /// A TLS/SSL error occurred during the exchange.
     Tls,
 }
 
 impl HttpTransportFailure {
-    /// Returns true only for explicitly classified transient exchange failures.
-    /// Unknown or non-transient failures are not retryable.
     pub fn retryable(self) -> bool {
         matches!(self, Self::Connect | Self::Timeout | Self::ExchangeIo)
     }
 
-    /// Returns a stable string label for persistence in transaction metadata.
     pub fn stable_class(self) -> &'static str {
         match self {
             Self::Configuration => "configuration",

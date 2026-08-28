@@ -6,6 +6,7 @@ use serde::Serialize;
 use url::Url;
 
 use super::policy::{HttpPolicyError, HttpRedirectPolicy, HttpRetryPolicy};
+use super::transaction::{HttpLogicalRequestKey, HttpLogicalRequestKeyError};
 
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
@@ -14,7 +15,7 @@ pub struct HttpRequest {
     headers: Vec<RequestHeader>,
     query: Vec<RequestQueryParameter>,
     body: RequestBody,
-    logical_key: Option<String>,
+    logical_key: Option<HttpLogicalRequestKey>,
     retry_policy: HttpRetryPolicy,
     redirect_policy: HttpRedirectPolicy,
     /// Names marked via `sensitive_query_name()`, matched ASCII case-insensitively.
@@ -48,7 +49,7 @@ pub(crate) struct FinalizedHttpRequest {
     pub(crate) redacted_url: String,
     pub(crate) headers: Vec<FinalizedHeader>,
     pub(crate) body: Option<Vec<u8>>,
-    pub(crate) logical_key: Option<String>,
+    pub(crate) logical_key: Option<HttpLogicalRequestKey>,
     pub(crate) retry_policy: HttpRetryPolicy,
     pub(crate) redirect_policy: HttpRedirectPolicy,
     pub(crate) sensitive_query_names: HashSet<String>,
@@ -194,11 +195,9 @@ impl HttpRequest {
     }
 
     pub fn logical_key(mut self, key: impl AsRef<str>) -> Result<Self, HttpRequestError> {
-        let key = key.as_ref().trim();
-        if key.is_empty() {
-            return Err(HttpRequestError::InvalidLogicalKey);
-        }
-        self.logical_key = Some(key.to_string());
+        self.logical_key = Some(
+            HttpLogicalRequestKey::new(key).map_err(HttpRequestError::InvalidLogicalKey)?,
+        );
         Ok(self)
     }
 
@@ -342,7 +341,7 @@ pub enum HttpRequestError {
     /// The requested environment variable is set but not valid UTF-8.
     EnvironmentVariableNotUtf8,
     JsonSerialization(serde_json::Error),
-    InvalidLogicalKey,
+    InvalidLogicalKey(HttpLogicalRequestKeyError),
     InvalidQueryParameter,
     Policy(HttpPolicyError),
 }
@@ -362,7 +361,7 @@ impl fmt::Display for HttpRequestError {
                 formatter.write_str("environment variable for sensitive header is not valid UTF-8")
             }
             Self::JsonSerialization(_) => formatter.write_str("failed to serialize JSON request body"),
-            Self::InvalidLogicalKey => formatter.write_str("invalid logical request key"),
+            Self::InvalidLogicalKey(_) => formatter.write_str("invalid logical request key"),
             Self::InvalidQueryParameter => formatter.write_str("invalid HTTP query parameter"),
             Self::Policy(error) => write!(formatter, "{error}"),
         }
@@ -374,6 +373,7 @@ impl std::error::Error for HttpRequestError {
         match self {
             Self::InvalidUrl(error) => Some(error),
             Self::JsonSerialization(error) => Some(error),
+            Self::InvalidLogicalKey(error) => Some(error),
             Self::Policy(error) => Some(error),
             _ => None,
         }

@@ -1,7 +1,7 @@
 use std::fmt;
 
 use super::request::HttpRequestError;
-use super::transaction::HttpResponseStatusError;
+use super::transaction::{HttpResponseStatusError, RecordedTransaction};
 use super::transport::{HttpTransportConfigurationError, HttpTransportFailure};
 use super::{ProgressPersistenceError, SessionValidationError};
 use crate::protocols::http::transaction::error::HttpRecorderError;
@@ -10,9 +10,7 @@ pub type AcquisitionResult<T> = Result<T, AcquisitionError>;
 
 #[derive(Debug)]
 pub enum AcquisitionError {
-    Source {
-        message: String,
-    },
+    Source { message: String },
     Request(HttpRequestError),
     Execution(HttpExecutionError),
     ResponseStatus(HttpResponseStatusError),
@@ -73,6 +71,194 @@ impl std::error::Error for AcquisitionError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum HttpRetryFinalOutcome {
+    ResponseStatus(u16),
+    TransportFailure(HttpTransportFailure),
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpRetryExhaustionError {
+    final_transaction: RecordedTransaction,
+    total_physical_attempts: u32,
+    final_outcome: HttpRetryFinalOutcome,
+}
+
+impl HttpRetryExhaustionError {
+    pub fn new(
+        final_transaction: RecordedTransaction,
+        total_physical_attempts: u32,
+        final_outcome: HttpRetryFinalOutcome,
+    ) -> Self {
+        Self {
+            final_transaction,
+            total_physical_attempts,
+            final_outcome,
+        }
+    }
+
+    pub fn final_transaction(&self) -> &RecordedTransaction {
+        &self.final_transaction
+    }
+
+    pub fn transaction_identity(&self) -> &super::transaction::HttpTransactionIdentity {
+        self.final_transaction.identity()
+    }
+
+    pub fn transaction_directory(&self) -> &std::path::Path {
+        self.final_transaction.directory()
+    }
+
+    pub fn total_physical_attempts(&self) -> u32 {
+        self.total_physical_attempts
+    }
+
+    pub fn final_outcome(&self) -> &HttpRetryFinalOutcome {
+        &self.final_outcome
+    }
+}
+
+impl fmt::Display for HttpRetryExhaustionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HTTP retry policy exhausted")
+    }
+}
+
+impl std::error::Error for HttpRetryExhaustionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.final_outcome {
+            HttpRetryFinalOutcome::ResponseStatus(_) => None,
+            HttpRetryFinalOutcome::TransportFailure(failure) => Some(failure),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordedHttpTransportFailure {
+    transaction: RecordedTransaction,
+    failure: HttpTransportFailure,
+}
+
+impl RecordedHttpTransportFailure {
+    pub fn new(transaction: RecordedTransaction, failure: HttpTransportFailure) -> Self {
+        Self { transaction, failure }
+    }
+
+    pub fn transaction(&self) -> &RecordedTransaction {
+        &self.transaction
+    }
+
+    pub fn transaction_identity(&self) -> &super::transaction::HttpTransactionIdentity {
+        self.transaction.identity()
+    }
+
+    pub fn transaction_directory(&self) -> &std::path::Path {
+        self.transaction.directory()
+    }
+
+    pub fn failure(&self) -> HttpTransportFailure {
+        self.failure
+    }
+
+    pub fn failure_class(&self) -> &'static str {
+        self.failure.stable_class()
+    }
+
+    pub fn retryable(&self) -> bool {
+        self.failure.retryable()
+    }
+
+    pub fn physical_attempt_index(&self) -> u32 {
+        self.transaction.attempt_identity().physical_attempt_index()
+    }
+
+    pub fn redirect_index(&self) -> u32 {
+        self.transaction.attempt_identity().redirect_index()
+    }
+
+    pub fn retry_index(&self) -> u32 {
+        self.transaction.attempt_identity().retry_index()
+    }
+}
+
+impl fmt::Display for RecordedHttpTransportFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HTTP transport exchange failed after durable recording")
+    }
+}
+
+impl std::error::Error for RecordedHttpTransportFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.failure)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpRedirectFailureKind {
+    MaximumExceeded,
+    LoopDetected,
+    MissingLocation,
+    InvalidLocationEncoding,
+    InvalidTarget,
+    UnsupportedScheme,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpRedirectFailure {
+    last_transaction: RecordedTransaction,
+    kind: HttpRedirectFailureKind,
+    redirect_count: u32,
+    total_physical_attempt_count: u32,
+}
+
+impl HttpRedirectFailure {
+    pub fn new(
+        last_transaction: RecordedTransaction,
+        kind: HttpRedirectFailureKind,
+        redirect_count: u32,
+        total_physical_attempt_count: u32,
+    ) -> Self {
+        Self {
+            last_transaction,
+            kind,
+            redirect_count,
+            total_physical_attempt_count,
+        }
+    }
+
+    pub fn last_transaction(&self) -> &RecordedTransaction {
+        &self.last_transaction
+    }
+
+    pub fn transaction_identity(&self) -> &super::transaction::HttpTransactionIdentity {
+        self.last_transaction.identity()
+    }
+
+    pub fn transaction_directory(&self) -> &std::path::Path {
+        self.last_transaction.directory()
+    }
+
+    pub fn kind(&self) -> HttpRedirectFailureKind {
+        self.kind
+    }
+
+    pub fn redirect_count(&self) -> u32 {
+        self.redirect_count
+    }
+
+    pub fn total_physical_attempt_count(&self) -> u32 {
+        self.total_physical_attempt_count
+    }
+}
+
+impl fmt::Display for HttpRedirectFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HTTP redirect handling failed")
+    }
+}
+
+impl std::error::Error for HttpRedirectFailure {}
+
 #[derive(Debug)]
 pub enum HttpExecutionError {
     UnmanagedContext,
@@ -80,10 +266,9 @@ pub enum HttpExecutionError {
     SessionValidation(SessionValidationError),
     Recorder(HttpRecorderError),
     Transport(HttpTransportFailure),
-    RedirectExhausted,
-    RedirectLoop,
-    InvalidRedirectTarget,
-    RetryExhausted,
+    RecordedTransportFailure(RecordedHttpTransportFailure),
+    RedirectFailure(HttpRedirectFailure),
+    RetryExhausted(HttpRetryExhaustionError),
     CounterOverflow,
     Progress(ProgressPersistenceError),
 }
@@ -91,17 +276,26 @@ pub enum HttpExecutionError {
 impl fmt::Display for HttpExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnmanagedContext => formatter.write_str("HTTP execute is unavailable in unmanaged context"),
-            Self::TransportConfiguration(_) => formatter.write_str("HTTP transport configuration failed"),
-            Self::SessionValidation(_) => formatter.write_str("HTTP execution session validation failed"),
+            Self::UnmanagedContext => {
+                formatter.write_str("HTTP execute is unavailable in unmanaged context")
+            }
+            Self::TransportConfiguration(_) => {
+                formatter.write_str("HTTP transport configuration failed")
+            }
+            Self::SessionValidation(_) => {
+                formatter.write_str("HTTP execution session validation failed")
+            }
             Self::Recorder(_) => formatter.write_str("HTTP transaction recording failed"),
             Self::Transport(_) => formatter.write_str("HTTP transport exchange failed"),
-            Self::RedirectExhausted => formatter.write_str("HTTP redirect policy exhausted"),
-            Self::RedirectLoop => formatter.write_str("HTTP redirect loop detected"),
-            Self::InvalidRedirectTarget => formatter.write_str("HTTP redirect target is invalid or unsupported"),
-            Self::RetryExhausted => formatter.write_str("HTTP retry policy exhausted"),
+            Self::RecordedTransportFailure(_) => {
+                formatter.write_str("HTTP transport exchange failed after durable recording")
+            }
+            Self::RedirectFailure(_) => formatter.write_str("HTTP redirect handling failed"),
+            Self::RetryExhausted(_) => formatter.write_str("HTTP retry policy exhausted"),
             Self::CounterOverflow => formatter.write_str("HTTP execution counter overflow"),
-            Self::Progress(_) => formatter.write_str("HTTP acquisition progress persistence failed"),
+            Self::Progress(_) => {
+                formatter.write_str("HTTP acquisition progress persistence failed")
+            }
         }
     }
 }
@@ -113,13 +307,11 @@ impl std::error::Error for HttpExecutionError {
             Self::SessionValidation(error) => Some(error),
             Self::Recorder(error) => Some(error),
             Self::Transport(error) => Some(error),
+            Self::RecordedTransportFailure(error) => Some(error),
+            Self::RedirectFailure(error) => Some(error),
+            Self::RetryExhausted(error) => Some(error),
             Self::Progress(error) => Some(error),
-            Self::UnmanagedContext
-            | Self::RedirectExhausted
-            | Self::RedirectLoop
-            | Self::InvalidRedirectTarget
-            | Self::RetryExhausted
-            | Self::CounterOverflow => None,
+            Self::UnmanagedContext | Self::CounterOverflow => None,
         }
     }
 }

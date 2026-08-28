@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -7,183 +8,224 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
-use super::error::{HttpRecorderError, PostRenameSyncFailure};
+use super::error::{
+    HttpBodyStreamingError, HttpClockError, HttpRecorderError, ManagedPathKind,
+    PostRenameSyncFailure, validate_managed_path,
+};
 use super::identity::HttpTransactionIdentity;
 use super::metadata::{
     HTTP_TRANSACTION_SCHEMA_VERSION, RequestMetadataDocument, ResponseMetadataDocument,
-    ResponseOutcomeDocument, StoredHeader, StoredHeaderValue,
+    ResponseOutcomeDocument, StoredHeader, StoredHeaderValue, StoredTransportFailureClass,
 };
 use super::{
-    FinalizedRecordedAttempt, HttpRecordedOutcome, RecordedHeader, RecordedHeaderCollection,
-    RecordedHeaderValue, RecordedHttpRequest, RecordedHttpResponse, RecordedTransaction,
-    RecordedTransportFailure,
+    FinalizedRecordedAttempt, HttpAttemptIdentity, HttpLogicalRequestKey, HttpRecordedOutcome,
+    RecordedHeader, RecordedHeaderValue, RecordedHttpRequest, RecordedHttpResponse,
+    RecordedTransaction, RecordedTransportFailure,
 };
-use crate::protocols::http::request::{FinalizedHttpRequest, redact_url};
-use crate::protocols::http::transport::HttpTransport;
+use crate::protocols::http::request::{FinalizedHeader, FinalizedHttpRequest, redact_url};
+use crate::protocols::http::transport::{HttpLocationHeader, HttpTransport};
+
+const MAX_STAGING_IDENTITY_ATTEMPTS: usize = 8;
 
 pub(crate) struct RecordedAttemptContext {
     pub(crate) session_id: String,
     pub(crate) raw_data_root: PathBuf,
-    pub(crate) logical_request_key: Option<String>,
-    pub(crate) parent_transaction_id: Option<String>,
-    pub(crate) physical_attempt_index: u32,
-    pub(crate) redirect_index: u32,
-    pub(crate) retry_index: u32,
+    pub(crate) logical_request_key: Option<HttpLogicalRequestKey>,
+    pub(crate) parent_transaction_id: Option<HttpTransactionIdentity>,
+    pub(crate) attempt_identity: HttpAttemptIdentity,
     pub(crate) sensitive_query_names: HashSet<String>,
 }
 
-/// Record a single physical HTTP exchange.
-///
-/// Returns a [`FinalizedRecordedAttempt`] whose staging directory has been atomically
-/// renamed and whose raw-data parent has been synced.
-///
-/// # Recording sequence
-///
-/// 1. Validate root (reject symlinks in any ancestor component).
-/// 2. Exclusively create staging directory.
-/// 3. Verify final directory does not exist.
-/// 4. Compute request-body SHA-256 and length.
-/// 5. Persist redacted request metadata.
-/// 6. Persist exact request-body bytes.
-/// 7. Sync request directory.
-/// 8. Perform exactly one physical HTTP exchange.
-/// 9. Stream or write response body.
-/// 10. Persist response metadata (only after body streaming succeeds).
-/// 11. Sync staging directory.
-/// 12. Atomically rename staging → final.
-/// 13. Sync raw-data parent (typed partial-commit error on failure).
-/// 14. Construct `FinalizedRecordedAttempt` with final-directory paths.
 pub(crate) fn record_transaction_attempt(
     attempt: RecordedAttemptContext,
     request: &FinalizedHttpRequest,
     transport: &dyn HttpTransport,
 ) -> Result<FinalizedRecordedAttempt, HttpRecorderError> {
-    // Step 1: validate root path.
-    validate_root(&attempt.raw_data_root)?;
+    ensure_directory(&attempt.raw_data_root)?;
 
-    let now = now_nanos();
-    let identity = HttpTransactionIdentity::new();
-    let staging_dir = attempt.raw_data_root.join(format!(".partial-{}-{}", now, identity.id()));
-    let final_dir = attempt.raw_data_root.join(format!("{}-{}", now, identity.id()));
+    let mut allocated = None;
+    for _ in 0..MAX_STAGING_IDENTITY_ATTEMPTS {
+        let timestamp = now_nanos().map_err(HttpRecorderError::Clock)?;
+        let identity = HttpTransactionIdentity::new().map_err(HttpRecorderError::IdentityInvalid)?;
+        let staging_dir = attempt
+            .raw_data_root
+            .join(format!(".partial-{}-{}", timestamp, identity.id()));
+        let final_dir = attempt
+            .raw_data_root
+            .join(format!("{}-{}", timestamp, identity.id()));
 
-    // Step 3: verify final destination is clear (immutability).
-    if final_dir.exists() {
-        return Err(HttpRecorderError::FinalPublicationCollision);
+        if final_dir.exists() {
+            validate_managed_path(&final_dir, ManagedPathKind::Directory)?;
+            continue;
+        }
+
+        validate_managed_path(&staging_dir, ManagedPathKind::Directory)?;
+        match fs::create_dir(&staging_dir) {
+            Ok(()) => {
+                validate_managed_path(&staging_dir, ManagedPathKind::Directory)?;
+                allocated = Some((timestamp, identity, staging_dir, final_dir));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(HttpRecorderError::ExclusiveStagingCreation(error)),
+        }
     }
 
-    // Step 2: exclusively create staging directory.
-    fs::create_dir(&staging_dir).map_err(HttpRecorderError::ExclusiveStagingCreation)?;
+    let (timestamp, identity, staging_dir, final_dir) =
+        allocated.ok_or(HttpRecorderError::IdentityAllocationExhausted)?;
 
     let request_dir = staging_dir.join("request");
     let response_dir = staging_dir.join("response");
     fs::create_dir_all(&request_dir).map_err(HttpRecorderError::DirectoryCreation)?;
     fs::create_dir_all(&response_dir).map_err(HttpRecorderError::DirectoryCreation)?;
+    validate_managed_path(&request_dir, ManagedPathKind::Directory)?;
+    validate_managed_path(&response_dir, ManagedPathKind::Directory)?;
 
-    // Step 4: compute request-body hash and length.
-    let request_body_bytes: Vec<u8> = request.body.clone().unwrap_or_default();
+    let request_metadata_path = request_dir.join("metadata.json");
+    let request_body_path = request_dir.join("body");
+    let response_metadata_path = response_dir.join("metadata.json");
+    let response_body_path = response_dir.join("body");
+    for path in [&request_metadata_path, &response_metadata_path, &request_body_path, &response_body_path] {
+        validate_managed_path(path, ManagedPathKind::RegularFileIfPresent)?;
+    }
+
+    let request_body_bytes = request.body.clone().unwrap_or_default();
     let has_body = request.body.is_some();
-    let request_body_sha: Option<String> = if has_body {
-        Some(hex_sha256(&request_body_bytes))
-    } else {
-        None
-    };
+    let request_body_sha = has_body.then(|| hex_sha256(&request_body_bytes));
 
-    // Step 5: persist redacted request metadata FIRST.
     let request_metadata = RequestMetadataDocument {
         schema_version: HTTP_TRANSACTION_SCHEMA_VERSION,
         transaction_id: identity.id().to_string(),
         session_id: attempt.session_id.clone(),
-        physical_attempt_index: attempt.physical_attempt_index,
-        redirect_index: attempt.redirect_index,
-        retry_index: attempt.retry_index,
-        parent_transaction_id: attempt.parent_transaction_id.clone(),
-        logical_request_key: attempt.logical_request_key.clone(),
+        physical_attempt_index: attempt.attempt_identity.physical_attempt_index(),
+        redirect_index: attempt.attempt_identity.redirect_index(),
+        retry_index: attempt.attempt_identity.retry_index(),
+        parent_transaction_id: attempt
+            .parent_transaction_id
+            .as_ref()
+            .map(|parent| parent.id().to_string()),
+        logical_request_key: attempt
+            .logical_request_key
+            .as_ref()
+            .map(|key| key.as_str().to_string()),
         method: request.method.clone(),
         url: redact_url(&request.url, &attempt.sensitive_query_names),
         headers: redact_request_headers(&request.headers),
         has_body,
         body_length: request_body_bytes.len() as u64,
         body_sha256: request_body_sha.clone(),
-        created_at_unix_nanos: now,
+        created_at_unix_nanos: timestamp,
     };
-    write_json_atomic(&request_dir.join("metadata.json"), &request_metadata)
-        .map_err(HttpRecorderError::MetadataPersistence)?;
+    write_json_atomic(&request_metadata_path, &request_metadata)?;
 
-    // Step 6: persist exact request-body bytes.
-    let staging_request_body = request_dir.join("body");
     if has_body {
-        persist_body(&staging_request_body, &request_body_bytes)
-            .map_err(HttpRecorderError::BodyPersistence)?;
+        persist_body(&request_body_path, &request_body_bytes).map_err(HttpRecorderError::BodyPersistence)?;
     }
 
-    // Step 7: sync request directory.
     sync_directory(&request_dir).map_err(HttpRecorderError::DurableSync)?;
 
-    // Step 8: perform exactly one physical exchange.
-    let staging_response_body = response_dir.join("body");
     let transport_result = transport.execute(request);
+    let (response_status, response_headers, response_body_length, response_body_sha256, outcome, location_text, invalid_location_encoding, transport_failure) =
+        match transport_result {
+            Ok(mut response) => {
+                let location_state = response.location_header;
+                let body_stream = stream_body(&mut response.body, &response_body_path);
+                let (body_length, body_sha256) = match body_stream {
+                    Ok(ok) => (ok.total, ok.sha256),
+                    Err(stream_failure) => {
+                        if let Err(marker_cause) = persist_incomplete_response_marker(
+                            &response_metadata_path,
+                            identity.id(),
+                            stream_failure.bytes_recorded,
+                            stream_failure.partial_body_sha256.as_deref(),
+                            &stream_failure.error,
+                        ) {
+                            return Err(HttpRecorderError::IncompleteResponseMarkerFailed {
+                                stream_cause: stream_failure.error,
+                                marker_cause,
+                            });
+                        }
+                        return Err(HttpRecorderError::BodyStreaming(stream_failure.error));
+                    }
+                };
 
-    // Steps 9–10: record outcome.
-    let (response_status, response_headers_stored, body_length, body_sha256_opt, outcome,
-         effective_location, transport_failure_opt) = match transport_result {
-        Ok(mut response) => {
-            let location = response.location_header.clone();
+                let headers = redact_response_headers(&response.headers);
+                let response_metadata = ResponseMetadataDocument {
+                    schema_version: HTTP_TRANSACTION_SCHEMA_VERSION,
+                    transaction_id: identity.id().to_string(),
+                    outcome: ResponseOutcomeDocument::Response {
+                        status: response.status,
+                        http_version: response.version,
+                        headers: headers.clone(),
+                        body_length,
+                        body_sha256: body_sha256.clone(),
+                        completed_at_unix_nanos: now_nanos().map_err(HttpRecorderError::Clock)?,
+                    },
+                };
+                write_json_atomic(&response_metadata_path, &response_metadata)?;
 
-            // Step 9: stream response body.
-            let (blen, bsha) = stream_body(&mut response.body, &staging_response_body)?;
+                let (location_text, invalid_location_encoding) = match location_state {
+                    HttpLocationHeader::Missing => (None, false),
+                    HttpLocationHeader::InvalidEncoding => (None, true),
+                    HttpLocationHeader::Present(text) => (Some(text), false),
+                };
 
-            // Step 10: persist response metadata AFTER body streaming.
-            let headers = redact_response_headers(&response.headers);
-            let response_metadata = ResponseMetadataDocument {
-                schema_version: HTTP_TRANSACTION_SCHEMA_VERSION,
-                transaction_id: identity.id().to_string(),
-                outcome: ResponseOutcomeDocument::Response {
-                    status: response.status,
-                    http_version: response.version,
-                    headers: headers.clone(),
-                    body_length: blen,
-                    body_sha256: bsha.clone(),
-                    completed_at_unix_nanos: now_nanos(),
-                },
-            };
-            write_json_atomic(&response_dir.join("metadata.json"), &response_metadata)
-                .map_err(HttpRecorderError::MetadataPersistence)?;
+                (
+                    Some(response.status),
+                    headers,
+                    body_length,
+                    Some(body_sha256),
+                    HttpRecordedOutcome::Response,
+                    location_text,
+                    invalid_location_encoding,
+                    None,
+                )
+            }
+            Err(failure) => {
+                persist_body(&response_body_path, &[])
+                    .map_err(HttpRecorderError::BodyPersistence)?;
 
-            (Some(response.status), headers, blen, Some(bsha),
-             HttpRecordedOutcome::Response, location, None)
-        }
-        Err(failure) => {
-            // Step 9: persist empty response body; error must not be discarded.
-            persist_body(&staging_response_body, &[])
-                .map_err(HttpRecorderError::BodyPersistence)?;
+                let response_metadata = ResponseMetadataDocument {
+                    schema_version: HTTP_TRANSACTION_SCHEMA_VERSION,
+                    transaction_id: identity.id().to_string(),
+                    outcome: ResponseOutcomeDocument::TransportFailure {
+                        failure_class: StoredTransportFailureClass::from(failure),
+                        retryable: failure.retryable(),
+                        failed_at_unix_nanos: now_nanos().map_err(HttpRecorderError::Clock)?,
+                    },
+                };
+                write_json_atomic(&response_metadata_path, &response_metadata)?;
 
-            let retryable = failure.retryable();
-            let failure_class = failure.stable_class().to_string();
-            let response_metadata = ResponseMetadataDocument {
-                schema_version: HTTP_TRANSACTION_SCHEMA_VERSION,
-                transaction_id: identity.id().to_string(),
-                outcome: ResponseOutcomeDocument::TransportFailure {
-                    failure_class: failure_class.clone(),
-                    retryable,
-                    failed_at_unix_nanos: now_nanos(),
-                },
-            };
-            write_json_atomic(&response_dir.join("metadata.json"), &response_metadata)
-                .map_err(HttpRecorderError::MetadataPersistence)?;
+                (
+                    None,
+                    Vec::new(),
+                    0,
+                    None,
+                    HttpRecordedOutcome::TransportFailure(RecordedTransportFailure::new(failure)),
+                    None,
+                    false,
+                    Some(failure),
+                )
+            }
+        };
 
-            let recorded_failure = RecordedTransportFailure::new(failure);
-            let outcome = HttpRecordedOutcome::TransportFailure(recorded_failure);
-            (None, Vec::new(), 0u64, None, outcome, None, Some(failure))
-        }
-    };
-
-    // Step 11: sync staging directory.
     sync_directory(&staging_dir).map_err(HttpRecorderError::DurableSync)?;
-
-    // Step 12: atomically rename staging → final.
-    fs::rename(&staging_dir, &final_dir).map_err(HttpRecorderError::AtomicFinalize)?;
-
-    // Step 13: sync raw-data parent (typed error on failure).
+    publish_staging_directory(&staging_dir, &final_dir)?;
+    let final_request_dir = final_dir.join("request");
+    let final_response_dir = final_dir.join("response");
+    let final_request_metadata_path = final_request_dir.join("metadata.json");
+    let final_request_body_path = final_request_dir.join("body");
+    let final_response_metadata_path = final_response_dir.join("metadata.json");
+    let final_response_body_path = final_response_dir.join("body");
+    validate_managed_path(&final_dir, ManagedPathKind::Directory)?;
+    validate_managed_path(&final_request_dir, ManagedPathKind::Directory)?;
+    validate_managed_path(&final_response_dir, ManagedPathKind::Directory)?;
+    validate_managed_path(&final_request_metadata_path, ManagedPathKind::RegularFileIfPresent)?;
+    validate_managed_path(&final_response_metadata_path, ManagedPathKind::RegularFileIfPresent)?;
+    if has_body {
+        validate_managed_path(&final_request_body_path, ManagedPathKind::RegularFileIfPresent)?;
+    }
+    validate_managed_path(&final_response_body_path, ManagedPathKind::RegularFileIfPresent)?;
     sync_directory(&attempt.raw_data_root).map_err(|cause| {
         HttpRecorderError::PostRenameSyncFailed(PostRenameSyncFailure {
             transaction_id: identity.id().to_string(),
@@ -192,76 +234,59 @@ pub(crate) fn record_transaction_attempt(
         })
     })?;
 
-    // Step 14: construct with final-directory paths.
-    let final_request_body = if has_body { Some(final_dir.join("request/body")) } else { None };
-    let final_response_body = final_dir.join("response/body");
-
-    let recorded_response = RecordedHttpResponse::new(
-        response_status,
-        RecordedHeaderCollection::new(
-            response_headers_stored.into_iter().map(stored_to_recorded_header).collect(),
-        ),
-        final_response_body,
-        body_length,
-        body_sha256_opt,
-        outcome,
-    );
-
     let transaction = RecordedTransaction::new(
         identity,
-        final_dir,
+        attempt.attempt_identity,
+        attempt.parent_transaction_id,
+        attempt.logical_request_key,
+        final_dir.clone(),
         RecordedHttpRequest::new(
-            final_request_body,
+            has_body.then(|| final_request_body_path),
             request_body_bytes.len() as u64,
             request_body_sha,
         ),
-        recorded_response,
+        RecordedHttpResponse::new(
+            response_status,
+            super::RecordedHeaderCollection::new(
+                response_headers
+                    .into_iter()
+                    .map(stored_to_recorded_header)
+                    .collect(),
+            ),
+            final_response_body_path,
+            response_body_length,
+            response_body_sha256,
+            outcome,
+        ),
     );
 
     Ok(FinalizedRecordedAttempt {
         transaction,
-        effective_location,
-        transport_failure: transport_failure_opt,
+        attempt_identity: attempt.attempt_identity,
+        effective_location: location_text,
+        invalid_location_encoding,
+        transport_failure,
     })
 }
 
-// ---------------------------------------------------------------------------
-// Path validation
-// ---------------------------------------------------------------------------
-
-fn validate_root(root: &Path) -> Result<(), HttpRecorderError> {
-    if root.is_relative() {
+fn ensure_directory(path: &Path) -> Result<(), HttpRecorderError> {
+    if path.is_relative() {
         return Err(HttpRecorderError::InvalidManagedRoot);
     }
-    validate_no_symlink_components(root)?;
-    fs::create_dir_all(root).map_err(HttpRecorderError::DirectoryCreation)?;
-    Ok(())
-}
-
-fn validate_no_symlink_components(path: &Path) -> Result<(), HttpRecorderError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component);
-        if let Ok(meta) = current.symlink_metadata() {
-            if meta.file_type().is_symlink() {
-                return Err(HttpRecorderError::SymlinkRejected { path: current.clone() });
-            }
-        }
+    if let Some(parent) = path.parent() {
+        validate_managed_path(parent, ManagedPathKind::Directory)?;
     }
-    Ok(())
+    fs::create_dir_all(path).map_err(HttpRecorderError::DirectoryCreation)?;
+    validate_managed_path(path, ManagedPathKind::Directory)
 }
 
-// ---------------------------------------------------------------------------
-// Header helpers
-// ---------------------------------------------------------------------------
-
-fn redact_request_headers(headers: &[crate::protocols::http::request::FinalizedHeader]) -> Vec<StoredHeader> {
+fn redact_request_headers(headers: &[FinalizedHeader]) -> Vec<StoredHeader> {
     headers
         .iter()
         .map(|header| {
             let lower = header.name.to_ascii_lowercase();
-            let redact = header.sensitive
-                || matches!(lower.as_str(), "authorization" | "proxy-authorization" | "cookie");
+            let redact =
+                header.sensitive || matches!(lower.as_str(), "authorization" | "proxy-authorization" | "cookie");
             StoredHeader {
                 name: header.name.clone(),
                 value: if redact {
@@ -307,30 +332,100 @@ fn stored_to_recorded_header(header: StoredHeader) -> RecordedHeader {
     RecordedHeader::new(header.name, value)
 }
 
-// ---------------------------------------------------------------------------
-// I/O helpers
-// ---------------------------------------------------------------------------
+struct StreamBodySuccess {
+    total: u64,
+    sha256: String,
+}
 
-fn stream_body(reader: &mut dyn Read, path: &Path) -> Result<(u64, String), HttpRecorderError> {
+struct StreamBodyFailure {
+    error: HttpBodyStreamingError,
+    bytes_recorded: u64,
+    partial_body_sha256: Option<String>,
+}
+
+fn stream_body(reader: &mut dyn Read, path: &Path) -> Result<StreamBodySuccess, StreamBodyFailure> {
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(path)
-        .map_err(HttpRecorderError::BodyPersistence)?;
+        .map_err(|error| StreamBodyFailure {
+            error: HttpBodyStreamingError::Io(error),
+            bytes_recorded: 0,
+            partial_body_sha256: None,
+        })?;
 
     let mut hash = Sha256::new();
     let mut total = 0u64;
     let mut buffer = [0u8; 8192];
+
     loop {
-        let n = reader.read(&mut buffer).map_err(HttpRecorderError::BodyStreaming)?;
-        if n == 0 { break; }
-        file.write_all(&buffer[..n]).map_err(HttpRecorderError::BodyPersistence)?;
+        let n = reader.read(&mut buffer).map_err(|error| {
+            let _ = file.sync_all();
+            StreamBodyFailure {
+                error: HttpBodyStreamingError::Io(error),
+                bytes_recorded: total,
+                partial_body_sha256: (total > 0).then(|| format!("{:x}", hash.clone().finalize())),
+            }
+        })?;
+        if n == 0 {
+            break;
+        }
+        let next_total = total.checked_add(n as u64).ok_or_else(|| {
+            let _ = file.sync_all();
+            StreamBodyFailure {
+                error: HttpBodyStreamingError::LengthOverflow,
+                bytes_recorded: total,
+                partial_body_sha256: (total > 0).then(|| format!("{:x}", hash.clone().finalize())),
+            }
+        })?;
+        file.write_all(&buffer[..n]).map_err(|error| {
+            let _ = file.sync_all();
+            StreamBodyFailure {
+                error: HttpBodyStreamingError::Io(error),
+                bytes_recorded: total,
+                partial_body_sha256: (total > 0).then(|| format!("{:x}", hash.clone().finalize())),
+            }
+        })?;
         hash.update(&buffer[..n]);
-        total += n as u64;
+        total = next_total;
     }
-    file.sync_all().map_err(HttpRecorderError::DurableSync)?;
-    Ok((total, format!("{:x}", hash.finalize())))
+
+    file.sync_all().map_err(|error| StreamBodyFailure {
+        error: HttpBodyStreamingError::Io(error),
+        bytes_recorded: total,
+        partial_body_sha256: (total > 0).then(|| format!("{:x}", hash.clone().finalize())),
+    })?;
+
+    Ok(StreamBodySuccess {
+        total,
+        sha256: format!("{:x}", hash.finalize()),
+    })
+}
+
+fn persist_incomplete_response_marker(
+    metadata_path: &Path,
+    transaction_id: &str,
+    body_bytes_recorded: u64,
+    partial_body_sha256: Option<&str>,
+    stream_error: &HttpBodyStreamingError,
+) -> Result<(), std::io::Error> {
+    let failed_at_unix_nanos = now_nanos().map_err(|error| std::io::Error::other(error.to_string()))?;
+    let document = ResponseMetadataDocument {
+        schema_version: HTTP_TRANSACTION_SCHEMA_VERSION,
+        transaction_id: transaction_id.to_string(),
+        outcome: ResponseOutcomeDocument::IncompleteResponse {
+            failure_class: stream_error.stable_class().to_string(),
+            body_bytes_recorded,
+            partial_body_sha256: partial_body_sha256.map(ToOwned::to_owned),
+            failed_at_unix_nanos,
+        },
+    };
+    write_json_bytes_atomic(
+        metadata_path,
+        &serde_json::to_vec(&document)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+    )
 }
 
 fn persist_body(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
@@ -343,12 +438,19 @@ fn persist_body(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     file.sync_all()
 }
 
-fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), std::io::Error> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), HttpRecorderError> {
+    let bytes = serde_json::to_vec(value).map_err(HttpRecorderError::MetadataEncoding)?;
+    write_json_bytes_atomic(path, &bytes).map_err(HttpRecorderError::MetadataPersistence)
+}
+
+fn write_json_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent"))?;
+    validate_managed_path(parent, ManagedPathKind::Directory)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    validate_managed_path(path, ManagedPathKind::RegularFileIfPresent)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
 
     let temp_file = tempfile::Builder::new()
         .prefix(".metadata-")
@@ -356,9 +458,9 @@ fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), 
         .tempfile_in(parent)?;
 
     let (mut file, temp_path) = temp_file.into_parts();
-    file.write_all(&bytes)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
-    temp_path.persist(path).map_err(|e| e.error)?;
+    temp_path.persist(path).map_err(|error| error.error)?;
     sync_directory(parent)?;
     Ok(())
 }
@@ -367,18 +469,84 @@ fn sync_directory(path: &Path) -> Result<(), std::io::Error> {
     File::open(path)?.sync_all()
 }
 
+#[cfg(target_os = "linux")]
+fn publish_staging_directory(staging_dir: &Path, final_dir: &Path) -> Result<(), HttpRecorderError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    if final_dir.exists() {
+        return Err(HttpRecorderError::FinalPublicationCollision);
+    }
+
+    let staging = CString::new(staging_dir.as_os_str().as_bytes())
+        .map_err(|_| HttpRecorderError::UnsupportedPlatformPublication)?;
+    let final_path = CString::new(final_dir.as_os_str().as_bytes())
+        .map_err(|_| HttpRecorderError::UnsupportedPlatformPublication)?;
+
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            staging.as_ptr(),
+            libc::AT_FDCWD,
+            final_path.as_ptr(),
+            1u32,
+        )
+    };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        Err(HttpRecorderError::FinalPublicationCollision)
+    } else {
+        Err(HttpRecorderError::AtomicFinalize(error))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn publish_staging_directory(staging_dir: &Path, final_dir: &Path) -> Result<(), HttpRecorderError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    if final_dir.exists() {
+        return Err(HttpRecorderError::FinalPublicationCollision);
+    }
+
+    let staging = CString::new(staging_dir.as_os_str().as_bytes())
+        .map_err(|_| HttpRecorderError::UnsupportedPlatformPublication)?;
+    let final_path = CString::new(final_dir.as_os_str().as_bytes())
+        .map_err(|_| HttpRecorderError::UnsupportedPlatformPublication)?;
+
+    let result = unsafe { libc::renamex_np(staging.as_ptr(), final_path.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        return Ok(());
+    }
+
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        Err(HttpRecorderError::FinalPublicationCollision)
+    } else {
+        Err(HttpRecorderError::AtomicFinalize(error))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn publish_staging_directory(_: &Path, _: &Path) -> Result<(), HttpRecorderError> {
+    Err(HttpRecorderError::UnsupportedPlatformPublication)
+}
+
 fn hex_sha256(bytes: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(bytes);
     format!("{:x}", hash.finalize())
 }
 
-/// Current time as nanoseconds since the Unix epoch, truncated to u64.
-fn now_nanos() -> u64 {
-    SystemTime::now()
+fn now_nanos() -> Result<u64, HttpClockError> {
+    let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_err(|_| HttpClockError::BeforeEpoch)?;
+    duration
         .as_nanos()
         .try_into()
-        .unwrap_or(u64::MAX)
+        .map_err(|_| HttpClockError::OutOfRange)
 }
