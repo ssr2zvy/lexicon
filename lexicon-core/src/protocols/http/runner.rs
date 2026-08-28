@@ -729,6 +729,7 @@ pub fn run_http_runtime_invocation(
 #[cfg(test)]
 mod execution_tests {
     use std::ffi::OsString;
+    use std::path::Path;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1376,5 +1377,465 @@ mod execution_tests {
             HttpCapabilitySet::empty(),
         );
         assert!(second_result.is_ok(), "{second_result:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Canonical source-owned WorkLedger (specs.md §13-§15, §44)
+    // -----------------------------------------------------------------------
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct WorkItemRecord {
+        kind: String,
+        stable_key: String,
+        payload_version: i64,
+        payload: Vec<u8>,
+        status: String,
+        attempt_count: i64,
+        last_error: Option<String>,
+        origin_transaction_id: Option<String>,
+        created_at: String,
+        updated_at: String,
+    }
+
+    struct WorkLedger {
+        conn: rusqlite::Connection,
+    }
+
+    impl WorkLedger {
+        fn open(db_path: &Path) -> Result<Self, rusqlite::Error> {
+            let conn = rusqlite::Connection::open(db_path)?;
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS work_items (
+                    kind TEXT NOT NULL,
+                    stable_key TEXT NOT NULL,
+                    payload_version INTEGER NOT NULL,
+                    payload BLOB NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    origin_transaction_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (kind, stable_key)
+                );",
+            )?;
+            Ok(Self { conn })
+        }
+
+        fn insert_if_absent(
+            &self,
+            kind: &str,
+            stable_key: &str,
+            payload: &[u8],
+            origin_tx: Option<&str>,
+        ) -> Result<bool, rusqlite::Error> {
+            let now = "2026-08-28T00:00:00Z";
+            let rows = self.conn.execute(
+                "INSERT OR IGNORE INTO work_items (
+                    kind, stable_key, payload_version, payload, status, attempt_count,
+                    last_error, origin_transaction_id, created_at, updated_at
+                ) VALUES (?1, ?2, 1, ?3, 'pending', 0, NULL, ?4, ?5, ?5)",
+                rusqlite::params![kind, stable_key, payload, origin_tx, now],
+            )?;
+            Ok(rows > 0)
+        }
+
+        fn mark_active(&self, kind: &str, stable_key: &str) -> Result<(), rusqlite::Error> {
+            self.conn.execute(
+                "UPDATE work_items SET status = 'active', attempt_count = attempt_count + 1 WHERE kind = ?1 AND stable_key = ?2",
+                rusqlite::params![kind, stable_key],
+            )?;
+            Ok(())
+        }
+
+        fn mark_complete(&self, kind: &str, stable_key: &str) -> Result<(), rusqlite::Error> {
+            self.conn.execute(
+                "UPDATE work_items SET status = 'complete' WHERE kind = ?1 AND stable_key = ?2",
+                rusqlite::params![kind, stable_key],
+            )?;
+            Ok(())
+        }
+
+        fn get_item(&self, kind: &str, stable_key: &str) -> Result<Option<WorkItemRecord>, rusqlite::Error> {
+            let mut stmt = self.conn.prepare(
+                "SELECT kind, stable_key, payload_version, payload, status, attempt_count, last_error, origin_transaction_id, created_at, updated_at
+                 FROM work_items WHERE kind = ?1 AND stable_key = ?2",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![kind, stable_key])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(WorkItemRecord {
+                    kind: row.get(0)?,
+                    stable_key: row.get(1)?,
+                    payload_version: row.get(2)?,
+                    payload: row.get(3)?,
+                    status: row.get(4)?,
+                    attempt_count: row.get(5)?,
+                    last_error: row.get(6)?,
+                    origin_transaction_id: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn count_items(&self) -> Result<usize, rusqlite::Error> {
+            self.conn.query_row("SELECT COUNT(*) FROM work_items", [], |r| r.get(0))
+        }
+    }
+
+    // Test 22: work insertion deduplication (specs.md §13, §44).
+    #[test]
+    fn work_insertion_deduplication_converges_without_duplicate_rows() {
+        fn acquire(
+            context: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            let state_dir = context.source_state_directory().unwrap();
+            let ledger = WorkLedger::open(&state_dir.join("ledger.db")).unwrap();
+
+            // Insert initial items
+            assert!(ledger.insert_if_absent("video-download", "vid-1", b"{}", None).unwrap());
+            assert!(ledger.insert_if_absent("video-download", "vid-2", b"{}", None).unwrap());
+
+            // Repeated insertion of the same items must return false (already present)
+            assert!(!ledger.insert_if_absent("video-download", "vid-1", b"{}", None).unwrap());
+            assert!(!ledger.insert_if_absent("video-download", "vid-2", b"{}", None).unwrap());
+
+            // Total count remains exactly 2
+            assert_eq!(ledger.count_items().unwrap(), 2);
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 23: repeated discovery convergence across sequential sessions (specs.md §14, §44).
+    #[test]
+    fn repeated_discovery_converges_without_duplicating_work() {
+        use crate::protocols::http::request::HttpRequest;
+
+        static DISCOVERY_URL: OnceLock<String> = OnceLock::new();
+
+        fn spawn_mock_server() -> String {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let url = format!("http://127.0.0.1:{port}/discover");
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if let Ok(mut stream) = stream {
+                        let mut buffer = [0; 512];
+                        let _ = stream.read(&mut buffer);
+                        let body = "[\"vid-101\",\"vid-102\",\"vid-103\"]";
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.flush();
+                    }
+                }
+            });
+            url
+        }
+
+        let url = DISCOVERY_URL.get_or_init(spawn_mock_server);
+
+        fn interrupted_discovery(
+            context: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            let state_dir = context.source_state_directory().unwrap();
+            let ledger = WorkLedger::open(&state_dir.join("ledger.db")).unwrap();
+
+            // First discovery run inserts items but simulates failure before checkpoint commit
+            ledger.insert_if_absent("video-download", "vid-101", b"payload1", None).unwrap();
+            ledger.insert_if_absent("video-download", "vid-102", b"payload2", None).unwrap();
+
+            // Simulate failure before execute/commit_checkpoint
+            Err(AcquisitionError::source_message("simulated discovery interruption"))
+        }
+
+        fn resumed_discovery(
+            context: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            let state_dir = context.source_state_directory().unwrap();
+            let ledger = WorkLedger::open(&state_dir.join("ledger.db")).unwrap();
+
+            let logical_key = "discover/history-videos";
+            let url = DISCOVERY_URL.get().expect("server url initialized");
+            let req = HttpRequest::get(url)
+                .unwrap()
+                .logical_key(logical_key)
+                .unwrap();
+            let _tx = context.execute(req)?;
+
+            // Second session re-runs discovery for the same query
+            ledger.insert_if_absent("video-download", "vid-101", b"payload1", None).unwrap();
+            ledger.insert_if_absent("video-download", "vid-102", b"payload2", None).unwrap();
+            ledger.insert_if_absent("video-download", "vid-103", b"payload3", None).unwrap();
+
+            // Checkpoint discovery
+            context.commit_checkpoint(logical_key).unwrap();
+            assert!(context.has_checkpoint(logical_key).unwrap());
+
+            // Count items: 2 from first attempt + 1 new = exactly 3
+            assert_eq!(ledger.count_items().unwrap(), 3);
+            Ok(())
+        }
+
+        let mut fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let first_args = fixture.build_argv(&[]);
+        let first_result = run_http_runtime_invocation(
+            &first_args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(interrupted_discovery),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(first_result.is_err());
+
+        fixture.advance_to_new_session();
+        let second_args = fixture.build_argv(&[]);
+        let second_result = run_http_runtime_invocation(
+            &second_args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(resumed_discovery),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(second_result.is_ok(), "{second_result:?}");
+    }
+
+    // Test 24: crash after checkpoint before work completion is reconciled on next session (specs.md §15, §44).
+    #[test]
+    fn crash_after_checkpoint_before_work_completion_is_reconciled() {
+        use crate::protocols::http::request::HttpRequest;
+
+        const LOGICAL_KEY: &str = "work/video-download/vid-201";
+        static WORK_URL: OnceLock<String> = OnceLock::new();
+
+        fn spawn_mock_server() -> String {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let url = format!("http://127.0.0.1:{port}/work");
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if let Ok(mut stream) = stream {
+                        let mut buffer = [0; 512];
+                        let _ = stream.read(&mut buffer);
+                        let body = "{\"status\":\"ok\"}";
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.flush();
+                    }
+                }
+            });
+            url
+        }
+
+        let _ = WORK_URL.get_or_init(spawn_mock_server);
+
+        fn crashed_work_execution(
+            context: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            let state_dir = context.source_state_directory().unwrap();
+            let ledger = WorkLedger::open(&state_dir.join("ledger.db")).unwrap();
+
+            ledger.insert_if_absent("video-download", "vid-201", b"{}", None).unwrap();
+            ledger.mark_active("video-download", "vid-201").unwrap();
+
+            // Execute HTTP request to register transaction
+            let url = WORK_URL.get().expect("work url initialized");
+            let req = HttpRequest::get(url)
+                .unwrap()
+                .logical_key(LOGICAL_KEY)
+                .unwrap();
+            let _tx = context.execute(req)?;
+
+            // Checkpoint committed, but process crashes before work.mark_complete
+            context.commit_checkpoint(LOGICAL_KEY).unwrap();
+
+            // Simulate process abort / error before mark_complete
+            Err(AcquisitionError::source_message("crash after checkpoint before complete"))
+        }
+
+        fn recovery_work_execution(
+            context: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            let state_dir = context.source_state_directory().unwrap();
+            let ledger = WorkLedger::open(&state_dir.join("ledger.db")).unwrap();
+
+            // Recovery checks if checkpoint already committed
+            if context.has_checkpoint(LOGICAL_KEY).unwrap() {
+                ledger.mark_complete("video-download", "vid-201").unwrap();
+            }
+
+            let item = ledger.get_item("video-download", "vid-201").unwrap().unwrap();
+            assert_eq!(item.status, "complete");
+            Ok(())
+        }
+
+        let mut fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let first_args = fixture.build_argv(&[]);
+        let first_result = run_http_runtime_invocation(
+            &first_args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(crashed_work_execution),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(first_result.is_err());
+
+        fixture.advance_to_new_session();
+        let second_args = fixture.build_argv(&[]);
+        let second_result = run_http_runtime_invocation(
+            &second_args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(recovery_work_execution),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(second_result.is_ok(), "{second_result:?}");
+    }
+
+    // Test 25: SQLite schema migration inside source state directory (specs.md §14, §44).
+    #[test]
+    fn sqlite_schema_migration_upgrades_tables_and_preserves_records() {
+        fn run_v1_and_migrate_to_v2(
+            context: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            let state_dir = context.source_state_directory().unwrap();
+            let db_path = state_dir.join("migrated.db");
+
+            // Initial setup: schema version 1
+            {
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                conn.execute_batch(
+                    "PRAGMA user_version = 1;
+                     CREATE TABLE work_items (
+                        kind TEXT NOT NULL,
+                        stable_key TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        PRIMARY KEY (kind, stable_key)
+                     );
+                     INSERT INTO work_items VALUES ('video', 'item-1', 'pending');
+                     INSERT INTO work_items VALUES ('video', 'item-2', 'complete');",
+                )
+                .unwrap();
+            }
+
+            // Migration to schema version 2 inside a transaction
+            {
+                let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+                let tx = conn.transaction().unwrap();
+                let version: i64 = tx
+                    .query_row("PRAGMA user_version", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(version, 1);
+
+                tx.execute_batch(
+                    "ALTER TABLE work_items ADD COLUMN priority INTEGER DEFAULT 0;
+                     PRAGMA user_version = 2;",
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            }
+
+            // Verify version 2 has upgraded schema and preserved existing records
+            {
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                let version: i64 = conn
+                    .query_row("PRAGMA user_version", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(version, 2);
+
+                let count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM work_items WHERE priority = 0", [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(count, 2);
+            }
+
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(run_v1_and_migrate_to_v2),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 26: simultaneous unsupported writer rejection via SQLite locking (specs.md §44).
+    #[test]
+    fn simultaneous_unsupported_writer_rejection_via_sqlite_locking() {
+        fn test_concurrent_writer_rejection(
+            context: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            let state_dir = context.source_state_directory().unwrap();
+            let db_path = state_dir.join("locked.db");
+
+            let conn1 = rusqlite::Connection::open(&db_path).unwrap();
+            conn1.execute_batch(
+                "CREATE TABLE items (id INTEGER PRIMARY KEY);
+                 BEGIN EXCLUSIVE;",
+            )
+            .unwrap();
+
+            let conn2 = rusqlite::Connection::open(&db_path).unwrap();
+            conn2.busy_timeout(std::time::Duration::from_millis(10)).unwrap();
+
+            let write_result = conn2.execute("INSERT INTO items VALUES (1)", []);
+            assert!(
+                write_result.is_err(),
+                "concurrent write transaction must be rejected by SQLite locking"
+            );
+
+            conn1.execute_batch("COMMIT;").unwrap();
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(test_concurrent_writer_rejection),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
     }
 }

@@ -117,7 +117,6 @@ pub enum ResponseOutcomeDocument {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ResponseMetadataDocument {
     pub schema_version: u32,
     pub transaction_id: String,

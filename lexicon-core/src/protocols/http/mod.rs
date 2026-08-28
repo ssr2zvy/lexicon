@@ -63,3 +63,5 @@ pub use transaction::metadata::{
     StoredTransportFailureClass,
 };
 pub use transport::StoredHttpVersion;
+
+pub use rusqlite;
