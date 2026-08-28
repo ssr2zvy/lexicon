@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use lexicon_core::session::{
     NewSessionRecord, ProjectIdentity, RuntimeContextPaths, SafeSessionFailure, SessionIdentity,
-    SessionLease, SessionOperation, SessionOperationRoot, SessionRecordV1, SessionStore,
-    SessionTransition, encode_runtime_context,
+    SessionLease, SessionOperation, SessionOperationRoot, SessionRecordV1, SessionState,
+    SessionStore, SessionTransition, encode_runtime_context,
 };
 use lexicon_core::runtime::{OwnedRuntimeIdentity, RuntimeExecutionMode, RuntimeSupervisionMode};
 
@@ -72,6 +72,20 @@ impl PreparedSessionLaunch {
             .map_err(SessionCoordinationError::Store);
         drop(self);
         transition_result
+    }
+
+    /// Release the lease held by this prepared launch without transitioning the
+    /// session, leaving it durably `Prepared` for a different process to resume.
+    ///
+    /// This is the background-execution handoff primitive: the initiating
+    /// process calls this after building the operator-host invocation
+    /// reference, so the operator host can acquire the lease itself via
+    /// [`SessionCoordinator::resume_prepared_launch`]. The caller must not
+    /// otherwise depend on this value after calling this method.
+    pub fn release_for_handoff(self) -> SessionRecordV1 {
+        let PreparedSessionLaunch { record, lease, .. } = self;
+        drop(lease);
+        record
     }
 }
 
@@ -248,6 +262,62 @@ impl SessionCoordinator {
     /// Expose the underlying store for post-launch session reconciliation.
     pub fn store(&self) -> &SessionStore {
         &self.store
+    }
+
+    /// Re-acquire ownership of an already-`Prepared` session for a new owner
+    /// process, without creating a new session record.
+    ///
+    /// Used only for the background-execution handoff: the initiating process
+    /// already created this `Prepared` record and released its lease via
+    /// [`PreparedSessionLaunch::release_for_handoff`]. This loads that exact
+    /// record, requires it still be `Prepared` (rejecting a session some other
+    /// process has already advanced), and acquires the lease for the calling
+    /// process.
+    ///
+    /// This deliberately does not go through `assess_current_session` /
+    /// `reconcile_stale_current_session`: an unowned `Prepared` record is the
+    /// expected, valid state during handoff, not evidence of a dead owner.
+    pub fn resume_prepared_launch(
+        &self,
+        session_id: &SessionIdentity,
+    ) -> Result<PreparedSessionLaunch, SessionCoordinationError> {
+        let record = self.store.load(session_id).map_err(SessionCoordinationError::Store)?;
+
+        if record.state() != SessionState::Prepared {
+            return Err(SessionCoordinationError::HandoffSessionNotPrepared {
+                actual_state: record.state(),
+            });
+        }
+
+        let lease = self
+            .store
+            .acquire_lease(session_id)
+            .map_err(SessionCoordinationError::Lease)?;
+
+        let session_paths = build_session_paths(
+            &self.project_root,
+            &self.protocol_root,
+            self.operation,
+            session_id,
+        )
+        .map_err(SessionCoordinationError::InvalidOperationRoot)?;
+
+        let context_document = encode_runtime_context(
+            &self.project,
+            &self.runtime,
+            session_id,
+            &session_paths,
+        )
+        .map_err(SessionCoordinationError::ContextEncoding)?;
+
+        let operation_root = self.store.operation_root().path().to_path_buf();
+
+        Ok(PreparedSessionLaunch {
+            record,
+            lease,
+            context_document,
+            operation_root,
+        })
     }
 
     // ------------------------------------------------------------------

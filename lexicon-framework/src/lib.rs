@@ -10,6 +10,7 @@ pub mod build;
 pub mod data;
 pub mod publication;
 pub mod session;
+pub mod supervision;
 pub use publication::{
     PublishedRuntimePair, RuntimePairCleanupWarning, RuntimePairPublicationError,
     publish_runtime_pair,

@@ -6,8 +6,8 @@ use lexicon_core::runtime::invocation::{
 };
 use lexicon_core::runtime::invocation_transport::RuntimeInvocationTransportEncodingError;
 use lexicon_core::session::{
-    ProjectIdentity, SessionFailureCode, SessionFailureKind, SessionIdentity, SessionOperation,
-    SessionState, SessionStoreError,
+    ProjectIdentity, SessionFailureCode, SessionFailureKind, SessionIdentity, SessionLeaseError,
+    SessionOperation, SessionState, SessionStoreError,
 };
 
 use crate::build::{
@@ -16,6 +16,7 @@ use crate::build::{
 use crate::data::outcome::ObservedChildTermination;
 use crate::data::request::DataOperation;
 use crate::session::SessionCoordinationError;
+use crate::supervision::{OperatorHostInvocationDecodingError, OperatorHostInvocationEncodingError};
 use crate::{ProjectConfigLoadError, ProjectRootDiscoveryError};
 
 // ---------------------------------------------------------------------------
@@ -567,8 +568,22 @@ impl std::error::Error for ChildOwnershipUncertainError {
 /// Top-level typed error hierarchy for `execute_foreground_data`.
 #[derive(Debug)]
 pub enum ForegroundDataExecutionError {
-    /// `--bg` was supplied; background execution is not implemented in this milestone.
+    /// Defensive misuse guard: a request with `background: true` reached
+    /// `execute_foreground_data`, which only ever runs the foreground path.
+    /// The CLI must route `--bg` requests through `execute_background_data` instead.
     BackgroundModeUnsupported,
+    /// Failed to encode the operator-host invocation reference.
+    OperatorHostEncoding(OperatorHostInvocationEncodingError),
+    /// Failed to decode the operator-host invocation reference (operator-host side only).
+    OperatorHostDecoding(OperatorHostInvocationDecodingError),
+    /// Failed to re-execute the current binary in the `__operator-host` role.
+    OperatorHostReExec(std::io::Error),
+    /// Polling the session lease while waiting for operator-host ownership failed.
+    OperatorHostOwnershipCheckFailed(SessionLeaseError),
+    /// The operator-host process exited before it acquired the session lease.
+    OperatorHostExitedBeforeOwnership { exit_code: Option<i32> },
+    /// Timed out waiting for the operator-host process to acquire the session lease.
+    OperatorHostOwnershipTimeout,
     /// Project root discovery failed (no `lexicon.toml` found or nested project).
     ProjectDiscovery(ProjectDiscoveryError),
     /// Project configuration (`lexicon.toml`) is invalid or malformed.
@@ -674,8 +689,30 @@ impl fmt::Display for ForegroundDataExecutionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BackgroundModeUnsupported => {
-                f.write_str("background execution (--bg) is not supported in this release")
+                f.write_str("internal error: a background-execution request reached the foreground execution path")
             }
+            Self::OperatorHostEncoding(e) => {
+                write!(f, "failed to encode operator-host invocation reference: {e}")
+            }
+            Self::OperatorHostDecoding(e) => {
+                write!(f, "failed to decode operator-host invocation reference: {e}")
+            }
+            Self::OperatorHostReExec(e) => {
+                write!(f, "failed to re-execute the operator-host process: {e}")
+            }
+            Self::OperatorHostOwnershipCheckFailed(e) => {
+                write!(f, "failed to inspect operator-host session lease ownership: {e}")
+            }
+            Self::OperatorHostExitedBeforeOwnership { exit_code: Some(code) } => write!(
+                f,
+                "operator-host process exited (code {code}) before it acquired session ownership"
+            ),
+            Self::OperatorHostExitedBeforeOwnership { exit_code: None } => f.write_str(
+                "operator-host process exited abnormally before it acquired session ownership",
+            ),
+            Self::OperatorHostOwnershipTimeout => f.write_str(
+                "timed out waiting for the operator-host process to acquire session ownership",
+            ),
             Self::ProjectDiscovery(e) => write!(f, "project discovery failed: {e}"),
             Self::ProjectConfiguration(e) => write!(f, "project configuration error: {e}"),
             Self::ProjectLayout(e) => write!(f, "project layout error: {e}"),
@@ -886,6 +923,10 @@ impl std::error::Error for ForegroundDataExecutionError {
             Self::MissingTerminalSession(err) => Some(err),
             Self::CorruptTerminalSession(err) => Some(err),
             Self::RootSummaryReconciliationFailed(err) => Some(err),
+            Self::OperatorHostEncoding(err) => Some(err),
+            Self::OperatorHostDecoding(err) => Some(err),
+            Self::OperatorHostReExec(err) => Some(err),
+            Self::OperatorHostOwnershipCheckFailed(err) => Some(err),
             _ => None,
         }
     }
