@@ -1724,10 +1724,12 @@ esac
     #[test]
     fn probe_http_runtime_information_rejects_nonzero_exit_status() {
         let (_temp, script) = probe_fixture("nonzero-exit");
-        let result = super::probe_http_runtime_information(
-            &script,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-        );
+        let result = retry_on_spawn_busy(|| {
+            super::probe_http_runtime_information(
+                &script,
+                RuntimeIdentity::http_acquisition("example-source", 1),
+            )
+        });
         assert!(matches!(
             result,
             Err(RuntimeProbeExecutionError::UnsuccessfulExit { .. })

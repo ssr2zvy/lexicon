@@ -113,10 +113,16 @@ impl RuntimeInvocationFixture {
             RuntimeOperation::Processing => "process-data",
         };
         let operation_root = protocol_root.join(operation_segment);
+        // Processing transaction discovery validates `protocol_root/get-raw-data` as an
+        // existing managed directory even when it is not this invocation's own operation
+        // root. For an Acquisition fixture this is the same path as `operation_root` and
+        // `create_dir_all` is idempotent, so it is always created up front.
+        let acquisition_root = protocol_root.join("get-raw-data");
 
         std::fs::create_dir_all(&raw_data_directory).expect("create raw data directory");
         std::fs::create_dir_all(&processed_data_directory)
             .expect("create processed data directory");
+        std::fs::create_dir_all(&acquisition_root).expect("create acquisition root directory");
 
         let project = ProjectInvocationIdentity::new("example-project").unwrap();
 

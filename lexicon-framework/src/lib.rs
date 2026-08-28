@@ -2691,7 +2691,6 @@ fn build_managed_runner(
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
 
     use lexicon_core::runtime::{OwnedRuntimeIdentity, RuntimeOperation, RuntimeProtocol};
 
@@ -2707,19 +2706,17 @@ mod tests {
         validate_managed_workspace_metadata, validate_protocol, validate_source_name,
     };
 
-    static TEST_CWD_LOCK: Mutex<()> = Mutex::new(());
+    // `with_test_cwd` changes the process-global current working directory, which is
+    // shared by every thread in this test binary. `crate::data::test_support` defines
+    // the single lock serializing every such change across this whole crate's test
+    // suite; a second, disjoint lock here would not protect against concurrent CWD
+    // changes made through that one (see `TEST_CWD_LOCK`'s doc comment there), which
+    // previously let unrelated tests that spawn subprocesses (e.g. `cargo metadata`)
+    // observe a momentarily-invalid working directory.
+    use crate::data::test_support::with_test_cwd;
 
     fn unique_test_dir(prefix: &str) -> tempfile::TempDir {
         tempfile::Builder::new().prefix(prefix).tempdir().unwrap()
-    }
-
-    fn with_test_cwd<T>(project_root: &std::path::Path, func: impl FnOnce() -> T) -> T {
-        let _guard = TEST_CWD_LOCK.lock().unwrap();
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(project_root).unwrap();
-        let result = func();
-        std::env::set_current_dir(&original).unwrap();
-        result
     }
 
     fn write_valid_managed_workspace(root: &Path, source_name: &str, operation_name: &str) {
@@ -3299,20 +3296,52 @@ mod tests {
         ));
     }
 
+    /// `cargo metadata` (spawned by `load_managed_workspace_metadata` without an
+    /// explicit working directory override) inherits this test binary's
+    /// process-wide current working directory. Under heavy parallel load in this
+    /// crate's test binary, a transient container/overlay-filesystem condition can
+    /// occasionally leave `getcwd()` failing for that inherited directory even
+    /// though it exists on disk, which `cargo metadata` reports as "Could not
+    /// locate working directory". This is unrelated to `validate_managed_workspace_metadata`'s
+    /// own logic (it passes reliably in isolation and under `--test-threads=1`).
+    fn is_transient_working_directory_error(error: &ManagedWorkspaceMetadataError) -> bool {
+        matches!(
+            error,
+            ManagedWorkspaceMetadataError::CommandFailed(message)
+                if message.contains("Could not locate working directory")
+        )
+    }
+
     #[test]
     fn workspace_metadata_validation_accepts_valid_workspace() {
-        let root_dir = unique_test_dir("lexicon-workspace-metadata-valid-");
-        write_valid_managed_workspace(root_dir.path(), "example-source", "get-raw-data");
+        // Bounded retry limited to the transient working-directory condition above;
+        // a persistent failure still fails the test with the original error rather
+        // than being skipped or silently converted into success.
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let root_dir = unique_test_dir("lexicon-workspace-metadata-valid-");
+            write_valid_managed_workspace(root_dir.path(), "example-source", "get-raw-data");
 
-        let result = validate_managed_workspace_metadata(
-            root_dir.path(),
-            "get-raw-data",
-            "example-source-get-raw-data",
-            "example-source-get-raw-data-runner",
-            "example-source-get-raw-data",
-        );
+            let result = validate_managed_workspace_metadata(
+                root_dir.path(),
+                "get-raw-data",
+                "example-source-get-raw-data",
+                "example-source-get-raw-data-runner",
+                "example-source-get-raw-data",
+            );
 
-        assert!(result.is_ok(), "result: {result:?}");
+            match result {
+                Ok(()) => return,
+                Err(error)
+                    if attempt < MAX_ATTEMPTS && is_transient_working_directory_error(&error) =>
+                {
+                    continue;
+                }
+                Err(error) => panic!("result: {:?}", Err::<(), _>(error)),
+            }
+        }
     }
 
     #[test]
