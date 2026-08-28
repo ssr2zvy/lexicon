@@ -1,348 +1,182 @@
-Implementation report: processing correctness, durability, and error-preservation closure
+Current implementation milestone: background execution, phase 1 — operator-host re-execution and durable session handoff
 
-Milestone status
+Objective
 
-Complete. All twenty-one repository-grounded defects from the previous `current.md` are corrected. No background supervision, `__operator-host`, lexicon build, or automatic build-before-run work was started.
+Replace the current hard-stubbed `--bg` failure with a real background execution path: the initiating `lexicon` process re-executes itself in a reserved internal `__operator-host` role, hands off durable session ownership to that process, and exits once ownership is confirmed. The operator host then performs the same spawn-and-supervise pipeline the foreground path already implements.
 
-Files changed
+This is a corrective/additive milestone, not a rewrite. It must not change acquisition, processing, or the runtime invocation contract for managed source runtimes.
 
-* `lexicon-core/src/processing/error.rs` — rewritten typed error hierarchy.
-* `lexicon-core/src/processing/transactions.rs` — rewritten discovery and provenance.
-* `lexicon-core/src/processing/context.rs` — rewritten context invariants and database state machine.
-* `lexicon-core/src/processing/runner.rs` — rewritten execution ownership, SQLite policy, durability, and terminal outcomes.
-* `lexicon-core/src/processing/mod.rs` — tightened public/internal API boundary.
-* `lexicon-core/src/session/model.rs` — added stable processing session failure codes.
-* `lexicon-core/src/protocols/http/transaction/recorder.rs` — authoritative staging-name grammar plus shared durability boundary.
-* `lexicon-core/src/protocols/http/transaction/metadata.rs` — authoritative finalized-name parser shared internally.
-* `lexicon-core/src/protocols/http/context.rs` — removed a duplicate directory-name parser by delegating to the authoritative one.
-* `lexicon-framework/src/lib.rs` — generated processing scaffold now fails explicitly.
-* `instructions.md` — workflow routes through `current.md`; all Cargo work goes through the test container.
+Contract authority
 
-Per-transaction provenance correction
+Follow:
 
-Discovery now separates two concerns:
+workspace/specs/contract.md, sections 1 ("Goals"), 3 ("Command routing and process model" — Background execution), 9 ("Source-specific arguments"), 12 ("Sessions and supervision"), 16 ("Versioning"), 18 ("Explicit non-goals").
 
-1. session-record admission, performed at most once per typed session identity;
-2. transaction-to-session provenance validation, performed for every transaction.
+workspace/specs/specs.md, sections 8.2 ("Background execution"), 13 ("Sessions"), 16 ("Versioning"), 20 non-negotiable invariants 8–9.
 
-`validate_session_record` proves the session-level invariants that depend only on the durable record: project agreement, HTTP protocol, acquisition operation, runtime source agreement, non-`Prepared` state, and presence of an execution start timestamp.
+The governing division restated by both documents: Lexicon controls the supported entrypoint, build, runtime admission, HTTP-and-recording effect, and session supervision. This milestone extends session supervision to the background case; it does not change source-facing contracts.
 
-`validate_transaction_against_session` runs for every admitted transaction and proves session identity agreement, transaction creation timestamp, transaction completion timestamp, transaction ordering, the session start bound, and the terminal session finish bound when present.
+Repository-grounded current state
 
-Cache presence can no longer bypass transaction validation: the cached record is only a source of durable session facts, never a substitute for validating a transaction.
+1. `--bg` is parsed and threaded but hard-stubbed as unsupported
 
-Typed provenance-cache behavior
-
-The cache is `HashMap<SessionIdentity, SessionRecordV1>`. `SessionInvocationIdentity` already derived `Hash`, so no new derive was required and no typed identity is converted to a string for keying.
-
-Removal of production processing expect and unwrap
-
-Every ordinary-path `expect`, `unwrap`, and assertion is gone from processing discovery and execution:
-
-* the `.expect("session provenance cache must contain loaded record")` lookup is replaced by a `let ... else` that returns `ProcessingTransactionDiscoveryError::ProvenanceCacheInvariant { acquisition_session }`;
-* all four `running.take().expect("running lifecycle must exist")` calls are gone because the running session is no longer optional.
-
-`ProcessingLifecycleError::RunningSessionUnavailable` exists for the case where absence is representable; the corrected ownership model makes it unreachable on the ordinary path. Test-only `expect` calls remain in fixture construction only.
-
-Final running-session ownership representation
+`lexicon-cli/src/cli/data.rs` defines `DataCommand.bg: bool`, and `lexicon-cli/src/cli/mod.rs` copies it into `lexicon_framework::data::ForegroundDataRequest.background`. `lexicon-framework/src/data/foreground.rs::execute_foreground_data_with_launcher` begins with:
 
 ```rust
-struct RunningProcessingExecution<'store> {
-    running: crate::session::RunningRuntimeSession<'store>,
-    project: crate::session::ProjectIdentity,
-    runtime: crate::runtime::OwnedRuntimeIdentity,
-    session: crate::session::SessionIdentity,
+if request.background {
+    return Err(ForegroundDataExecutionError::BackgroundModeUnsupported);
 }
 ```
 
-The owner is created immediately after `enter_running` and provides consuming operations for setup failure (`fail_setup`), source failure (`fail_source`), runtime failure (`fail_runtime`), successful completion (`complete`), and committed-database partial completion (through `fail_runtime` combined with a retained `ProcessingDatabasePartialCommit`). It is consumed exactly once on every path. `Option` no longer models a mandatory owner.
+Background execution is not attempted in any form today; every `--bg` invocation fails immediately.
 
-Setup plus persistence error preservation
+2. Supervision-mode plumbing exists but is never set to `Background`
 
-```rust
-pub enum ProcessingSetupError {
-    TransactionDiscovery(ProcessingTransactionDiscoveryError),
-    DatabasePath(ProcessingDatabasePathError),
-    DatabaseOpen(ProcessingDatabaseOpenError),
-    ContextConstruction(ProcessingContextConstructionError),
-    TransactionBoundary(ProcessingTransactionBoundaryViolation),
-}
+`lexicon_core::runtime::RuntimeSupervisionMode` already has `Foreground` and `Background` variants, and `lexicon-core/src/session/binding.rs::bind_runtime_session` already validates supervision-mode agreement between the invocation envelope and the durable session record (`RuntimeSessionBindingError::SupervisionModeMismatch`). `lexicon_framework::session::SessionCoordinator::prepare_run` / `prepare_resume` already accept a `supervision: RuntimeSupervisionMode` parameter. However, the only caller — `select_and_prepare_session` in `lexicon-framework/src/data/session.rs` — always passes `RuntimeSupervisionMode::Foreground`, regardless of `request.background`. The runtime-level supervision-mode contract is real but currently unreachable for `Background`.
 
-pub struct ProcessingSetupAndPersistenceFailure {
-    setup_error: ProcessingSetupError,
-    persistence_error: SessionStoreError,
-}
-```
+3. No operator-host process, module, or entrypoint exists
 
-`fail_setup` persists the terminal failure state and returns `Setup(..)` on success or `SetupAndPersistence(..)` when persistence also fails. Both errors are retained as typed values with read-only accessors (`setup_error()`, `persistence_error()`); neither is reduced to `String`. `source()` returns the primary setup error.
+`lexicon-cli/src/cli/mod.rs` recognizes only `Data`, `Source`, `Init`, `Build` subcommands. There is no `__operator-host` entrypoint, no `frontend.rs`/`operator_host.rs` split as sketched in contract.md's package-boundaries example, and no `lexicon-framework::supervision` module (`lexicon-framework/src` contains only `build/`, `data/`, `publication/`, `session/`). Background supervision has zero implementation surface today, not a partial or buggy one.
 
-Stable processing failure codes
+4. Reusable primitives already exist and must not be duplicated
 
-`SessionFailureCode` gained six additive variants with stable snake_case identifiers:
+* `lexicon_core::session::{SessionLease, inspect_session_lease, SessionLeaseState}` (`lexicon-core/src/session/lease.rs`) is already a cross-platform exclusive advisory lock (`flock` on Unix, `LockFileEx` on Windows) with a non-consuming inspection function. The operator host must reuse this exact primitive for lease handoff; it must not introduce a second locking mechanism.
+* `lexicon_framework::session::{SessionCoordinator, PreparedSessionLaunch}` (`lexicon-framework/src/session/coordinator.rs`) already prepares sessions, retains the lease, and exposes `record()`, `session()`, `context_document()`, `operation_root()`, and `fail_launch(...)`.
+* `lexicon_framework::data::foreground::{PreparedForegroundExecution, RunningForegroundExecution, execute_foreground_data_with_launcher}` (`lexicon-framework/src/data/foreground.rs`) already implements project discovery, bundle admission, coordinator construction, session selection, invocation-envelope construction (`build_invocation_envelope`), argv encoding (`encode_runtime_invocation`), pre-launch executable integrity recheck, spawning through the `ForegroundRuntimeLauncher` seam, and `wait_and_reconcile` termination handling (including the `handle_wait_error` / `ownership_uncertain` recovery paths).
+* Raw source arguments are already deliberately not persisted to durable storage anywhere in the codebase (contract.md section 9); this invariant must be preserved by the new operator-host handoff.
 
-* `ProcessingTransactionDiscoveryFailed` → `processing_transaction_discovery_failed`
-* `ProcessingTransactionProvenanceFailed` → `processing_transaction_provenance_failed`
-* `ProcessingDatabasePathInvalid` → `processing_database_path_invalid`
-* `ProcessingDatabaseOpenFailed` → `processing_database_open_failed`
-* `ProcessingDatabaseTransactionFailed` → `processing_database_transaction_failed`
-* `ProcessingContextConstructionFailed` → `processing_context_construction_failed`
+Required implementation
 
-`identifier()` is updated. Strict session decoding follows automatically from the existing serde `rename_all = "snake_case"` derive; the change is purely additive to the session schema, which is the only session-schema change permitted by the milestone.
+1. Operator-host invocation reference (new, versioned, internal protocol)
 
-`ProcessingSetupError::failure_code()` selects the code per phase, distinguishing raw discovery from transaction provenance through `ProcessingTransactionDiscoveryError::is_provenance_failure()` rather than by inspecting `Display`. `ProcessingSetupError::diagnostic()` supplies bounded Core-authored `&'static str` diagnostics only. No URLs, headers, bodies, SQL, source arguments, or source error text are persisted.
+Introduce a small versioned type, `OperatorHostInvocationV1` (or equivalently named), in `lexicon-framework` (this is a framework/CLI-level internal protocol, not a source-facing Core contract, so it does not belong in `lexicon-core::runtime`). It must carry exactly what is needed to relocate and rebuild the prepared session deterministically:
 
-Exact raw, acquisition, and processed root validation
+* project name;
+* source name;
+* protocol identifier;
+* operation (`Acquisition` | `Processing`);
+* `abandon_past_failure`;
+* the already-generated session identity (the session the initiating process already prepared).
 
-* Discovery requires `raw_root == protocol_root/data/raw` exactly and returns `RawRootDisagreement { expected, actual }` otherwise. It establishes this invariant itself instead of trusting the validated runtime-context path supplied by the caller.
-* Discovery derives `protocol_root/get-raw-data` itself, validates it as a managed existing directory, and returns `AcquisitionRootInvalid { acquisition_root, source }` otherwise, before opening the acquisition session store. Mere descendants of the protocol root are not accepted.
-* `derive_processing_database_path` requires `processed_root == protocol_root/data/processed` exactly and returns the typed `ProcessedRootDisagreement`.
+It must carry its own schema version constant (for example `OPERATOR_HOST_INVOCATION_SCHEMA_VERSION`), separate from `RUNTIME_INVOCATION_PROTOCOL_VERSION`, per the distinct-versioning requirement in contract.md section 16 / specs.md section 16.
 
-Exact partial-directory classification
+Required exclusion: this type must never carry raw source arguments. Source arguments continue to travel only as the operator-host process's own trailing argv after `--`, exactly as `lexicon data --get ... -- <source-args>` already does. Do not persist source arguments to any file as part of this reference.
 
-The recorder now owns the staging-name grammar and exposes it internally:
+Provide encode/decode functions for this reference (JSON is acceptable, consistent with existing envelope encoding style) and reject unknown schema versions the same way `RuntimeInvocationEnvelopeV1::from_json` already does for the runtime invocation envelope.
 
-* `PARTIAL_TRANSACTION_DIRECTORY_PREFIX`
-* `staging_transaction_directory_name` / `finalized_transaction_directory_name` (used by the recorder itself)
-* `classify_staging_transaction_directory_name` returning `NotStaging`, `Valid { timestamp, transaction_id }`, or `Malformed`
+2. Session preparation with `Background` supervision mode
 
-The grammar is exactly `.partial-<timestamp>-<transaction-id>` where the timestamp is a nonzero ASCII-decimal `u64` and the transaction id is a valid `HttpTransactionIdentity`. Processing classification now yields:
+Thread `RuntimeSupervisionMode` through `select_and_prepare_session` (`lexicon-framework/src/data/session.rs`) and its `select_and_prepare_acquisition` / `select_and_prepare_processing` helpers, so the caller controls whether `Foreground` or `Background` is requested, instead of the mode being hardcoded.
 
-* valid Core partial transaction directory → ignored;
-* malformed partial-looking directory → `RawEntryMalformedPartialDirectory`;
-* finalized candidate → strictly admitted through `admit_transaction_from_disk`;
-* unrelated directory → `RawEntryUnrecognizedDirectory`;
-* non-UTF-8 name → `RawEntryNameInvalid`.
+3. Initiating-process background path
 
-Arbitrary `.partial-*` names are no longer accepted as valid staging. Partial directories are never deleted. The finalized grammar is the single authoritative `parse_transaction_directory_name` in transaction admission; the duplicate copy in the acquisition HTTP context now delegates to it, preserving that path's existing acceptance behavior exactly.
+Add a background counterpart to `execute_foreground_data_with_launcher` (a new function, e.g. `execute_background_data_with_launcher`, or an internal branch reached before the current unconditional rejection) that:
 
-Final processing-context invariants
+* performs the same project discovery, bundle admission, project-identity construction, and coordinator construction already used by the foreground path;
+* calls `coordinator.prepare_run(RuntimeSupervisionMode::Background)` (or `prepare_resume`, following the same selection policy already implemented in `select_and_prepare_acquisition` / `select_and_prepare_processing`);
+* releases the lease held by the just-created `PreparedSessionLaunch` before re-execution, so the operator-host process can acquire it itself (the initiating process must not hold the lease across the re-exec boundary);
+* builds the `OperatorHostInvocationV1` reference for the now-Prepared session and re-executes the current binary (`std::env::current_exe()`) as `lexicon __operator-host <encoded-reference> -- <source-args>`, forwarding the untouched source arguments exactly as received;
+* waits, with a bounded timeout, by polling `inspect_session_lease` on the session's lease path, until the spawned operator-host process has acquired the lease (`SessionLeaseState::Owned`), confirming durable session ownership;
+* returns a typed background-handoff outcome distinct from `ForegroundDataOutcome` once ownership is confirmed, without waiting for the operator host or its child runtime to finish;
+* returns a typed error if the operator-host process exits, or the timeout elapses, before ownership is observed — never silently reports success in that case.
 
-`ProcessingContext::new` proves, in addition to HTTP protocol and processing operation:
+4. Operator-host entrypoint
 
-```text
-operation_root           = protocol_root/process-data
-session_directory        = operation_root/sessions/<session-id>
-raw_data_directory       = protocol_root/data/raw
-processed_data_directory = protocol_root/data/processed
-database_path            = processed_data_directory/<runtime-source>.sqlite3
-```
+Add a reserved internal subcommand to `lexicon-cli` for `__operator-host <encoded-reference> [-- <source-args>]`. It must not be advertised as ordinary CLI surface (hide it from `--help`, or otherwise mark it as internal, consistent with contract.md's statement that this is "an internal protocol, not a public framework API").
 
-Failures return `ProcessingContextConstructionError::ManagedPathDisagreement { category, expected, actual }` where `category` is a stable `ProcessingManagedPathCategory`. A context that combines separately valid but mutually inconsistent components cannot be constructed.
+The handler decodes `OperatorHostInvocationV1`, re-runs project discovery / bundle admission / coordinator construction for the exact project, source, protocol, and operation named in the reference, then re-`prepare_run`/`prepare_resume`s with `RuntimeSupervisionMode::Background` for the same session identity (this succeeds because the initiating process already released the lease). From there it reuses the existing spawn-and-supervise pipeline (`build_invocation_envelope`, `encode_runtime_invocation`, `recheck_executable_integrity_typed`, the `ForegroundRuntimeLauncher` seam, `wait_and_reconcile`) rather than duplicating it. Prefer generalizing `PreparedForegroundExecution` / `RunningForegroundExecution` (and any misleadingly-named helpers) into shared internal types used by both the foreground and operator-host callers, over forking a second copy of the state machine.
 
-Catalog and context identity agreement
+5. CLI wiring
 
-Every catalog entry is validated against the processing project, the HTTP protocol, and the processing runtime source, yielding `CatalogProjectMismatch`, `CatalogProtocolMismatch`, or `CatalogSourceMismatch` with the offending `catalog_index`.
+`lexicon data --get/--process ... --bg` in `lexicon-cli/src/cli/mod.rs` must call the new background path instead of unconditionally forwarding into `execute_foreground_data`. Without `--bg`, behavior must remain byte-identical to today.
 
-Database state-transition behavior
+Required corrections / discipline
 
-Only two transitions succeed:
+* The operator-host invocation reference is a small, versioned, internal protocol distinct from the runtime invocation envelope, the session schema, and the source contract version, per the distinct-compatibility-surfaces requirement in contract.md section 16 and specs.md section 16.
+* Do not persist raw source arguments anywhere as part of this milestone's new durable state.
+* `bind_runtime_session`'s existing `SupervisionModeMismatch` check must remain meaningful end-to-end: when the operator host launches the managed source runtime, that runtime's own invocation envelope must carry `RuntimeSupervisionMode::Background`, matching the session record the operator host just prepared.
+* Do not introduce a second session-lease mechanism; reuse `SessionLease` / `inspect_session_lease` exactly as implemented today.
+* Do not change the source acquisition or processing handler signatures, the runtime invocation envelope schema, the managed-runner entrypoints, or the existing foreground observation/reconciliation logic's behavior for `--bg`-absent invocations.
 
-```text
-Open → Committed
-Open → RolledBack
-```
+Preserve existing behavior
 
-Everything else is rejected with `AlreadyCommitted`, `AlreadyRolledBack`, or `TransactionNotActive`. A fourth internal state, `EndedOutsideCore`, records a transaction that ended outside Core's control or with an uncertain outcome; from it, commit and rollback both return `TransactionNotActive` and `Drop` issues no further statements. `Drop` still performs a best-effort rollback only while the transaction is genuinely open.
+Do not change:
 
-Source transaction-boundary detection
+* processing correctness/durability behavior closed in the prior milestone;
+* the source acquisition or processing handler signatures;
+* invocation-envelope JSON schema for the managed source runtime;
+* argv transport to source implementations;
+* source argument preservation and non-persistence;
+* acquisition or processing admission;
+* runtime-information probes;
+* the session schema (only an additive, separate operator-host invocation-reference schema is introduced; the session record schema itself is unchanged);
+* `SessionLease` / `inspect_session_lease` locking behavior;
+* foreground behavior when `--bg` is absent;
+* HTTP transport, retries, redirects, raw transaction formats, raw-byte fidelity, header redaction;
+* managed runner entrypoints, source build, runtime verification, bundle staging, paired publication;
+* CLI syntax for existing subcommands other than the new internal `__operator-host` entrypoint;
+* MZA, Protocol 1, installer behavior.
 
-`ProcessingContext::require_transaction_active(phase)` requires `!connection.is_autocommit()` immediately before invoking the handler and again immediately after it returns. Loss of the boundary produces `ProcessingTransactionBoundaryViolation { phase, possible_database_partial_commit }`.
+Explicit exclusions
 
-* Before the handler, the violation is a setup failure.
-* After the handler, `possible_database_partial_commit` is true, because Core cannot distinguish a source `COMMIT`/`END` from a source `ROLLBACK`. The runner therefore returns `DatabasePartialCommit` with phase `SourceTransactionBoundaryLoss` and never claims the database was rolled back.
+Do not implement in this milestone:
 
-Processing success is never returned after boundary loss. This is documented in code as enforcement of the supported Core route, not hostile-code confinement.
+* explicit cancellation, stop, or attach/status commands for a running background session;
+* signal forwarding from the operator host to the child runtime, or from any external process to the operator host;
+* true OS-level daemonization or detachment semantics (Unix `setsid`/new session group, Windows `DETACHED_PROCESS`/job objects); the operator host may be spawned as an ordinary child process for this phase, but the initiating process must not `wait()` on it or otherwise gate its own exit on the operator host's continued execution after the ownership handshake completes;
+* lexicon build, automatic build-before-run, or MZA/installer changes;
+* new HTTP capabilities, client certificates, or protocol changes;
+* changes to acquisition/processing correctness, durability, or error-preservation behavior (already closed);
+* fixed source schemas, ORM behavior, or decoded response readers.
 
-Simultaneous catalog and database borrowing API
+Command-execution constraint
 
-```rust
-pub fn resources(
-    &mut self,
-) -> (&ProcessingHttpTransactionCatalog, &mut rusqlite::Connection);
-```
+This is a source-only milestone.
 
-The borrows are disjoint, so a source can iterate admitted transactions while writing rows without cloning the catalog. The individual `transactions()` and `database()` accessors are retained.
+Do not run:
 
-Final ProcessingError representation
+cargo test
+cargo check
+cargo build
+cargo fmt
+cargo clippy
+cargo metadata
+rustc
 
-```rust
-pub enum ProcessingError {
-    Source {
-        operation: &'static str,
-        source: Box<dyn std::error::Error + Send + Sync + 'static>,
-    },
-    SourceMessage { message: &'static str },
-}
-```
+Do not execute:
 
-Constructors are `ProcessingError::source(operation, error)` and `ProcessingError::source_message(message)`, with `operation()` and `message()` accessors. `Display` renders only compile-time static text, so it can never contain SQL, row data, bodies, headers, URLs, or source arguments. `source()` returns the typed nested error where present. The handler signature is unchanged. Arbitrary source failure text is never persisted into session records: the runner persists `SafeSessionFailure::source_failure()` for ordinary source failures and Core-authored `&'static str` diagnostics elsewhere.
+* lexicon CLI commands;
+* generated runners;
+* the new `__operator-host` entrypoint;
+* processing or acquisition runtimes;
+* SQLite tools;
+* HTTP servers;
+* real or test HTTP requests;
+* workspace validation;
+* bundle/install automation.
 
-SQLite open flags
+Do not attempt a CLI command merely to confirm whether it is installed.
 
-```rust
-let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-    | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
-    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
-rusqlite::Connection::open_with_flags(database_path, flags)
-```
+Existing test source may be adjusted only when necessary to align with changed production APIs (for example, `select_and_prepare_session`'s new supervision-mode parameter).
 
-`SQLITE_OPEN_URI` is deliberately absent, so URI filename interpretation stays disabled and an alternate filename cannot be embedded in the managed path. The database is never opened read-only.
+Full validation remains deferred to the final project-wide validation milestone. Any future Cargo invocation must go through the `lexicon-local-test` container per `instructions.md`.
 
-SQLite pragma verification
+Completion report
 
-`PRAGMA foreign_keys = ON` and `PRAGMA journal_mode = DELETE` are applied before the transaction begins, because SQLite refuses journal-mode changes inside an active transaction. The effective configuration is then read back and verified:
+After completion, replace current.md with a report containing:
 
-* `PRAGMA foreign_keys` must be `1`;
-* `PRAGMA journal_mode` must be `delete` (case-insensitive), so WAL stays disabled;
-* after `BEGIN IMMEDIATE`, the connection must not be in autocommit.
+* files changed;
+* the `OperatorHostInvocationV1` schema and its versioning;
+* confirmation that raw source arguments are never persisted by the new handoff;
+* the supervision-mode threading change through `select_and_prepare_session`;
+* the lease hand-off protocol (release by the initiating process, acquisition by the operator host, polling/timeout behavior);
+* the re-execution argv construction (`__operator-host <reference> -- <source-args>`);
+* the new/generalized shared state machine used by both foreground and operator-host callers;
+* the `__operator-host` CLI wiring and its internal/hidden status;
+* confirmation that `--bg`-absent behavior is unchanged;
+* confirmation that the excluded items (cancellation, signal forwarding, true daemonization, build/installer changes) were not added;
+* confirmation that no tests, checks, builds, formatting, linting, metadata commands, CLI execution, runtime execution, or workspace/bundle/install automation were run.
 
-Disagreements return `ProcessingDatabaseConfigurationError::Disagreement { setting, expected, actual }` and readback failures return `Readback { setting, source }`, both keyed by a stable `ProcessingDatabaseSetting`. Core never silently continues with an unexpected journal mode.
+Then stop.
 
-Database creation durability
-
-When the invocation created the database, the file is re-validated as a managed existing regular file, then the database file and the processed-data directory are synchronized through the shared cross-platform Core durability boundary (`sync_regular_file` and `sync_directory` in the HTTP transaction recorder, now `pub(crate)` instead of duplicated). Failures return `ProcessingDatabaseOpenError::Durability(..)`.
-
-Post-commit durability
-
-After a successful SQLite `COMMIT`, the connection is closed, then the database file and processed-data directory are synchronized, then sidecar cleanup is validated, and only then is the session marked `Succeeded`. The session is never marked successful while required database durability remains unresolved.
-
-If the commit succeeded but durability failed, the runner returns `ProcessingDatabasePartialCommit` with phase `PostCommitDurability`, retaining project, runtime, session, database path, failure phase, and the typed `ProcessingDatabaseDurabilityError`. Core never claims the database was rolled back after SQLite committed.
-
-Rollback-journal policy
-
-The allowed sidecar policy is explicit and centralized in `validate_database_sidecars`:
-
-* only the transient rollback journal `<database>-journal` associated with the canonical database is permitted, and only before the database is opened (a journal left by an interrupted writer is legitimate and SQLite recovers it);
-* a rollback journal that survives transaction completion returns `RollbackJournalNotCleanedUp`;
-* pre-existing symlinks at any sidecar path return `Symlink`;
-* pre-existing wrong file types return `WrongFileType`;
-* inspection failures return `Inspection { kind, path, source }`.
-
-Cleanup is validated after the transaction finishes on both the success and source-failure paths. Nothing is ever deleted: an unexpected user file whose name resembles a SQLite sidecar is reported, not removed. `data/processed` is not recursively accepted; only the three canonical sidecar paths are examined.
-
-WAL/SHM rejection
-
-`<database>-wal` and `<database>-shm` are never permitted. Their presence returns `ForbiddenSidecarPresent { kind, path }` both before open and after the transaction.
-
-Commit-outcome uncertainty behavior
-
-A failed `COMMIT` is classified conservatively using the connection's transaction state:
-
-* transaction still active → definitely not committed → `DatabaseTransaction` or, when terminal persistence also failed, `DatabaseCommitAndPersistenceFailure`;
-* transaction gone → outcome uncertain → `ProcessingDatabaseCommitOutcomeUncertain` retaining project, runtime, session, database path, and the SQLite error.
-
-Core makes no rollback or no-change guarantee that SQLite cannot prove. The processing session never becomes `Succeeded` when the commit outcome is uncertain; a stable runtime failure code is persisted instead.
-
-Combined typed-error accessors
-
-Every combined failure exposes read-only typed accessors for all retained errors:
-
-* setup plus terminal persistence — `ProcessingSetupAndPersistenceFailure::setup_error()` / `persistence_error()`;
-* handler plus rollback — `handler_error()` / `database_transaction_error()` / `session_persistence_error()`;
-* handler plus terminal persistence — `handler_error()` / `session_persistence_error()`;
-* commit plus failure persistence — `database_transaction_error()` / `session_persistence_error()`;
-* committed database plus success-persistence failure — `ProcessingDatabasePartialCommit::cause()` / `session_persistence_error()`;
-* commit durability partial failure — `durability_error()`;
-* sidecar partial failure — `sidecar_error()`;
-* uncertain commit result — `commit_error()` / `session_persistence_error()`.
-
-`ProcessingRuntimeInvocationExecutionError` adds `handler_error()`, `setup_error()`, `database_transaction_error()`, `sidecar_error()`, `database_partial_commit()`, `database_commit_outcome_uncertain()`, and `session_persistence_error()`. `source()` returns the primary error; secondary errors are inspectable without parsing `Display`.
-
-Generated processing placeholder behavior
-
-`format_processing_implementation_library` now emits an implementation that compiles while making incompleteness explicit:
-
-```rust
-Err(ProcessingError::source_message(
-    "processing implementation is not configured",
-))
-```
-
-It carries commented guidance showing `let (transactions, database) = context.resources();` with a transaction loop and a source-owned SQL call. An untouched generated source can no longer mark a real processing session `Succeeded` with an empty database. No processing mechanics were added to the managed runner `main.rs`; the runner template is unchanged.
-
-Sensitive Debug and Display behavior
-
-* `ProcessingContext::Debug` no longer prints `database_path`. It prints the project name, runtime source, session id, the stable managed path category `database_file`, and the catalog length, and remains non-exhaustive.
-* New `Display` implementations render stable categories, phases, settings, and sidecar kinds rather than raw paths. They do not reveal URLs, headers, bodies, SQL, row data, source arguments, envelope JSON, runtime-context JSON, or environment values.
-* Typed error fields still retain paths for programmatic recovery, reachable through accessors such as `ProcessingDatabaseSidecarError::path()` and `ProcessingDatabasePartialCommit::database_path()`.
-
-Final processing runner sequence
-
-```text
-parse invocation
-→ admit processing invocation
-→ decode managed context
-→ open processing SessionStore
-→ bind processing session
-→ enter Running with non-optional owner
-→ validate exact raw/acquisition/processed roots
-→ enumerate raw entries
-→ strictly admit finalized transactions
-→ load typed acquisition-session cache
-→ validate every transaction against its session
-→ build deterministic catalog
-→ derive exact database path
-→ validate main and sidecar paths
-→ open SQLite with explicit flags
-→ configure and verify baseline pragmas
-→ BEGIN IMMEDIATE
-→ construct fully checked ProcessingContext
-→ verify transaction is active
-→ invoke source handler
-→ verify transaction remains active
-→ success:
-     SQLite COMMIT
-     close connection
-     database/file/directory durability
-     sidecar validation
-     processing session Succeeded
-→ source failure:
-     SQLite ROLLBACK
-     sidecar validation
-     processing session Failed
-→ setup/runtime failure:
-     preserve primary typed error
-     persist stable processing failure code
-→ partial or uncertain commit:
-     preserve database provenance
-     do not report success
-```
-
-Public and internal API boundary
-
-Exposed through `lexicon_core::processing`: `ProcessingContext`, `ProcessingHttpTransaction`, `ProcessingHttpTransactionCatalog`, `ProcessingError`, `ProcessingResult`, a compatible `rusqlite`, the existing descriptor, admission, probe, and runner APIs, and the errors that genuinely cross the source or supervisor boundary, including the discovery, provenance, context construction, database path, open, configuration, transaction, durability, sidecar, partial commit, uncertain commit, lifecycle, and setup error types with their stable identifier enums.
-
-Kept internal: the `context`, `contract`, `error`, `invocation`, and `transactions` modules are now private modules re-exported by name, so raw-directory classifiers, transaction admission helpers, the provenance cache, `RunningProcessingExecution`, database-state transitions, `validate_database_sidecars`, the commit and durability helpers, `require_transaction_active`, `mark_transaction_ended_outside_core`, and every unchecked constructor stay crate-internal. `processing::runner` remains public because generated managed runners import it by path.
-
-Acquisition raw-data immutability confirmation
-
-Processing performs no writes, renames, or deletions under `data/raw`. Discovery only reads directory entries and admits transactions from disk. Partial directories are ignored, never removed. Acquisition checkpoints, progress files, and acquisition sessions are only read: the acquisition session store is opened and `load` is called; no transition, write, or lease operation is performed against it.
-
-Foreground supervision confirmation
-
-Foreground supervision and session ownership are unchanged. `bind_runtime_session`, `enter_running`, lease inspection, supervisor lease ownership, foreground launching, and foreground reconciliation were not modified. Session transitions still go through `SessionStore::transition` and the existing `validate_transition` rules.
-
-Background supervision and lexicon build confirmation
-
-No background operator host, background handoff, signal forwarding, cancellation, processing checkpoints, incremental-processing policy, fixed source schemas, ORM behavior, decoded response readers, new HTTP capabilities, client certificates, proxies, lexicon build, automatic build-before-run, source migration, cross-compilation, MZA change, or installer change was added. `HttpCapabilitySet::empty()` is retained and `ClientCertificateV1` is not advertised.
-
-Preserved behavior
-
-Unchanged: the processing handler signature, acquisition and resume handler signatures, invocation-envelope JSON, argv transport, source argument preservation, acquisition admission, processing admission, runtime-information probes, the session schema apart from the additive failure-code variants, supervisor lease ownership, foreground launching, foreground reconciliation, HTTP transport, retries, redirects, raw transaction formats, raw-byte fidelity, header redaction, acquisition progress, checkpoints, managed runner entrypoints, source build, runtime verification, bundle staging, paired publication, CLI syntax, MZA, Protocol 1, and installer behavior.
-
-Test source adjustments
-
-Existing test source was adjusted only where the production API changed:
-
-* two `Err(ProcessingError)` construction sites in the runner execution tests now use `ProcessingError::source_message("test source failure")`;
-* `ProcessingContext::new_for_tests` derives its paths from a single protocol root so the fixture satisfies the stricter context invariants and the canonical database filename.
-
-No test was weakened or removed.
-
-Command-execution confirmation
-
-No `cargo test`, `cargo check`, `cargo build`, `cargo fmt`, `cargo clippy`, `cargo metadata`, or `rustc` invocation was run. No lexicon CLI command, generated runner, processing runtime, SQLite tool, HTTP server, real or test HTTP request, workspace validation, or bundle/install automation was executed. No CLI command was attempted merely to confirm installation. Full validation remains deferred to the final project-wide validation milestone, and `instructions.md` now requires every future Cargo invocation to run inside the `lexicon-local-test` container.
-
-Next step
-
-Processing correctness closure is complete. Background supervision may now be considered as a separate milestone.
+Do not begin cancellation, signal forwarding, or true daemonization work until this phase-1 handoff closure is complete and reviewed.
