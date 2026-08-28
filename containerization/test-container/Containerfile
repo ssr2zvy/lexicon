@@ -17,7 +17,7 @@ ENV PATH="/usr/local/cargo/bin:${PATH}"
 RUN echo 'export PATH="/usr/local/cargo/bin:$PATH"' > /etc/profile.d/cargo-path.sh
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        bash curl xz-utils tar ca-certificates build-essential \
+        bash curl xz-utils tar ca-certificates build-essential git \
     && rm -rf /var/lib/apt/lists/*
 
 ARG ZIG_VERSION=0.13.0

@@ -30,9 +30,16 @@ pub enum RootCommand {
     Source(SourceCommand),
     Init(InitCommand),
     Build(BuildCommand),
-    /// Reserved internal entrypoint; not part of the public CLI surface. Naming
-    /// and hiding come from `OperatorHostCommand`'s own `#[command(...)]`
-    /// attribute, matching the pattern used by the other variants above.
+    /// Reserved internal entrypoint; not part of the public CLI surface.
+    ///
+    /// `clap`'s `#[derive(Subcommand)]` takes a variant's subcommand name from
+    /// the kebab-cased variant name, not from the wrapped struct's own
+    /// `#[command(name = ...)]` attribute (that only applies when the struct is
+    /// used as a standalone `Parser`). The other variants above never needed an
+    /// override because their desired name already equals their kebab-cased
+    /// variant name; `OperatorHost` kebab-cases to `operator-host`, not
+    /// `__operator-host`, so both `name` and `hide` must be set here explicitly.
+    #[command(name = "__operator-host", hide = true)]
     OperatorHost(OperatorHostCommand),
 }
 
