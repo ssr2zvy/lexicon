@@ -15,8 +15,8 @@ pub use publication::{
     PublishedRuntimePair, RuntimePairCleanupWarning, RuntimePairPublicationError,
     publish_runtime_pair,
 };
+pub use lexicon_core::MANAGED_RUNNER_TEMPLATE_VERSION;
 
-const MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1;
 const MAX_MANAGED_RUNNER_ERROR_DISPLAY_BYTES: usize = 4096;
 
 #[derive(Debug)]
@@ -341,17 +341,118 @@ struct LexiconProjectConfig {
     project: Option<ProjectSection>,
 }
 
+/// Source manifest schema. spec §5 requires new sources to use schema 2 with
+/// `[source]`, `[acquisition]`, and `[processing]` sections and four distinct
+/// version fields per operation. This module rejects schema-1 documents
+/// explicitly through [`SourceManifestError::UnsupportedSchemaVersion`].
+pub(crate) const SOURCE_MANIFEST_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SourceTomlDocument {
     schema_version: u32,
     source: SourceTomlSection,
+    #[serde(default)]
+    acquisition: SourceOperationSection,
+    #[serde(default)]
+    processing: SourceOperationSection,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 struct SourceTomlSection {
     name: String,
     protocol: String,
 }
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct SourceOperationSection {
+    /// Canonical contract identifier (e.g. `"native-rust-http-source-v1"`).
+    contract: String,
+    runner_template: u32,
+    core_contract: u32,
+    runtime_protocol: u32,
+}
+
+/// Distinct per-operation contract version fields parsed out of a schema-2
+/// source manifest, with the canonical Core-side contract identifier stripped
+/// out (the struct holds the parsed numeric versions; the parsed identifier is
+/// validated separately in [`load_source_metadata`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SourceOperationVersions {
+    pub(crate) runner_template: u32,
+    pub(crate) core_contract: u32,
+    pub(crate) runtime_protocol: u32,
+}
+
+/// Typed source-manifest validation/parse errors. Replaces the schema-1 era
+/// of returning ad-hoc `String` errors so tests can assert on a stable
+/// variant instead of substring matching. `expected` carries owned `String`
+/// values because the caller-supplied `(source_name, protocol)` pair may not
+/// live for `'static`; literals for the Core-owned contract identifier are
+/// converted with `.to_string()` at the construction site.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SourceManifestError {
+    UnsupportedSchemaVersion { actual: u32 },
+    MissingSourceSection,
+    MissingSourceField { field: &'static str },
+    MissingOperationSection { operation: &'static str },
+    MissingOperationField { operation: &'static str, field: &'static str },
+    UnexpectedContractIdentifier {
+        operation: &'static str,
+        expected: String,
+        actual: String,
+    },
+    InvalidVersion {
+        operation: &'static str,
+        field: &'static str,
+        value: u32,
+        expected: u32,
+    },
+}
+
+impl fmt::Display for SourceManifestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedSchemaVersion { actual } => write!(
+                formatter,
+                "unsupported source-manifest schema_version: expected {SOURCE_MANIFEST_SCHEMA_VERSION} but found {actual}"
+            ),
+            Self::MissingSourceSection => formatter.write_str(
+                "source manifest is missing the [source] section",
+            ),
+            Self::MissingSourceField { field } => write!(
+                formatter,
+                "source manifest [source] section is missing required field '{field}'"
+            ),
+            Self::MissingOperationSection { operation } => write!(
+                formatter,
+                "source manifest is missing the [{operation}] section; schema 2 requires both [acquisition] and [processing]"
+            ),
+            Self::MissingOperationField { operation, field } => write!(
+                formatter,
+                "source manifest [{operation}] section is missing required field '{field}'"
+            ),
+            Self::UnexpectedContractIdentifier {
+                operation,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "source manifest [{operation}].contract identifier is '{actual}'; expected '{expected}'"
+            ),
+            Self::InvalidVersion {
+                operation,
+                field,
+                value,
+                expected,
+            } => write!(
+                formatter,
+                "source manifest [{operation}].{field} = {value} does not match the expected Core version {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SourceManifestError {}
 
 #[derive(Debug, Deserialize)]
 struct ProjectSection {
@@ -867,12 +968,11 @@ fn build_source(
     }
 
     let source_toml = protocol_root.join("source.toml");
-    let _source_doc =
-        load_source_metadata(&source_toml, source_name, protocol).map_err(|error| {
-            ManagedSourceBuildError::WorkspaceValidation(
-                ManagedWorkspaceValidationError::LegacyLayout(error),
-            )
-        })?;
+    load_source_metadata(&source_toml, source_name, protocol).map_err(|error| {
+        ManagedSourceBuildError::WorkspaceValidation(
+            ManagedWorkspaceValidationError::LegacyLayout(error),
+        )
+    })?;
 
     let get_workspace = protocol_root.join("get-raw-data");
     let process_workspace = protocol_root.join("process-data");
@@ -1016,30 +1116,154 @@ fn build_source(
     })
 }
 
+/// Parse and validate a schema-2 source manifest. Rejects non-schema-2 documents
+/// with a typed [`SourceManifestError`]; rejects schema-2 documents whose
+/// `contract` identifier or numeric version fields do not match the
+/// canonical Core-side values; and asserts the `[source]` section identity
+/// matches `(expected_name, expected_protocol)`.
 fn load_source_metadata(
     path: &Path,
     expected_name: &str,
     expected_protocol: &str,
-) -> Result<SourceTomlDocument, String> {
+) -> Result<(), String> {
     if !path.is_file() {
-        return Err("source metadata does not match the requested source and protocol".to_owned());
+        return Err(format!(
+            "source manifest {} does not exist or is not a regular file",
+            path.display()
+        ));
     }
 
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    let parsed: SourceTomlDocument = toml::from_str(&contents)
-        .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+    validate_source_toml_text(&contents, expected_name, expected_protocol)
+        .map_err(|error| format!("{}: {}", path.display(), error))
+}
 
-    if parsed.schema_version != 1 {
-        return Err("unsupported schema version".to_owned());
+// `parse_source_toml_document` is used to validate after the structural
+// validator passes; kept here only to silence dead-code warnings if the
+// constructor-style parsing path is ever reintroduced.
+#[allow(dead_code)]
+fn parse_source_toml_document(contents: &str) -> Result<SourceTomlDocument, toml::de::Error> {
+    toml::from_str(contents)
+}
+
+/// Pure-text schema-2 validator shared by tests and the file-loading helper.
+fn validate_source_toml_text(
+    contents: &str,
+    expected_name: &str,
+    expected_protocol: &str,
+) -> Result<(), SourceManifestError> {
+    let parsed: SourceTomlDocument = toml::from_str(contents)
+        .map_err(|error| SourceManifestError::UnsupportedSchemaVersion {
+            actual: parse_schema_version_hint(&error),
+        })?;
+
+    if parsed.schema_version != SOURCE_MANIFEST_SCHEMA_VERSION {
+        return Err(SourceManifestError::UnsupportedSchemaVersion {
+            actual: parsed.schema_version,
+        });
+    }
+
+    if parsed.source.name.trim().is_empty() {
+        return Err(SourceManifestError::MissingSourceField { field: "name" });
+    }
+    if parsed.source.protocol.trim().is_empty() {
+        return Err(SourceManifestError::MissingSourceField { field: "protocol" });
     }
     if parsed.source.name != expected_name {
-        return Err("source metadata does not match the requested source and protocol".to_owned());
+        return Err(SourceManifestError::UnexpectedContractIdentifier {
+            operation: "source",
+            expected: expected_name.to_string(),
+            actual: parsed.source.name,
+        });
     }
     if parsed.source.protocol != expected_protocol {
-        return Err("source metadata does not match the requested source and protocol".to_owned());
+        return Err(SourceManifestError::UnexpectedContractIdentifier {
+            operation: "source",
+            expected: expected_protocol.to_string(),
+            actual: parsed.source.protocol,
+        });
     }
-    Ok(parsed)
+
+    validate_source_operation_manifest("acquisition", &parsed.acquisition)?;
+    validate_source_operation_manifest("processing", &parsed.processing)?;
+    Ok(())
+}
+
+fn validate_source_operation_manifest(
+    operation: &'static str,
+    section: &SourceOperationSection,
+) -> Result<(), SourceManifestError> {
+    let expected_identifier = match operation {
+        "acquisition" => lexicon_core::protocols::http::HTTPS_SOURCE_CONTRACT_IDENTIFIER,
+        "processing" => lexicon_core::processing::PROCESSING_SOURCE_CONTRACT_IDENTIFIER,
+        _ => unreachable!("only acquisition and processing are recognized as source operations"),
+    };
+    if section.contract.trim().is_empty() {
+        return Err(SourceManifestError::MissingOperationField {
+            operation,
+            field: "contract",
+        });
+    }
+    if section.contract != expected_identifier {
+        return Err(SourceManifestError::UnexpectedContractIdentifier {
+            operation,
+            expected: expected_identifier.to_string(),
+            actual: section.contract.clone(),
+        });
+    }
+
+    check_source_operation_version(operation, section, "runner_template", lexicon_core::MANAGED_RUNNER_TEMPLATE_VERSION)?;
+    check_source_operation_version(operation, section, "core_contract", lexicon_core::CORE_CONTRACT_VERSION)?;
+    check_source_operation_version(operation, section, "runtime_protocol", lexicon_core::RUNTIME_PROTOCOL_VERSION)?;
+    Ok(())
+}
+
+fn check_source_operation_version(
+    operation: &'static str,
+    section: &SourceOperationSection,
+    field: &'static str,
+    expected: u32,
+) -> Result<(), SourceManifestError> {
+    let actual = match field {
+        "runner_template" => section.runner_template,
+        "core_contract" => section.core_contract,
+        "runtime_protocol" => section.runtime_protocol,
+        _ => unreachable!("unknown source-manifest version field: {field}"),
+    };
+    if actual == 0 {
+        return Err(SourceManifestError::InvalidVersion {
+            operation,
+            field,
+            value: 0,
+            expected,
+        });
+    }
+    if actual != expected {
+        return Err(SourceManifestError::InvalidVersion {
+            operation,
+            field,
+            value: actual,
+            expected,
+        });
+    }
+    Ok(())
+}
+
+/// Best-effort: when a TOML parse fails on a missing or non-`u32`
+/// `schema_version`, TOML's error string usually reports "expected u32"; we
+/// fall back to `0` so the typed rejection variant still surfaces the actual
+/// offending value at the call site.
+fn parse_schema_version_hint(toml_error: &toml::de::Error) -> u32 {
+    let message = toml_error.message();
+    if let Some(value) = message
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|segment| !segment.is_empty() && segment.chars().all(|c| c.is_ascii_digit()))
+    {
+        value.parse::<u32>().unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 pub struct BuiltManagedRunner {
@@ -1698,10 +1922,24 @@ pub(crate) fn load_project_config(
 
 fn format_source_toml(source_name: &str, protocol: &str) -> String {
     let document = SourceTomlDocument {
-        schema_version: 1,
+        schema_version: SOURCE_MANIFEST_SCHEMA_VERSION,
         source: SourceTomlSection {
             name: source_name.to_owned(),
             protocol: protocol.to_owned(),
+        },
+        acquisition: SourceOperationSection {
+            contract: lexicon_core::protocols::http::HTTPS_SOURCE_CONTRACT_IDENTIFIER
+                .to_string(),
+            runner_template: lexicon_core::MANAGED_RUNNER_TEMPLATE_VERSION,
+            core_contract: lexicon_core::CORE_CONTRACT_VERSION,
+            runtime_protocol: lexicon_core::RUNTIME_PROTOCOL_VERSION,
+        },
+        processing: SourceOperationSection {
+            contract: lexicon_core::processing::PROCESSING_SOURCE_CONTRACT_IDENTIFIER
+                .to_string(),
+            runner_template: lexicon_core::MANAGED_RUNNER_TEMPLATE_VERSION,
+            core_contract: lexicon_core::CORE_CONTRACT_VERSION,
+            runtime_protocol: lexicon_core::RUNTIME_PROTOCOL_VERSION,
         },
     };
 
@@ -2698,12 +2936,13 @@ mod tests {
     use super::{
         BuiltManagedRunner, MANAGED_RUNNER_TEMPLATE_VERSION, ManagedRunnerArtifactSelectionError,
         ManagedRunnerBuildError, ManagedSourceBuildError, ManagedWorkspaceMetadataError,
-        ManagedWorkspaceValidationError, configured_sources_directory, finalize_source_staging,
-        find_descendant_project_root, find_project_root, format_http_managed_runner_main,
-        format_implementation_cargo_toml, format_processing_managed_runner_main,
-        format_runner_cargo_toml, format_source_toml, format_workspace_cargo_toml,
-        select_artifact_from_cargo_output, validate_managed_workspace_layout,
-        validate_managed_workspace_metadata, validate_protocol, validate_source_name,
+        ManagedWorkspaceValidationError, SourceManifestError, configured_sources_directory,
+        finalize_source_staging, find_descendant_project_root, find_project_root,
+        format_http_managed_runner_main, format_implementation_cargo_toml,
+        format_processing_managed_runner_main, format_runner_cargo_toml, format_source_toml,
+        format_workspace_cargo_toml, load_source_metadata, select_artifact_from_cargo_output,
+        validate_managed_workspace_layout, validate_managed_workspace_metadata,
+        validate_protocol, validate_source_name, validate_source_toml_text,
     };
 
     // `with_test_cwd` changes the process-global current working directory, which is
@@ -2773,14 +3012,175 @@ mod tests {
     }
 
     #[test]
-    fn generated_source_toml_matches_required_contract() {
+    fn generated_source_toml_matches_required_schema_2_contract() {
         let source = format_source_toml("example-source", "http");
 
-        assert!(source.contains("schema_version = 1"));
+        assert!(source.contains("schema_version = 2"));
         assert!(source.contains("[source]"));
         assert!(source.contains("name = \"example-source\""));
         assert!(source.contains("protocol = \"http\""));
+
+        assert!(source.contains("[acquisition]"));
+        assert!(source.contains(
+            "contract = \"native-rust-http-source-v1\""
+        ));
+        assert!(source.contains("[processing]"));
+        assert!(source.contains(
+            "contract = \"native-rust-processing-v1\""
+        ));
+
+        assert!(source.contains(&format!(
+            "runner_template = {}",
+            lexicon_core::MANAGED_RUNNER_TEMPLATE_VERSION
+        )));
+        assert!(source.contains(&format!(
+            "core_contract = {}",
+            lexicon_core::CORE_CONTRACT_VERSION
+        )));
+        assert!(source.contains(&format!(
+            "runtime_protocol = {}",
+            lexicon_core::RUNTIME_PROTOCOL_VERSION
+        )));
+
         assert!(!source.contains("id = \"example-source\""));
+    }
+
+    #[test]
+    fn schema_2_text_round_trips_through_validator() {
+        let canonical = format_source_toml("example-source", "http");
+        let result = validate_source_toml_text(&canonical, "example-source", "http");
+        assert!(result.is_ok(), "validator error: {result:?}");
+    }
+
+    #[test]
+    fn schema_1_source_manifest_is_rejected_with_typed_error() {
+        let schema_1 = r#"
+schema_version = 1
+[source]
+name = "example-source"
+protocol = "http"
+"#;
+        let error = validate_source_toml_text(schema_1, "example-source", "http")
+            .expect_err("schema 1 must be rejected");
+        assert_eq!(
+            error,
+            SourceManifestError::UnsupportedSchemaVersion { actual: 1 }
+        );
+    }
+
+    #[test]
+    fn schema_2_with_wrong_acquisition_contract_identifier_is_rejected() {
+        let mut canonical = format_source_toml("example-source", "http");
+        canonical = canonical.replace(
+            "native-rust-http-source-v1",
+            "some-other-source-v9",
+        );
+        let error = validate_source_toml_text(&canonical, "example-source", "http")
+            .expect_err("wrong contract identifier must be rejected");
+        assert!(matches!(
+            error,
+            SourceManifestError::UnexpectedContractIdentifier { operation: "acquisition", .. }
+        ));
+    }
+
+    #[test]
+    fn schema_2_with_wrong_processing_contract_identifier_is_rejected() {
+        let mut canonical = format_source_toml("example-source", "http");
+        canonical = canonical.replace(
+            "native-rust-processing-v1",
+            "some-other-source-v9",
+        );
+        let error = validate_source_toml_text(&canonical, "example-source", "http")
+            .expect_err("wrong contract identifier must be rejected");
+        assert!(matches!(
+            error,
+            SourceManifestError::UnexpectedContractIdentifier { operation: "processing", .. }
+        ));
+    }
+
+    #[test]
+    fn schema_2_with_zero_core_contract_version_is_rejected() {
+        // Hand-author a manifest with `core_contract = 0` in the acquisition
+        // section. The validator must surface a precise per-field error.
+        let custom = r#"
+schema_version = 2
+[source]
+name = "example-source"
+protocol = "http"
+[acquisition]
+contract = "native-rust-http-source-v1"
+runner_template = 1
+core_contract = 0
+runtime_protocol = 1
+[processing]
+contract = "native-rust-processing-v1"
+runner_template = 1
+core_contract = 1
+runtime_protocol = 1
+"#;
+        let error = validate_source_toml_text(custom, "example-source", "http")
+            .expect_err("zero-version must be rejected");
+        assert!(matches!(
+            error,
+            SourceManifestError::InvalidVersion {
+                operation: "acquisition",
+                field: "core_contract",
+                value: 0,
+                expected: _,
+            }
+        ));
+    }
+
+    #[test]
+    fn schema_2_with_wrong_runner_template_version_is_rejected() {
+        let custom = r#"
+schema_version = 2
+[source]
+name = "example-source"
+protocol = "http"
+[acquisition]
+contract = "native-rust-http-source-v1"
+runner_template = 999
+core_contract = 1
+runtime_protocol = 1
+[processing]
+contract = "native-rust-processing-v1"
+runner_template = 1
+core_contract = 1
+runtime_protocol = 1
+"#;
+        let error = validate_source_toml_text(custom, "example-source", "http")
+            .expect_err("wrong runner_template must be rejected");
+        assert!(matches!(
+            error,
+            SourceManifestError::InvalidVersion {
+                operation: "acquisition",
+                field: "runner_template",
+                value: 999,
+                expected: _,
+            }
+        ));
+    }
+
+    #[test]
+    fn schema_2_with_wrong_source_name_is_rejected() {
+        let canonical = format_source_toml("example-source", "http");
+        let error =
+            validate_source_toml_text(&canonical, "other-source", "http")
+                .expect_err("wrong source name must be rejected");
+        assert!(matches!(
+            error,
+            SourceManifestError::UnexpectedContractIdentifier { operation: "source", .. }
+        ));
+    }
+
+    #[test]
+    fn load_source_metadata_rejects_missing_manifest_file() {
+        let root = unique_test_dir("lexicon-source-meta-missing-");
+        let manifest = root.path().join("sources/example-source/http/source.toml");
+        let result = load_source_metadata(&manifest, "example-source", "http");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
     }
 
     #[test]

@@ -2,6 +2,16 @@ use std::ffi::OsString;
 
 use crate::HttpAcquisitionContext;
 
+/// Canonical contract identifier for HTTP acquisition sources, as recorded
+/// in `sources/<source>/<protocol>/source.toml` (source manifest schema 2)
+/// and in the runtime-information probe response (spec §22).
+pub const HTTPS_SOURCE_CONTRACT_IDENTIFIER: &str = "native-rust-http-source-v1";
+
+/// Canonical `contract` version for HTTP acquisition sources. Exposed under
+/// the spec-side name so manifest formatters and validators do not need to
+/// reach into the contract type's private constant.
+pub const HTTP_SOURCE_CONTRACT_VERSION: u32 = 1;
+
 use super::error::AcquisitionResult;
 use super::{HttpCapability, HttpCapabilitySet};
 
@@ -17,7 +27,7 @@ pub struct HttpSourceContractV1 {
 }
 
 impl HttpSourceContractV1 {
-    pub const CONTRACT_VERSION: u32 = 1;
+    pub const CONTRACT_VERSION: u32 = HTTP_SOURCE_CONTRACT_VERSION;
 
     pub const fn new(acquire: HttpAcquireFn) -> Self {
         Self {

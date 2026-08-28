@@ -28,6 +28,12 @@ use crate::data::project::RuntimeProjectLayout;
 use crate::data::request::DataOperation;
 use crate::data::runtime::{AdmittedAcquisitionBundle, AdmittedBundle};
 use crate::session::SessionCoordinator;
+// Re-exports of the Core-side version constants used by hand-authored test
+// runtime_information below; sourcing them from Core keeps the fixture in
+// lockstep with the spec §22 representative probe response.
+use lexicon_core::protocols::http::HTTPS_SOURCE_CONTRACT_IDENTIFIER;
+use lexicon_core::MANAGED_RUNNER_TEMPLATE_VERSION;
+use lexicon_core::CORE_CONTRACT_VERSION;
 
 /// Serializes every test in this crate's test binary that changes the
 /// process-global current working directory.
@@ -131,6 +137,12 @@ fn write_fake_http_bundle(bundle_dir: &Path, source_name: &str) {
         "runtime": {
             "available_capabilities": [],
         },
+        // Spec §22 metadata fields required by the new `RuntimeInformationV1`
+        // v1 document; pulled from Core constants so the test fixture can
+        // never drift from what the runtime information probe actually emits.
+        "source_contract": HTTPS_SOURCE_CONTRACT_IDENTIFIER,
+        "core_contract": CORE_CONTRACT_VERSION,
+        "runner_template": MANAGED_RUNNER_TEMPLATE_VERSION,
     });
 
     let manifest = serde_json::json!({

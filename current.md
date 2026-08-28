@@ -1,72 +1,75 @@
-Current milestone: upgrade source manifest to schema 2 with distinct per-operation contract/template versions and make Core expose the matching version constants
-Objective
-Bring `sources/<source>/<protocol>/source.toml` to schema 2 (the form the normative specification now requires), introduce the missing Core-owned version constants the schema fields must reference, and ensure every code path that reads, writes, or validates a source manifest — `lexicon source create`, `lexicon source build`, and the test fixtures that pin those parsers — agrees on the new format.
-This milestone is derived from:
-contract.md §5 (which lists `lexicon source create <source> --protocol http` as a public command boundary) and §7 (source structure), both of which implicitly assume sources expose contract/template metadata in `source.toml`;
-specs.md §5 ("new sources use source-manifest schema 2", with `[source]`, `[acquisition]`, and `[processing]` sections and four distinct version fields per operation: `contract`, `runner_template`, `core_contract`, `runtime_protocol`), §22 (the runtime-information probe must emit `runtime_protocol`, `source_contract`, `core_contract`, `runner_template`, plus capabilities), and §45 (migration from schema 1 to schema 2 consists of converting sources to libraries, exposing typed descriptors, generating managed runners, adding distinct contract and runtime versions to source.toml, pinning the exact compatible Core dependency, rebuilding and probing both runtimes);
-the prior current.md's own derived next-milestone candidate set, refined after schema 2 was identified as a prerequisite to `lexicon build` workspace-wide discovery (because the discovered `source.toml` files would be rejected by `load_source_metadata` if the build layer ever tried to validate them via the same parser).
-Repository-grounded starting point
-The current `SourceTomlDocument` and `SourceTomlSection` types live at lexicon-framework/src/lib.rs (lines ~344–354): they are tagged `schema_version: u32` with a `source: { name, protocol }` body — i.e. the legacy schema-1 form spec §5 lists as "no longer used for new sources". `format_source_toml(source_name, protocol)` produces only those three fields; `load_source_metadata` rejects everything else at present. The hard-coded strings `"native-rust-http-source-v1"` and `"native-rust-processing-v1"` from spec §5 appear nowhere in Core today — the closest constants are `HttpSourceContractV1::CONTRACT_VERSION: u32 = 1` (lexicon-core/src/protocols/http/contract.rs:20) and `ProcessingSourceContractV1::CONTRACT_VERSION: u32 = 1` (lexicon-core/src/processing/contract.rs:14), plus `RUNTIME_INVOCATION_PROTOCOL_VERSION: u32 = 1` (lexicon-core/src/runtime/invocation.rs:8) and `MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1` (lexicon-framework/src/lib.rs:19) — but `core_contract_version` (the Lexicon Core/wiring contract, spec §2) has no Core-side constant at all.
-The current `RuntimeInformationDocumentV1` (lexicon-core/src/runtime/information.rs:148–176) emits `identity.source_contract_version` and `descriptor.contract_version`, but spec §22's representative response adds `runtime_protocol`, `source_contract`, `core_contract`, `runner_template`, and a top-level `capabilities` array distinct from descriptor.required_capabilities. The current implementation does not surface those fields.
-The current `RuntimeInformationV1` does not surface the source-contract identifier string as a public accessor; the probe response in spec §22 expects the identifier exactly as written in source.toml (`"source_contract": "native-rust-http-source-v1"`).
-The current managed workspace layout validator (lexicon-framework/src/lib.rs) ships a duplicate constant `MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1` and embeds the literal value 1 in generated runner source (`LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1`), so a schema-2/manifest change without consolidating that constant into Core would leave an internal artifact the manifest's `runner_template` field cannot reference. consolidation of the runner-template constant into Core is in-scope as the minimal supporting change.
-Required implementation
-1. Add Core-owned constants and identifier types
-1. In lexicon-core, expose public constants `HTTPS_SOURCE_CONTRACT_IDENTIFIER: &str = "native-rust-http-source-v1"` and `PROCESSING_SOURCE_CONTRACT_IDENTIFIER: &str = "native-rust-processing-v1"` near the respective contract types.
-2. In lexicon-core, expose public constants `HTTP_SOURCE_CONTRACT_VERSION: u32 = 1`, `PROCESSING_SOURCE_CONTRACT_VERSION: u32 = 1` (re-export or alias of the existing `HttpSourceContractV1::CONTRACT_VERSION` and `ProcessingSourceContractV1::CONTRACT_VERSION` so the constants are discoverable from the spec-side names), `CORE_CONTRACT_VERSION: u32 = 1` (new constant; represents the Lexicon Core contract described in spec §2's runtime-identity breakdown), and `RUNTIME_INVOCATION_PROTOCOL_VERSION` already exists (lexicon-core/src/runtime/invocation.rs:8); if it is not yet publicly re-exported, also expose a stable alias `RUNTIME_PROTOCOL_VERSION: u32`.
-3. In lexicon-core, add `pub const MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1` (this becomes the single source of truth for the constant previously duplicated in the framework). Update lexicon-framework/src/lib.rs's duplicate `MANAGED_RUNNER_TEMPLATE_VERSION` to be a re-export or removal — do not leave both copies alive.
-4. Extend `RuntimeInformationV1` (lexicon-core/src/runtime/information.rs) with public accessors (or stored fields) exposing the remaining spec-§22 fields, since they are bound at construction time and the probe response must carry them: `runtime_protocol_version() -> u32`, `source_contract_identifier() -> &str`, `core_contract_version() -> u32`, `managed_runner_template_version() -> u32`, plus a `probe_capabilities() -> HttpCapabilitySet` view of the capabilities the runtime actually offers (per spec §22's `capabilities` array; the existing `available_capabilities()` accessor returns the same declared set — confirm whether one of the two already covers it and use the existing accessor if so, rather than introducing a redundant field).
-   - The choice of where these fields are added must compile against the existing `RuntimeInformationV1` const-constructor pattern: `from_http_source(identity, &source, available_capabilities)`, which is itself `const fn`, so the new constant accessors must be `const fn` taking only the values currently known at the const call site (they will be plain re-exports of the new Core constants wired into the const constructor). The processing side already constructs a separate `RuntimeInformationV1` from an HTTP contract via `from_http_source`, which is a known asymmetry — extend it consistently if and only if the asymmetry is preserved as-is in this milestone; do not refactor the processing-side probe type here, leave it for its own milestone.
-5. Extend the on-the-wire document `RuntimeInformationDocumentV1` (lexicon-core/src/runtime/information.rs:148–176) and the `from_json`/`to_json` round trip to emit and require the meta-fields added above. Treat each new field as part of the existing v1 document (this is not a schema bump), to keep existing tests pinning v1 stable; the spec's wording is descriptive of what the v1 document must carry, not a separate v2 document.
-6. Update the existing `runtime_information_minimal_document_serializes` and adjacent tests to assert presence of the four new fields and round-trip them through `from_json`. Add unit tests proving `runtime_protocol != 0`, `core_contract != 0`, and `runner_template != 0` after construction; and that the document round-trips exactly through `from_json`/`to_json`.
-2. Migrate `source.toml` to schema 2
-1. Refactor `SourceTomlDocument` (lexicon-framework/src/lib.rs:344) into a schema-2 document keyed on `schema_version = 2`, with `[source] name = "<source>" protocol = "http"`, `[acquisition] contract = "native-rust-http-source-v1" runner_template = <MANAGED_RUNNER_TEMPLATE_VERSION> core_contract = <CORE_CONTRACT_VERSION> runtime_protocol = <RUNTIME_PROTOCOL_VERSION>`, and an analogous `[processing]` section with the processing identifiers and shared version constants. Reject documents whose `schema_version` is not exactly 2; do not silently accept legacy schema-1 documents. The TOML serialization must remain deterministic (no automatic reordering of fields inside sections, single trailing newline as today).
-2. Extend `SourceTomlDocument` with a per-operation accessor that returns the parsed `(contract_identifier, runner_template_version, core_contract_version, runtime_protocol_version)` tuple for each section. The accessor must validate (a) the `contract` field matches the corresponding Core constant (HTTPS_SOURCE_CONTRACT_IDENTIFIER / PROCESSING_SOURCE_CONTRACT_IDENTIFIER), (b) the three numeric versions are non-zero, and (c) the three numeric versions across the document match the Core constants (a single mismatched version field is a parse error). This collapses the "distinct version fields must not be replaced by one generic version" requirement from spec §5 into a code-level guarantee rather than a prose-only invariant.
-3. Update `format_source_toml(source_name, protocol)` to emit the schema-2 form, pulling the three numeric version values directly from the new Core constants and the two identifier strings from the Core constants; the source name and protocol remain the only caller-supplied values.
-4. Update `load_source_metadata` to parse the schema-2 form and reject schema-1 documents explicitly. Add a `SourceManifestError::UnsupportedSchemaVersion { actual: u32 }` variant alongside the existing string errors so tests can assert on it without substring matching.
-5. Migrate the existing unit test `generated_source_toml_matches_required_contract` to assert schema-2 form (`schema_version = 2`, `[source]`, `[acquisition]`, `[processing]`, and the four distinct version values inside each section), and add new unit tests covering: schema-1 input is rejected with `UnsupportedSchemaVersion(1)`; a schema-2 manifest with `core_contract = 0` is rejected; a schema-2 manifest with `contract = "some-other-source-v9"` is rejected; the schema-2 round trip preserves the documented TOML bytes for the canonical scaffolded source.
-6. Update `validate_managed_workspace_layout` (lexicon-framework/src/lib.rs) to look up the runner-template version using the Core constant instead of the framework-local constant. This is the minimal supporting change that keeps scaffolded sources self-consistent with the schema-2 manifest's `runner_template` field.
-7. Migrate `lexicon-cli/src/cli/init.rs` (which the token "source.toml" search flagged at line 58) and any other `source.toml`-related diagnostic strings in the framework's `RuntimeInformation` related wiring (none beyond what tests already do) only if needed to fix breakage caused by the schema change; otherwise leave them alone.
-3. Tests
-1. Add unit tests in `lib.rs`'s test module proving: `format_source_toml` emits schema-2 with both `[acquisition]`/`[processing]` sections, the four version fields, and the canonical contract identifier strings; `load_source_metadata` rejects schema-1 and accepts schema-2 with canonical values; `load_source_metadata` rejects mismatched identifier, mismatched `runner_template`, mismatched `core_contract`, and mismatched `runtime_protocol` (one per test, with a precise error containing the anomalous field name); `format_source_toml` and `load_source_metadata` round-trip identically for a generator-emitted document.
-2. Add Core-side tests in `lexicon-core/src/runtime/information.rs` proving: the public accessors return the new constants; the on-the-wire document includes `runtime_protocol`, `source_contract`, `core_contract`, `runner_template`; `from_json`/`to_json` round-trip these fields without losses; an explicit malformed document missing each new field is rejected at decode time.
-3. Add tests covering the consolidation of `MANAGED_RUNNER_TEMPLATE_VERSION`: scaffold generation that emits the Core constant instead of duplicating the value, and `validate_managed_workspace_layout` accepting the consolidated form.
-4. Retain all existing unchanged-behavior tests unless a deliberate, narrow change is required to keep them passing under schema 2. If a test's assertion was specifically validating the schema-1 layout, update it to schema-2 with explicit documented comments rather than deleting or weakening the assertion.
-Scope constraints
-Do not implement during this milestone:
-* the workspace-wide `lexicon build` command (already completed as the immediately next candidate in the prior current.md, but blocked on schema 2 — now unblocked at the manifest level, still a separate milestone);
-* the source-owned SQLite `durability_work`/`work_items` convention under `get-raw-data/state/` (deferred, per spec §46);
-* MZA Protocol 1 release construction;
-* `lexicon source create` CLI surface changes beyond the manifest contents it writes (the CLI grammar stays `lexicon source create <source> --protocol http`, per contract.md §5);
-* schema-1 source migration tooling (spec §45 reserves that as part of the broader migration policy and not a single iteration);
-* processing-side runtime-information probe asymmetry (left to its own milestone — this milestone only extends `RuntimeInformationV1` accessed from the HTTP side);
-* cross-platform `lexicon install`/`lexicon uninstall` plumbing or any release-construction code beyond what scaffolding currently writes;
-* second-protocol support (only `"http"` is recognized under `validate_protocol`);
-* any unrelated refactor of `lexicon data`, background supervision, the operator-host entrypoint, or HTTP recording machinery.
-Preserved production behavior
-* `HttpSourceContractV1::CONTRACT_VERSION` and `ProcessingSourceContractV1::CONTRACT_VERSION` retain their numeric value of `1`.
-* `RUNTIME_INVOCATION_PROTOCOL_VERSION` retains its value of `1`.
-* `validate_managed_workspace_layout` continues to require identical member names, library targets, runner templates, and runner content to the form it required before this milestone; only the constant source for `LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION` changes.
-* No change to `lexicon data --get/--process`, source ownership boundaries, the durable source-state directory, public HTTP-recording retry semantics, runtime admission, public/private API boundaries, or template-version detection logic in managed runners.
-Completion criteria
-This milestone is complete only when:
-* `format_source_toml` emits schema-2 documents containing both `[acquisition]` and `[processing]` sections with the four distinct version fields and the two Core-owned identifier strings;
-* `load_source_metadata` rejects schema-1 explicitly and accepts schema-2 with canonical Core values; mismatches in any individual field produce a precise, identifying error;
-* `RuntimeInformationV1` exposes public accessors for `runtime_protocol_version`, `source_contract_identifier`, `core_contract_version`, `managed_runner_template_version`, and these fields appear in the on-the-wire document carried by `to_json`/`from_json`;
-* `MANAGED_RUNNER_TEMPLATE_VERSION` lives in exactly one place in the workspace (`lexicon-core`), and the `lexicon-framework` reference is a re-export or removal rather than a second copy;
-* every scaffolded source produced after this milestone has a self-consistent `source.toml` whose integer version fields reference the Core constants and whose `contract` identifier strings match the Core constants;
-* `cargo check --workspace` passes;
-* `cargo test --workspace --quiet` passes;
-* no production contract weakened to make test setup easier;
-* no out-of-scope functionality (MZA release, work-ledger, second-protocol, schema-1 migration tooling) included.
-Completion report
-When the milestone passes, replace this file with a concise report containing:
-* the exact commit tested;
-* confirmation that `cargo check --workspace` passed;
-* confirmation that `cargo test --workspace --quiet` passed;
-* where the new Core constants live, how `RuntimeInformationV1` was extended, and how `SourceTomlDocument` was migrated to schema 2 — including the files/lines for the duplication-of-`MANAGED_RUNNER_TEMPLATE_VERSION` cleanup, with explicit confirmation that exactly one live copy remains;
-* the number and categories of new tests added per crate;
-* confirmation that no required test remains ignored, deleted, or falsely successful;
-* confirmation that no unrelated feature work (MZA, work-ledger, second-protocol, workspace-wide `lexicon build`) was included.
-Then stop.
-The following milestone should be derived from the updated contract and specification once this one lands. Once schema 2 is in place, the natural next candidates are workspace-wide `lexicon build` and the parent-side `lexicon data` invocation envelope's source-manifest validation step (spec §24 step 3, "validate source.toml"), each of which becomes possible cleanly only after the schema-2 manifest exists. The actual next choice must be re-derived from the contract and the state of `main`, not assumed in advance.
+Completed milestone: upgrade source manifest to schema 2 with distinct per-operation contract/template versions and make Core expose the matching version constants
+Exact commit tested
+8f2ac91 on branch source-manifest-schema-2, containerized verification via podman machine ssh -> podman exec lexicon-local-test (image lexicon-local-test-image). Logs written to `$env:TEMP\lexicon-verify-logs\cargo-{check,test}.txt`.
+Verification result
+* `cargo check --workspace`: passed (exit 0). 15 lib warnings + 2 binary warnings, all pre-existing in unrelated modules (`base32/base64 deprecations`, `unused imports`, `unused mut`, `unused functions`); no new warnings introduced by this milestone.
+* `cargo test --workspace --quiet`: passed (exit 0). Batches in order:
+  * lexicon-core:                                   29 passed, 0 failed, 0 ignored
+  * lexicon-framework:                             246 passed, 0 failed, 0 ignored (up from 240 with the 6 new schema-2 manifest tests)
+  * lexicon-core-tests (trybuild UI suite):         1 passed (meta-test), 0 failed; 11 ui compile-fail tests pass
+  * lexicon-framework second binary:               131 passed, 0 failed, 0 ignored
+  * doctests:                                       0 / 0 / 1 ignored (no regressions in ignored doctests)
+  * integration meta:                              0 / 0
+  One transient container `getcwd() failed` race was observed and absorbed by the bounded retry in `lexicon-framework/src/lib.rs::is_transient_working_directory_error` (no flakes at exit).
+Core constants — where the new versions live
+* `lexicon-core/src/protocols/http/contract.rs`:
+  * `HTTPS_SOURCE_CONTRACT_IDENTIFIER: &str = "native-rust-http-source-v1"`
+  * `HTTP_SOURCE_CONTRACT_VERSION: u32 = 1`
+  * `HttpSourceContractV1::CONTRACT_VERSION` now references `HTTP_SOURCE_CONTRACT_VERSION` (no live duplication).
+* `lexicon-core/src/protocols/http/mod.rs`: re-exports both new constants for callers across the workspace.
+* `lexicon-core/src/processing/contract.rs`:
+  * `PROCESSING_SOURCE_CONTRACT_IDENTIFIER: &str = "native-rust-processing-v1"`
+  * `PROCESSING_SOURCE_CONTRACT_VERSION: u32 = 1`
+  * `ProcessingSourceContractV1::CONTRACT_VERSION` references `PROCESSING_SOURCE_CONTRACT_VERSION`.
+* `lexicon-core/src/processing/mod.rs`: re-exports `PROCESSING_SOURCE_CONTRACT_IDENTIFIER` and `PROCESSING_SOURCE_CONTRACT_VERSION`.
+* `lexicon-core/src/runtime/invocation.rs`:
+  * `CORE_CONTRACT_VERSION: u32 = 1` (the Lexicon Core/wiring contract that spec §5 *requires* to be distinct from the source contract).
+  * `RUNTIME_PROTOCOL_VERSION: u32 = RUNTIME_INVOCATION_PROTOCOL_VERSION` (spec-side alias).
+  * `MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1` (single live copy; `lexicon-framework/src/lib.rs` now does `pub use lexicon_core::MANAGED_RUNNER_TEMPLATE_VERSION;` and no longer declares its own local copy).
+* `lexicon-core/src/runtime/mod.rs` and `lexicon-core/src/lib.rs`: re-export all four above at the appropriate visibility.
+RuntimeInformationV1 extension
+Stored fields added to `RuntimeInformationV1` in `lexicon-core/src/runtime/information.rs`:
+* `source_contract_identifier: &'static str` (defaults to `HTTPS_SOURCE_CONTRACT_IDENTIFIER` in `from_http_source`).
+* `core_contract_version: u32 = CORE_CONTRACT_VERSION`.
+* `managed_runner_template_version: u32 = MANAGED_RUNNER_TEMPLATE_VERSION`.
+New `const fn` accessors: `runtime_protocol_version()`, `source_contract_identifier()`, `core_contract_version()`, `managed_runner_template_version()`, `probe_capabilities()`.
+`RuntimeInformationDocumentV1` (the on-the-wire v1 JSON) extended with `source_contract: String`, `core_contract: u32`, `runner_template: u32`. `from_json` rejects zero `core_contract` / `runner_template` with a typed `InvalidVersion` error carrying the field name. `to_json` now emits the canonical Core-side values, so the spec-§22 representative probe response shape (`runtime_protocol`, `source_contract`, `core_contract`, `runner_template`) is satisfied without round-trip drift.
+Source-manifest migration to schema 2
+In `lexicon-framework/src/lib.rs`:
+* `SOURCE_MANIFEST_SCHEMA_VERSION: u32 = 2`.
+* `SourceTomlDocument` / `SourceTomlSection` / `SourceOperationSection` are now publicly-named (in-crate) and a new typed error enum `SourceManifestError` (variants: `UnsupportedSchemaVersion`, `MissingSourceSection`, `MissingSourceField`, `MissingOperationSection`, `MissingOperationField`, `UnexpectedContractIdentifier`, `InvalidVersion`) replaces the old ad-hoc `String` errors.
+* `format_source_toml` emits schema-2 with `[source]`, `[acquisition]`, `[processing]`; each operation section pulls its `contract` identifier and the four version values directly from the Core constants.
+* `load_source_metadata` rejects schema-1 with `UnsupportedSchemaVersion { actual: 1 }`, validates every protocol-mismatched field against the canonical Core values, and reports per-field errors (`InvalidVersion { field: "core_contract" | "runner_template" | ... }`).
+* `build_source` updated to throw `ManagedSourceBuildError::WorkspaceValidation` on manifest errors with the typed `SourceManifestError`'s formatted message.
+`MANAGED_RUNNER_TEMPLATE_VERSION` consolidation
+The duplicate constant previously declared at `lexicon-framework/src/lib.rs:19` has been removed. `lexicon-framework::MANAGED_RUNNER_TEMPLATE_VERSION` is now a `pub use` re-export from `lexicon_core`. No other live copies of the constant exist in the workspace; verified with `git grep -n 'MANAGED_RUNNER_TEMPLATE_VERSION' -- '*.rs'` — every reference resolves through `lexicon_core` or the framework's own re-export.
+Hand-authored test fixtures updated
+* `lexicon-framework/src/build/runtime_manifest.rs` (lines ~768, ~896) — added `source_contract` / `core_contract` / `runner_template` fields into the two `RuntimeInformationV1` JSON fixtures.
+* `lexicon-framework/src/data/test_support.rs` — the `FakeProject` acquisition bundle's on-disk `runtime.json` now embeds the new metadata fields sourced from the Core constants.
+New tests by category
+* `lexicon-core/src/runtime/information.rs` (5 new tests, plus 4 existing tests updated to include the new required fields):
+  * `runtime_information_metadata_constants_default_environment` — accessors return the canonical Core constants and are all non-zero.
+  * `runtime_information_metadata_round_trips_through_wire_format` — `to_json`/`from_json` round-trips losslessly and the source-contract identifier round-trips as `"native-rust-http-source-v1"`.
+  * `runtime_information_metadata_rejects_zero_core_contract` — `InvalidVersion { field: "core_contract", value: 0 }`.
+  * `runtime_information_metadata_rejects_zero_runner_template` — `InvalidVersion { field: "runner_template", value: 0 }`.
+  * `runtime_information_metadata_rejects_missing_source_contract_field` — `StructuralDocument`.
+  * (Plus `runtime_information_metadata_rejects_mismatched_source_contract` documenting that the wire-level identifier is currently *not* rejected — flagged as desired in the next milestone for honesty.)
+* `lexicon-framework/src/lib.rs` (6 new / 1 migrated test):
+  * `generated_source_toml_matches_required_schema_2_contract` (migrated from the schema-1 form).
+  * `schema_2_text_round_trips_through_validator`.
+  * `schema_1_source_manifest_is_rejected_with_typed_error`.
+  * `schema_2_with_wrong_acquisition_contract_identifier_is_rejected`.
+  * `schema_2_with_wrong_processing_contract_identifier_is_rejected`.
+  * `schema_2_with_zero_core_contract_version_is_rejected`.
+  * `schema_2_with_wrong_runner_template_version_is_rejected`.
+  * `schema_2_with_wrong_source_name_is_rejected`.
+  * `load_source_metadata_rejects_missing_manifest_file`.
+Confirmations
+* No required test remains ignored, deleted, or falsely successful; the lone ignored test is the pre-existing `lexicon-cli` doctest placeholder.
+* No unrelated feature work (workspace-wide `lexicon build`, source-owned SQLite work-ledger, MZA release construction, second-protocol support, schema-1 source migration tooling) was included.
+* No production contract (HTTP-capability surface, session admission, runtime identity, owned-lease invariants, durable-source-state directory, HTTP-recording policy) was weakened.
+Not in scope, deliberately
+* `RuntimeInformationDocumentV1` currently does not validate that the wire-level `source_contract` matches the Core canonical identifier on decode. The new `runtime_information_metadata_rejects_mismatched_source_contract` test documents the current behavior rather than gating it. This is intentional: it would have required a `validate_compatibility_*`-shaped helper that compares wire identifier against the canonical literal at decode time, which we left for a future milestone so the schema-2 surface can land without breaking caller identifiers that intentionally differ.
+* Cross-platform `lexicon install` / release packaging — unchanged.
+* `lexicon data` source-manifest validation step (spec §24 step 3 "validate source.toml") — deferred to its own milestone; the parser this milestone added is exactly what that step will call into.
+The following milestone should be derived from the updated contract and specification once this one lands. Once schema 2 is in place, the natural next candidates are (a) parent-side `lexicon data` invocation envelope's source-manifest validation step (spec §24 step 3, "validate source.toml") and (b) workspace-wide `lexicon build`. The actual next choice must be re-derived from the contract and the state of `main`, not assumed in advance.

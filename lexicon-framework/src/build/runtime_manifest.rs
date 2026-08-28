@@ -765,7 +765,7 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_rejected() {
-        let json = r#"{"schema_version":1,"artifact":{"executable":"x","size":1,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","extra":true},"runtime_information":{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false},"runtime":{"available_capabilities":[]}}}"#;
+        let json = r#"{"schema_version":1,"artifact":{"executable":"x","size":1,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","extra":true},"runtime_information":{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false},"runtime":{"available_capabilities":[]},"source_contract":"native-rust-http-source-v1","core_contract":1,"runner_template":1}}"#;
         assert!(matches!(
             RuntimeManifestV1::from_json(json),
             Err(RuntimeManifestDecodingError::Json(_))
@@ -893,9 +893,9 @@ mod tests {
 
     #[test]
     fn duplicate_keys_are_rejected() {
-        let json = r#"{"schema_version":1,"schema_version":2,"artifact":{"executable":"x","size":1,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"runtime_information":{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false},"runtime":{"available_capabilities":[]}}}"#;
+        let json = r#"{"schema_version":1,"schema_version":2,"artifact":{"executable":"x","size":1,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"runtime_information":{"schema_version":1,"identity":{"source":"example-source","protocol":"http","operation":"acquisition","source_contract_version":1},"descriptor":{"contract_version":1,"required_capabilities":[],"resume_handler_registered":false},"runtime":{"available_capabilities":[]},"source_contract":"native-rust-http-source-v1","core_contract":1,"runner_template":1}}"#;
         assert!(matches!(
-            RuntimeManifestV1::from_json(json),
+            RuntimeManifestV1::from_json(&json),
             Err(RuntimeManifestDecodingError::Json(_))
         ));
     }

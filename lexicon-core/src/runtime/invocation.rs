@@ -7,6 +7,24 @@ use crate::runtime::{RuntimeIdentifierError, RuntimeIdentity, RuntimeOperation, 
 
 pub const RUNTIME_INVOCATION_PROTOCOL_VERSION: u32 = 1;
 
+/// Spec-side alias for [`RUNTIME_INVOCATION_PROTOCOL_VERSION`]. Used by the
+/// source manifest's `[acquisition].runtime_protocol` / `[processing].runtime_protocol`
+/// fields and by the runtime-information probe response.
+pub const RUNTIME_PROTOCOL_VERSION: u32 = RUNTIME_INVOCATION_PROTOCOL_VERSION;
+
+/// Core contract version: represents the Lexicon Core/wiring contract
+/// described in contract.md §2's runtime-identity breakdown. Kept distinct
+/// from `HTTP_SOURCE_CONTRACT_VERSION`/`PROCESSING_SOURCE_CONTRACT_VERSION`
+/// per spec §5's "distinct version fields must not be replaced by one
+/// generic version" requirement.
+pub const CORE_CONTRACT_VERSION: u32 = 1;
+
+/// Lexicon-managed acquisition/processing runner template version. The
+/// single source of truth for the constant previously duplicated in the
+/// framework; consumed by `validate_managed_workspace_layout` and by the
+/// generated runner source templates.
+pub const MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeInvocationEncodingError {
     Serialization(String),

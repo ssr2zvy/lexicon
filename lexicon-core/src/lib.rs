@@ -6,9 +6,11 @@ pub mod session;
 pub use protocols::http;
 pub use protocols::http::HttpAcquisitionContext;
 pub use runtime::{
-    MissingHttpCapabilities, OwnedRuntimeIdentity, RuntimeCompatibilityError,
-    RuntimeIdentifierError, RuntimeIdentity, RuntimeInformationDecodingError,
-    RuntimeInformationEncodingError, RuntimeOperation, RuntimeProtocol,
+    CORE_CONTRACT_VERSION, MANAGED_RUNNER_TEMPLATE_VERSION, MissingHttpCapabilities,
+    OwnedRuntimeIdentity, RUNTIME_INVOCATION_PROTOCOL_VERSION, RUNTIME_PROTOCOL_VERSION,
+    RuntimeCompatibilityError, RuntimeIdentifierError, RuntimeIdentity,
+    RuntimeInformationDecodingError, RuntimeInformationEncodingError, RuntimeOperation,
+    RuntimeProtocol,
 };
 pub use session::{
     RUNTIME_CONTEXT_ENVIRONMENT_VARIABLE, RuntimeContextPaths, SessionDataPaths, SessionIdentity,
