@@ -169,6 +169,7 @@ pub(crate) fn record_transaction_attempt(
         response_headers,
         response_body_length,
         response_body_sha256,
+        response_completed_at_unix_nanos,
         outcome,
         location_text,
         invalid_location_encoding,
@@ -208,6 +209,7 @@ pub(crate) fn record_transaction_attempt(
             };
 
             let headers = redact_response_headers(&response.headers);
+            let completed_at_unix_nanos = now_nanos().map_err(HttpRecorderError::Clock)?;
             let response_metadata = ResponseMetadataDocument {
                 schema_version: HTTP_TRANSACTION_SCHEMA_VERSION,
                 transaction_id: identity.id().to_string(),
@@ -217,7 +219,7 @@ pub(crate) fn record_transaction_attempt(
                     headers: headers.clone(),
                     body_length,
                     body_sha256: body_sha256.clone(),
-                    completed_at_unix_nanos: now_nanos().map_err(HttpRecorderError::Clock)?,
+                    completed_at_unix_nanos,
                 },
             };
             write_json_atomic(&attempt.raw_data_root, &response_metadata_path, &response_metadata)?;
@@ -233,6 +235,7 @@ pub(crate) fn record_transaction_attempt(
                 headers,
                 body_length,
                 Some(body_sha256),
+                completed_at_unix_nanos,
                 HttpRecordedOutcome::Response,
                 location_text,
                 invalid_location_encoding,
@@ -243,13 +246,14 @@ pub(crate) fn record_transaction_attempt(
             persist_body(&response_body_path, &[])
                 .map_err(HttpRecorderError::BodyPersistence)?;
 
+            let failed_at_unix_nanos = now_nanos().map_err(HttpRecorderError::Clock)?;
             let response_metadata = ResponseMetadataDocument {
                 schema_version: HTTP_TRANSACTION_SCHEMA_VERSION,
                 transaction_id: identity.id().to_string(),
                 outcome: ResponseOutcomeDocument::TransportFailure {
                     failure_class: StoredTransportFailureClass::from(failure),
                     retryable: failure.retryable(),
-                    failed_at_unix_nanos: now_nanos().map_err(HttpRecorderError::Clock)?,
+                    failed_at_unix_nanos,
                 },
             };
             write_json_atomic(&attempt.raw_data_root, &response_metadata_path, &response_metadata)?;
@@ -259,6 +263,7 @@ pub(crate) fn record_transaction_attempt(
                 Vec::new(),
                 0,
                 None,
+                failed_at_unix_nanos,
                 HttpRecordedOutcome::TransportFailure(RecordedTransportFailure::new(failure)),
                 None,
                 false,
@@ -333,6 +338,9 @@ pub(crate) fn record_transaction_attempt(
         attempt.attempt_identity,
         attempt.parent_transaction_id,
         attempt.logical_request_key,
+        crate::session::SessionIdentity::new(&attempt.session_id)
+            .expect("RecordedAttemptContext must contain a valid session identity"),
+        timestamp,
         final_dir.clone(),
         RecordedHttpRequest::new(
             has_body.then(|| final_request_body_path),
@@ -350,6 +358,7 @@ pub(crate) fn record_transaction_attempt(
             final_response_body_path,
             response_body_length,
             response_body_sha256,
+            response_completed_at_unix_nanos,
             outcome,
         ),
     );
@@ -398,7 +407,7 @@ fn redact_request_headers(headers: &[FinalizedHeader]) -> Vec<StoredHeader> {
             StoredHeader {
                 name: header.name.clone(),
                 value: if redact {
-                    StoredHeaderValue::Utf8("<redacted>".to_string())
+                    StoredHeaderValue::Redacted
                 } else {
                     bytes_to_stored_value(&header.value)
                 },
@@ -416,7 +425,7 @@ fn redact_response_headers(headers: &[(String, Vec<u8>)]) -> Vec<StoredHeader> {
             StoredHeader {
                 name: name.clone(),
                 value: if redact {
-                    StoredHeaderValue::Utf8("<redacted>".to_string())
+                    StoredHeaderValue::Redacted
                 } else {
                     bytes_to_stored_value(value)
                 },
@@ -436,6 +445,7 @@ fn stored_to_recorded_header(header: StoredHeader) -> RecordedHeader {
     let value = match header.value {
         StoredHeaderValue::Utf8(text) => RecordedHeaderValue::Utf8(text),
         StoredHeaderValue::Base64(encoded) => RecordedHeaderValue::Base64(encoded),
+        StoredHeaderValue::Redacted => RecordedHeaderValue::Redacted,
     };
     RecordedHeader::new(header.name, value)
 }

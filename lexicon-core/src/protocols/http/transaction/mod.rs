@@ -11,7 +11,7 @@ pub(crate) mod recorder;
 pub use identity::{HttpTransactionIdentity, HttpTransactionIdentityError};
 pub(crate) use recorder::{RecordedAttemptContext, record_transaction_attempt};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HttpLogicalRequestKey {
     key: String,
 }
@@ -66,17 +66,56 @@ pub struct HttpAttemptIdentity {
     pub(crate) retry_index: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpAttemptIdentityError {
+    ZeroPhysicalAttemptIndex,
+    RedirectIndexOutOfRange,
+    RetryIndexOutOfRange,
+    FirstAttemptMustStartAtZero,
+}
+
+impl std::fmt::Display for HttpAttemptIdentityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroPhysicalAttemptIndex => {
+                formatter.write_str("HTTP physical attempt index must start at one")
+            }
+            Self::RedirectIndexOutOfRange => {
+                formatter.write_str("HTTP redirect index is out of range")
+            }
+            Self::RetryIndexOutOfRange => formatter.write_str("HTTP retry index is out of range"),
+            Self::FirstAttemptMustStartAtZero => formatter.write_str(
+                "HTTP first physical attempt must have redirect and retry index zero",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HttpAttemptIdentityError {}
+
 impl HttpAttemptIdentity {
     pub(crate) fn new(
         physical_attempt_index: u32,
         redirect_index: u32,
         retry_index: u32,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, HttpAttemptIdentityError> {
+        if physical_attempt_index == 0 {
+            return Err(HttpAttemptIdentityError::ZeroPhysicalAttemptIndex);
+        }
+        if redirect_index >= physical_attempt_index {
+            return Err(HttpAttemptIdentityError::RedirectIndexOutOfRange);
+        }
+        if retry_index >= physical_attempt_index {
+            return Err(HttpAttemptIdentityError::RetryIndexOutOfRange);
+        }
+        if physical_attempt_index == 1 && (redirect_index != 0 || retry_index != 0) {
+            return Err(HttpAttemptIdentityError::FirstAttemptMustStartAtZero);
+        }
+        Ok(Self {
             physical_attempt_index,
             redirect_index,
             retry_index,
-        }
+        })
     }
 
     pub fn physical_attempt_index(&self) -> u32 {
@@ -98,6 +137,8 @@ pub struct RecordedTransaction {
     attempt_identity: HttpAttemptIdentity,
     parent_transaction_id: Option<HttpTransactionIdentity>,
     logical_request_key: Option<HttpLogicalRequestKey>,
+    session: crate::session::SessionIdentity,
+    created_at_unix_nanos: u64,
     directory: PathBuf,
     request: RecordedHttpRequest,
     response: RecordedHttpResponse,
@@ -109,6 +150,8 @@ impl RecordedTransaction {
         attempt_identity: HttpAttemptIdentity,
         parent_transaction_id: Option<HttpTransactionIdentity>,
         logical_request_key: Option<HttpLogicalRequestKey>,
+        session: crate::session::SessionIdentity,
+        created_at_unix_nanos: u64,
         directory: PathBuf,
         request: RecordedHttpRequest,
         response: RecordedHttpResponse,
@@ -118,6 +161,8 @@ impl RecordedTransaction {
             attempt_identity,
             parent_transaction_id,
             logical_request_key,
+            session,
+            created_at_unix_nanos,
             directory,
             request,
             response,
@@ -138,6 +183,14 @@ impl RecordedTransaction {
 
     pub fn logical_request_key(&self) -> Option<&HttpLogicalRequestKey> {
         self.logical_request_key.as_ref()
+    }
+
+    pub fn session(&self) -> &crate::session::SessionIdentity {
+        &self.session
+    }
+
+    pub fn created_at_unix_nanos(&self) -> u64 {
+        self.created_at_unix_nanos
     }
 
     pub fn directory(&self) -> &Path {
@@ -161,6 +214,10 @@ impl RecordedTransaction {
 
     pub fn response_status(&self) -> Option<u16> {
         self.response.status_code()
+    }
+
+    pub fn completed_at_unix_nanos(&self) -> u64 {
+        self.response.completed_at_unix_nanos()
     }
 }
 
@@ -242,6 +299,7 @@ impl RecordedHeader {
 pub enum RecordedHeaderValue {
     Utf8(String),
     Base64(String),
+    Redacted,
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +309,7 @@ pub struct RecordedHttpResponse {
     body_path: PathBuf,
     body_length: u64,
     body_sha256: Option<String>,
+    completed_at_unix_nanos: u64,
     outcome: HttpRecordedOutcome,
 }
 
@@ -261,9 +320,18 @@ impl RecordedHttpResponse {
         body_path: PathBuf,
         body_length: u64,
         body_sha256: Option<String>,
+        completed_at_unix_nanos: u64,
         outcome: HttpRecordedOutcome,
     ) -> Self {
-        Self { status, headers, body_path, body_length, body_sha256, outcome }
+        Self {
+            status,
+            headers,
+            body_path,
+            body_length,
+            body_sha256,
+            completed_at_unix_nanos,
+            outcome,
+        }
     }
 
     pub fn status_code(&self) -> Option<u16> {
@@ -284,6 +352,10 @@ impl RecordedHttpResponse {
 
     pub fn body_sha256(&self) -> Option<&str> {
         self.body_sha256.as_deref()
+    }
+
+    pub fn completed_at_unix_nanos(&self) -> u64 {
+        self.completed_at_unix_nanos
     }
 
     pub fn outcome(&self) -> &HttpRecordedOutcome {

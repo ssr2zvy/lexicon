@@ -23,7 +23,7 @@ pub use checkpoint::{
     CommittedHttpCheckpoint, HTTP_CHECKPOINT_SCHEMA_VERSION, MAX_HTTP_CHECKPOINT_DOCUMENT_BYTES,
     HttpCheckpointAdmissionError, HttpCheckpointCommitError, HttpCheckpointDecodingError,
     HttpCheckpointEncodingError, HttpCheckpointKeyError, HttpCheckpointLookupError,
-    HttpCheckpointPartialCommitError, admit_http_checkpoint_from_disk,
+    HttpCheckpointPartialCommit, HttpHistoricalLookupError, admit_http_checkpoint_from_disk,
 };
 pub use contract::{HttpAcquireFn, HttpResumeFn, HttpSourceContractV1};
 pub use error::{
@@ -43,8 +43,8 @@ pub use runner::{
     try_write_runtime_information_probe,
 };
 pub use transaction::{
-    HttpAttemptIdentity, HttpLogicalRequestKey, HttpLogicalRequestKeyError, HttpRecordedOutcome,
-    HttpRecordedOutcomeKind, HttpResponseStatusError, HttpTransactionIdentity,
+    HttpAttemptIdentity, HttpAttemptIdentityError, HttpLogicalRequestKey,
+    HttpLogicalRequestKeyError, HttpRecordedOutcome, HttpRecordedOutcomeKind, HttpResponseStatusError, HttpTransactionIdentity,
     HttpTransactionIdentityError,
     RecordedHeader, RecordedHeaderCollection, RecordedHeaderValue, RecordedHttpRequest,
     RecordedHttpResponse, RecordedTransaction, RecordedTransportFailure,
