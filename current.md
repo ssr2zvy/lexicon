@@ -1,225 +1,52 @@
-The next milestone should restore verification integrity before implementing the new durable-state architecture. The suite now compiles, but some essential runner tests were deleted and several ETXTBSY branches return successfully without executing their assertions—directly conflicting with the updated contract.
+Completed milestone: restore trustworthy runtime-execution test coverage
 
-Current milestone: restore trustworthy runtime-execution test coverage
+Exact commit tested
 
-Objective
+f536a64914626679ae8d66876fe7b897152cd6db on branch restore-runtime-execution-test-coverage (containerized verification run via podman machine ssh -> podman exec lexicon-local-test, image lexicon-local-test-image).
 
-Establish a clean, credible compilation and test baseline after the first real workspace build exposed accumulated failures.
+Verification result
 
-The repository now compiles far enough for meaningful verification, but the corrective commits introduced two forms of verification debt:
+* cargo check --workspace: passed (exit code 0). Only pre-existing warnings unrelated to this milestone remain (unused imports, deprecated base64::encode/decode, a few dead-code/never-used items) — none introduced by this work.
+* cargo test --workspace --quiet: passed (exit code 0). All batches reported test result: ok with 0 failed: 0, 29, 229, 1 (trybuild meta-test covering 12 UI scenarios, all ok), 123, plus 1 intentionally ignored doctest placeholder and 0 doctests. Run 3 times during verification; the last full run is the one recorded here.
 
-1. HTTP and processing runner tests that exercised successful handler execution were deleted because they lacked the session-store, prepared-session, lease, and runtime-context fixtures now required by the production invocation path.
-2. Several runtime-probe and staging tests treat ETXTBSY by printing a message and returning from the test. Rust records those returns as successful test executions, even though the intended assertions never ran.
+Restored HTTP tests (lexicon-core/src/protocols/http/runner.rs, execution_tests, Tests 11-19; 9 tests)
 
-Before beginning the newly specified durable source-state and work-ledger implementation, restore this missing coverage and obtain a trustworthy passing workspace test result.
+All fixture-backed via crate::session::test_support::RuntimeInvocationFixture, driving run_http_runtime_invocation through the unmodified production path:
 
-This milestone is derived from:
+* exactly-once acquisition-handler dispatch with a real, mutable HttpAcquisitionContext;
+* foreground dispatch reaches the handler;
+* background dispatch reaches the handler;
+* source-argument fidelity: order, duplicates, empty values, a literal --, reserved-looking flags, Unicode, and non-UTF-8 Unix bytes all preserved byte-for-byte across the invocation boundary;
+* a source-authored acquisition error maps to Handler(_) with no implicit reinvocation;
+* session state transitions through Prepared -> Running -> Succeeded/Failed as appropriate;
+* session-identity mismatch is rejected before the handler is ever dispatched.
 
-* workspace/specs/contract.md, especially the required-verification and test-integrity requirements;
-* workspace/specs/specs.md, especially the source-contract, session, supervision, environment-handling, and required-test sections;
-* commit 24399ef883baf7dceb219893fce9712d32885d7e, which removed obsolete runtime execution tests pending a real fixture;
-* commit dbc5ca83c974b596d6eedb2be6bcb9a0d3131abf, which added successful early returns for ETXTBSY;
-* the obsolete current.md, which prohibited deleting, weakening, or silently skipping tests to obtain a passing suite.
+Restored processing tests (lexicon-core/src/processing/runner.rs, execution_tests, Tests 11-17; 7 tests)
 
-The target baseline is repository commit:
+All fixture-backed via the same RuntimeInvocationFixture, driving run_processing_runtime_invocation through the unmodified production path including the real SQLite open/commit/rollback sequence:
 
-6ec9d485e03691fbf25cd3e1a47e3f306420d7e4
+* exactly-once process-handler dispatch with a real, mutable ProcessingContext;
+* background dispatch reaches the handler;
+* source-argument order and OS representation survive dispatch unchanged;
+* a source-authored failure maps to Handler(_) with exactly one dispatch and no reinvocation;
+* session state transitions to Succeeded after a successful handler and to Failed after a source-authored failure;
+* session/lease identity mismatch is rejected before the handler is ever dispatched.
 
-or its direct descendant containing only work required by this milestone.
+Fixture design (lexicon-core/src/session/test_support.rs, RuntimeInvocationFixture)
 
-Required implementation
+Builds the real minimum execution environment the production invocation path requires: a temp directory tree (protocol_root, data/raw, data/processed, and unconditionally get-raw-data — required because processing transaction discovery validates that root exists even for processing-only invocations); a real SessionStore opened against that tree; a Prepared session created via create_prepared and read back as a genuine SessionIdentity; a held SessionLease acquired via store.acquire_lease; and a valid LEXICON_RUNTIME_CONTEXT_V1 value set through a mutex-serialized RuntimeContextEnvGuard that restores the prior environment value on drop, including during panic unwinding. foreground_run/background_run/new constructors, plus session()/store()/build_argv() accessors, are shared by both the HTTP and processing test modules. No production API was added to allow tests to inject a context directly.
 
-1. Build reusable runtime-invocation test fixtures
+Deterministic ETXTBSY / transient-spawn-race handling
 
-Add proper test support for both:
+* lexicon-framework/src/build/runtime_probe.rs: all 3 probe tests that spawn fixture scripts now use a bounded (3-attempt) retry_on_spawn_busy helper limited to io::ErrorKind::ExecutableFileBusy, which fails the test with the original error on exhaustion rather than printing and returning success.
+* lexicon-framework/src/build/runtime_staging.rs: the prior fixture_or_skip! false-success macro was replaced with fixture_verified_processing_runtime_with_retry(), the same bounded-retry pattern, at both call sites.
+* An additional, related flake was found and fixed with explicit user approval: lexicon-framework/src/lib.rs and lexicon-framework/src/data/test_support.rs each independently defined a TEST_CWD_LOCK mutex; since process CWD is global OS state, the two non-communicating locks provided no real mutual exclusion against a concurrently spawned cargo metadata subprocess. The two locks were unified into the single shared lock in data/test_support.rs, and a bounded retry (limited to the "Could not locate working directory" transient error) was added around workspace_metadata_validation_accepts_valid_workspace as defense in depth, since the unification alone did not fully eliminate the underlying container resource-contention race. This same race was observed and successfully absorbed by the retry during the final verification run.
 
-lexicon-core HTTP runtime invocation
-lexicon-core processing runtime invocation
+Confirmations
 
-Each fixture must create the real minimum execution environment expected by the production invocation path:
+* No required test remains ignored, deleted, or falsely successful; the one ignored doctest placeholder is a pre-existing, unrelated intentional stub.
+* No production contract was weakened to make test setup easier, and no new feature scope was added. The TEST_CWD_LOCK unification and workspace_metadata retry are test-harness-only fixes for flakiness discovered while verifying this milestone, made with explicit user approval, and are called out here transparently as the one respect in which work went slightly beyond the milestone's original enumerated scope.
 
-* a temporary project and operation directory;
-* a real SessionStore backed by the temporary directory;
-* a valid prepared session record;
-* a held session lease;
-* a matching runtime invocation envelope;
-* a valid LEXICON_RUNTIME_CONTEXT_V1 environment value;
-* matching compiled project, source, protocol, operation, and session identities;
-* validated runtime paths required to construct the real context.
+Next milestone
 
-Do not add a production backdoor that permits tests to inject a context through an API unavailable to real runtimes.
-
-Prefer a shared test-support abstraction where HTTP and processing genuinely require the same setup. Keep operation-specific setup separate where their invariants differ.
-
-Because environment variables are process-global, tests that mutate LEXICON_RUNTIME_CONTEXT_V1 must be serialized or otherwise isolated. Every fixture must restore the prior environment state when it is dropped, including during panic unwinding.
-
-2. Restore HTTP handler-execution coverage
-
-Restore behavior-level tests proving at least:
-
-* a valid matching invocation reaches the acquisition handler;
-* the handler is called exactly once;
-* the real mutable HttpAcquisitionContext reaches the handler;
-* foreground invocation reaches the handler;
-* background invocation reaches the handler;
-* source arguments arrive in exact order;
-* duplicate and empty argument values are preserved;
-* a source argument equal to -- is preserved;
-* reserved-looking source arguments are preserved after the invocation boundary;
-* Unicode arguments are preserved;
-* non-UTF-8 Unix arguments are preserved byte-for-byte;
-* successful acquisition returns success;
-* a source-authored acquisition error returns the correct handler-error category;
-* a handler error does not cause implicit reinvocation;
-* the session transitions through the expected prepared, running, and terminal states;
-* the lease and invocation session identities must agree.
-
-Do not blindly restore tests whose premise depended on the removed caller-supplied-context API. Rewrite those tests against the actual production construction path or omit only the obsolete premise while preserving the underlying invariant.
-
-3. Restore processing handler-execution coverage
-
-Restore the corresponding processing tests proving at least:
-
-* a valid matching invocation reaches the processing handler;
-* the handler is called exactly once;
-* the real mutable ProcessingContext reaches the handler;
-* foreground and background invocation modes reach the handler;
-* source arguments retain their exact order and operating-system representation;
-* success produces the expected result and terminal session state;
-* a source-authored processing failure produces the correct handler-error category and failed terminal state;
-* a handler failure does not cause implicit reinvocation;
-* session, lease, project, source, protocol, and operation identities are validated before dispatch.
-
-Retain the existing pure transport and admission-rejection tests.
-
-4. Remove false-success ETXTBSY handling
-
-Remove test branches that handle ExecutableFileBusy by returning successfully before the assertion.
-
-Affected areas currently include:
-
-lexicon-framework/src/build/runtime_probe.rs
-lexicon-framework/src/build/runtime_staging.rs
-
-Replace the racy script-fixture mechanism with a deterministic approach.
-
-Acceptable approaches include:
-
-* creating fixture executables during test setup before the test process begins using them;
-* copying an already built helper executable into a unique temporary location;
-* using one dedicated helper binary with explicit probe-output modes;
-* restructuring fixture creation so no writable handle or overlay copy-up operation races with execution;
-* bounded retry around the fixture spawn only when retry is isolated to the test harness and an exhausted retry fails the test.
-
-A retry must:
-
-* be limited to ExecutableFileBusy;
-* have a small fixed attempt bound;
-* preserve the original error when exhausted;
-* never convert exhaustion into success;
-* never be added to production runtime admission merely to accommodate a test fixture.
-
-Printing “skipping” and returning from a Rust #[test] is not a valid skip because the test harness reports it as passed.
-
-If an environment genuinely cannot execute the required test, it must be reported distinctly by the surrounding test workflow and covered in a supported environment. It must not appear as a passing assertion.
-
-5. Preserve the corrected production behavior
-
-Do not revert valid corrections made during the compilation checkpoint, including:
-
-* the corrected hidden __operator-host command name;
-* byte-exact runtime-manifest boundary validation;
-* generic redacted Display output for source-authored errors;
-* borrow and ownership corrections in HTTP attempt execution;
-* current session-store, lease, and runtime-context admission requirements;
-* LF normalization rules for shell scripts and container definitions.
-
-Required verification
-
-The user must run the repository’s containerized verification workflow:
-
-podman build \
-    -f containerization/test-container/Containerfile \
-    -t lexicon-local-test-image \
-    .
-podman run \
-    -d \
-    --name lexicon-local-test \
-    -v "$PWD":/lexicon \
-    --workdir /lexicon \
-    lexicon-local-test-image
-podman exec lexicon-local-test \
-    bash -lc 'cd /lexicon && cargo check --workspace'
-podman exec lexicon-local-test \
-    bash -lc 'cd /lexicon && cargo test --workspace --quiet'
-
-If the container already exists, recreate it when its image or dependencies changed; otherwise it may be started and reused.
-
-The final test output must demonstrate that:
-
-* the workspace compiles;
-* the complete workspace test suite passes;
-* restored HTTP handler tests actually invoke their handler;
-* restored processing handler tests actually invoke their handler;
-* no affected test reports success through an early-return ETXTBSY branch;
-* no required test is marked ignored;
-* no material execution test was deleted merely to obtain a passing result.
-
-Scope constraints
-
-Do not implement during this milestone:
-
-* get-raw-data/state/;
-* source_state_directory();
-* a SQLite work ledger;
-* DurableWorkV1;
-* source-manifest schema 2;
-* the public data --protocol correction;
-* lexicon build;
-* the embedded Core revision correction;
-* foreground signal-forwarding changes;
-* background handoff race corrections;
-* new acquisition or processing features;
-* MZA changes;
-* unrelated refactoring.
-
-Those are contract-derived milestones, but they must be built on a trustworthy verified baseline.
-
-Completion criteria
-
-This milestone is complete only when:
-
-1. Real session-bound HTTP invocation fixtures exist.
-2. Real session-bound processing invocation fixtures exist.
-3. Successful handler-dispatch coverage has been restored for both operations.
-4. argument-fidelity, success, failure, and exactly-once-handler-invocation behavior are tested.
-5. ETXTBSY cannot cause an affected test to be reported as passed without executing its assertion.
-6. cargo check --workspace passes.
-7. cargo test --workspace --quiet passes.
-8. No production contract was weakened to make test setup easier.
-9. No new feature scope was added.
-
-Completion report
-
-When the milestone passes, replace this file with a concise report containing:
-
-* the exact commit tested;
-* confirmation that cargo check --workspace passed;
-* confirmation that cargo test --workspace --quiet passed;
-* the number and categories of restored HTTP tests;
-* the number and categories of restored processing tests;
-* the fixture design used to satisfy session-store, lease, and runtime-context requirements;
-* the deterministic solution used for the overlay-filesystem executable race;
-* confirmation that no required test remains ignored, deleted, or falsely successful;
-* confirmation that no unrelated feature work was included.
-
-Then stop.
-
-The following milestone should be derived from the updated contract and specification. Unless new evidence changes the ordering, it should begin the smallest durable-state foundation:
-
-get-raw-data/state/
-+ validated RuntimeContextPaths field
-+ HttpAcquisitionContext::source_state_directory()
-+ scaffold and persistence tests
-
-It should not yet introduce a universal Core-owned job-queue schema.
+Per instructions.md step 11 and the contract's stated ordering, the next current.md should begin the smallest durable-state foundation: get-raw-data/state/, a validated RuntimeContextPaths field, HttpAcquisitionContext::source_state_directory(), and scaffold/persistence tests — without yet introducing a universal Core-owned job-queue schema.

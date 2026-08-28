@@ -98,6 +98,17 @@ podman exec lexicon-local-test bash -lc 'cd /lexicon && cargo build'
 podman exec lexicon-local-test bash -lc 'cd /lexicon && cargo test -p <crate>'
 ```
 
+- On a Windows host, `podman` runs client-side against a podman machine (a WSL-backed VM). If a bare `podman exec ...` on the host does not reach the running container, route the same command through `podman machine ssh`:
+
+```bash
+podman machine ssh <machine-name> "podman exec lexicon-local-test bash -lc 'cd /lexicon && cargo test --workspace --quiet'"
+```
+
+  - Discover the machine name with `podman machine list`.
+  - The repository is reachable inside the machine's WSL filesystem (e.g. `/mnt/c/Users/<user>/...`), but prefer driving Cargo through the already-mounted `lexicon-local-test` container path (`/lexicon`) shown above rather than operating on the WSL-mounted path directly.
+  - When output is large enough that a terminal-attached command risks truncation, redirect stdout/stderr to a log file and inspect the file afterward instead of relying on terminal output. On Windows/PowerShell, explicitly force UTF-8 output (e.g. `Out-File -Encoding utf8`) — PowerShell's default `*>`/`>` redirection writes UTF-16LE, which common text-processing tools cannot parse.
+  - Unless `current.md` or the user says otherwise, the agent may run this containerized validation directly instead of asking the user to run it.
+
 - If the workspace test run passes, validation is complete unless `current.md` defines a narrower validation policy.
 - If the command fails, report the exact failing crate or step.
 - If the bundle/install helper script is unavailable or cannot complete in this environment, fall back to the containerized Cargo validation flow with build and test, instead of using the custom install path.

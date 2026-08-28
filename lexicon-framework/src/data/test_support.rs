@@ -29,12 +29,18 @@ use crate::data::request::DataOperation;
 use crate::data::runtime::{AdmittedAcquisitionBundle, AdmittedBundle};
 use crate::session::SessionCoordinator;
 
-/// Serializes tests that change the process-global current working directory.
+/// Serializes every test in this crate's test binary that changes the
+/// process-global current working directory.
 ///
 /// `RuntimeProjectLayout` discovery (`resolve_project_layout`) always reads
 /// `std::env::current_dir()`; there is no override seam, so tests that need a
-/// real layout must temporarily change the process cwd and must not run
-/// concurrently with any other test doing the same.
+/// real layout must temporarily change the process cwd. Process cwd is shared
+/// by every thread in this test binary, so this must be the *only* lock any
+/// test in this crate uses to gate such a change (a second, disjoint lock
+/// provides no protection against a concurrent change made through this one,
+/// and can let an unrelated test that spawns a subprocess momentarily observe
+/// an invalid working directory). `lexicon_framework::tests` (in `lib.rs`)
+/// reuses this same lock via `with_test_cwd` rather than declaring its own.
 pub(crate) static TEST_CWD_LOCK: Mutex<()> = Mutex::new(());
 
 /// Run `body` with the process cwd temporarily set to `dir`, holding

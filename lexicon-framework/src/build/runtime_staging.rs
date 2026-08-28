@@ -779,8 +779,7 @@ mod tests {
     /// (the default container storage driver): the kernel can briefly still consider a
     /// freshly written-and-chmod'd file open for writing at the moment it is exec'd,
     /// even though the writer has already closed its file handle. It is unrelated to
-    /// this module's staging logic; treat it as inconclusive (skip) rather than failing
-    /// the test on it.
+    /// this module's staging logic.
     fn is_verification_spawn_busy(error: &crate::build::ProcessingRuntimeVerificationError) -> bool {
         matches!(
             error,
@@ -793,26 +792,30 @@ mod tests {
         )
     }
 
-    macro_rules! fixture_or_skip {
-        ($test_name:expr) => {
+    /// Retries `fixture_verified_processing_runtime` when it fails with
+    /// `ExecutableFileBusy` verifying the fixture candidate, up to a small fixed
+    /// attempt bound. Exhausting the retry budget panics with the original error
+    /// instead of skipping; an environment that cannot execute the fixture still
+    /// fails the test rather than reporting a false success.
+    fn fixture_verified_processing_runtime_with_retry()
+    -> (crate::build::VerifiedProcessingRuntime, tempfile::TempDir) {
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
             match fixture_verified_processing_runtime() {
-                Ok(pair) => pair,
-                Err(error) if is_verification_spawn_busy(&error) => {
-                    eprintln!(
-                        "skipping {}: ETXTBSY verifying the fixture runtime candidate \
-                         (overlayfs exec race, not a logic failure): {error:?}",
-                        $test_name
-                    );
-                    return;
+                Ok(pair) => return pair,
+                Err(error) if attempt < MAX_ATTEMPTS && is_verification_spawn_busy(&error) => {
+                    continue;
                 }
                 Err(error) => panic!("fixture setup failed: {error:?}"),
             }
-        };
+        }
     }
 
     #[test]
     fn verified_processing_runtime_stages_successfully() {
-        let (verified, _source_dir) = fixture_or_skip!("verified_processing_runtime_stages_successfully");
+        let (verified, _source_dir) = fixture_verified_processing_runtime_with_retry();
         let parent = tempfile::tempdir().unwrap();
 
         let bundle = stage_verified_processing_runtime_bundle(
@@ -866,7 +869,7 @@ mod tests {
 
     #[test]
     fn invalid_executable_name_fails_before_directory_creation() {
-        let (verified, _source_dir) = fixture_or_skip!("invalid_executable_name_fails_before_directory_creation");
+        let (verified, _source_dir) = fixture_verified_processing_runtime_with_retry();
         let parent = tempfile::tempdir().unwrap();
         let read_before = fs::read_dir(parent.path()).unwrap().count();
 

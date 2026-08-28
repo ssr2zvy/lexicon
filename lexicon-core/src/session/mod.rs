@@ -4,6 +4,8 @@ pub mod error;
 pub mod lease;
 pub mod model;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod transition;
 
 pub use binding::{
