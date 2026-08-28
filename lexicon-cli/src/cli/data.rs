@@ -29,6 +29,14 @@ pub struct DataCommand {
     )]
     pub process: Option<String>,
 
+    #[arg(
+        long,
+        value_name = "PROTOCOL",
+        required = true,
+        help = "Protocol for the source operation. Only http is supported right now."
+    )]
+    pub protocol: String,
+
     #[arg(long, help = "Run the operation in the background.")]
     pub bg: bool,
 
@@ -62,6 +70,18 @@ impl DataCommand {
             unreachable!("data action is required by clap validation")
         }
     }
+
+    pub fn normalized_protocol(&self) -> Result<String, String> {
+        let value = self.protocol.trim();
+        if value.eq_ignore_ascii_case("http") {
+            Ok("http".to_owned())
+        } else {
+            Err(format!(
+                "unsupported protocol '{}'; only 'http' is currently supported",
+                self.protocol
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -78,6 +98,8 @@ mod tests {
             "data",
             "--get",
             "example-source",
+            "--protocol",
+            "http",
             "--bg",
             "--",
             "--from",
@@ -89,6 +111,8 @@ mod tests {
             Some(RootCommand::Data(command)) => {
                 assert_eq!(command.get.as_deref(), Some("example-source"));
                 assert_eq!(command.process, None);
+                assert_eq!(command.protocol, "http");
+                assert_eq!(command.normalized_protocol().unwrap(), "http");
                 assert!(command.bg);
                 assert_eq!(command.passthrough, vec![
                     OsString::from("--from"),
@@ -106,6 +130,8 @@ mod tests {
             "data",
             "--process",
             "example-source",
+            "--protocol",
+            "http",
             "--abandon-past-fail",
         ])
         .expect("lexicon data --process should parse");
@@ -113,6 +139,8 @@ mod tests {
         match cli.command {
             Some(RootCommand::Data(command)) => {
                 assert_eq!(command.process.as_deref(), Some("example-source"));
+                assert_eq!(command.protocol, "http");
+                assert_eq!(command.normalized_protocol().unwrap(), "http");
                 assert!(!command.bg);
                 assert!(command.abandon_past_fail);
             }
@@ -121,11 +149,30 @@ mod tests {
     }
 
     #[test]
+    fn rejects_data_command_when_protocol_is_missing() {
+        let result = Cli::try_parse_from(["lexicon", "data", "--get", "example-source"]);
+        assert!(result.is_err(), "data command requires --protocol");
+    }
+
+    #[test]
+    fn rejects_data_command_when_protocol_value_is_missing() {
+        let result = Cli::try_parse_from([
+            "lexicon",
+            "data",
+            "--get",
+            "example-source",
+            "--protocol",
+        ]);
+        assert!(result.is_err(), "--protocol requires a value");
+    }
+
+    #[test]
     fn parses_operator_host_command_with_reference_and_passthrough() {
+        let reference_json = r#"{"schema_version":1,"source_name":"example-source","protocol":"http","operation":"acquisition","session_id":"session-abc"}"#;
         let cli = Cli::try_parse_from([
             "lexicon",
             "__operator-host",
-            "{\"schema_version\":1}",
+            reference_json,
             "--",
             "--from",
             "2024-01-01",
@@ -134,7 +181,7 @@ mod tests {
 
         match cli.command {
             Some(RootCommand::OperatorHost(command)) => {
-                assert_eq!(command.reference, "{\"schema_version\":1}");
+                assert_eq!(command.reference, reference_json);
                 assert_eq!(
                     command.passthrough,
                     vec![OsString::from("--from"), OsString::from("2024-01-01")]

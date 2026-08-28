@@ -1413,7 +1413,7 @@ pub(crate) fn validate_source_name(source_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_protocol(protocol: &str) -> Result<(), String> {
+pub(crate) fn validate_protocol(protocol: &str) -> Result<(), String> {
     if protocol.eq_ignore_ascii_case("http") {
         Ok(())
     } else {

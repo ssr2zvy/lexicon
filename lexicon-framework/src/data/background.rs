@@ -116,7 +116,7 @@ pub(crate) fn execute_background_data_with_re_executor_and_timing(
     ownership_poll_interval: Duration,
 ) -> Result<BackgroundHandoffOutcome, ForegroundDataExecutionError> {
     // 1. Project discovery and layout validation.
-    let (layout, project_name) = resolve_project_layout(&request.source_name, request.operation)?;
+    let (layout, project_name) = resolve_project_layout(&request.source_name, &request.protocol, request.operation)?;
 
     // 2. Bundle admission.
     let admitted = admit_bundle(&layout, request.operation)?;
@@ -150,7 +150,7 @@ pub(crate) fn execute_background_data_with_re_executor_and_timing(
 
     // 7. Build the operator-host invocation reference and re-execute.
     let reference =
-        OperatorHostInvocationV1::new(request.source_name.clone(), request.operation, session_id.clone());
+        OperatorHostInvocationV1::new(request.source_name.clone(), request.protocol.clone(), request.operation, session_id.clone());
     let encoded_reference = reference
         .to_json()
         .map_err(ForegroundDataExecutionError::OperatorHostEncoding)?;
@@ -231,13 +231,14 @@ pub(crate) fn execute_operator_host_with_launcher(
 ) -> Result<ForegroundDataOutcome, ForegroundDataExecutionError> {
     let operation = reference.operation();
     let source_name = reference.source_name().to_owned();
+    let protocol = reference.protocol().to_owned();
     let session_id: SessionIdentity = reference.session().clone();
 
     // 1-4. Re-derive the exact same project layout, bundle, identity, and
     // coordinator the initiating process built. Nothing here is trusted from
-    // `reference` beyond the source name and operation; the coordinator and
+    // `reference` beyond the source name, protocol, and operation; the coordinator and
     // bundle are independently re-validated.
-    let (layout, project_name) = resolve_project_layout(&source_name, operation)?;
+    let (layout, project_name) = resolve_project_layout(&source_name, &protocol, operation)?;
     let admitted = admit_bundle(&layout, operation)?;
     let project_identity = build_project_identity(&project_name)?;
     let runtime_identity = admitted.identity().clone();
@@ -325,6 +326,7 @@ mod tests {
         ForegroundDataRequest {
             operation: DataOperation::Acquisition,
             source_name: source_name.to_string(),
+            protocol: "http".to_string(),
             abandon_past_failure: false,
             background: true,
             source_arguments: Vec::new(),
@@ -419,7 +421,7 @@ mod tests {
         let project = build_fake_project("example-source");
 
         let (layout, _project_name) = with_test_cwd(&project.project_root, || {
-            resolve_project_layout("example-source", DataOperation::Acquisition)
+            resolve_project_layout("example-source", "http", DataOperation::Acquisition)
         })
         .unwrap();
         let admitted = admit_bundle(&layout, DataOperation::Acquisition).unwrap();
@@ -514,7 +516,7 @@ mod tests {
         let project = build_fake_project("example-source");
 
         let (layout, project_name) = with_test_cwd(&project.project_root, || {
-            resolve_project_layout("example-source", DataOperation::Acquisition)
+            resolve_project_layout("example-source", "http", DataOperation::Acquisition)
         })
         .unwrap();
         let admitted = admit_bundle(&layout, DataOperation::Acquisition).unwrap();
@@ -538,7 +540,7 @@ mod tests {
             .unwrap();
 
         let reference =
-            OperatorHostInvocationV1::new("example-source", DataOperation::Acquisition, session_id);
+            OperatorHostInvocationV1::new("example-source", "http", DataOperation::Acquisition, session_id);
 
         let result = with_test_cwd(&project.project_root, || {
             execute_operator_host_with_launcher(reference, Vec::new(), &ProcessCommandLauncher)

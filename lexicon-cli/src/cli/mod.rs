@@ -53,6 +53,7 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Some(RootCommand::Data(command)) => {
+            let protocol = command.normalized_protocol()?;
             let (operation, source_name) = match command.mode() {
                 DataMode::Get(source) => (lexicon_framework::data::DataOperation::Acquisition, source),
                 DataMode::Process(source) => (lexicon_framework::data::DataOperation::Processing, source),
@@ -61,6 +62,7 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
             let request = lexicon_framework::data::ForegroundDataRequest {
                 operation,
                 source_name,
+                protocol,
                 abandon_past_failure: command.abandon_past_fail,
                 background,
                 source_arguments: command.passthrough,

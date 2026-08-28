@@ -587,6 +587,8 @@ pub enum ForegroundDataExecutionError {
     ProjectDiscovery(ProjectDiscoveryError),
     /// Project configuration (`lexicon.toml`) is invalid or malformed.
     ProjectConfiguration(ProjectConfigurationError),
+    /// The requested protocol is invalid or unsupported.
+    UnsupportedProtocol(String),
     /// The runtime project layout (sources root, source dir, protocol root, etc.) is invalid.
     ProjectLayout(RuntimeProjectLayoutError),
     /// The source directory does not exist inside the sources root.
@@ -714,6 +716,7 @@ impl fmt::Display for ForegroundDataExecutionError {
             ),
             Self::ProjectDiscovery(e) => write!(f, "project discovery failed: {e}"),
             Self::ProjectConfiguration(e) => write!(f, "project configuration error: {e}"),
+            Self::UnsupportedProtocol(msg) => write!(f, "{msg}"),
             Self::ProjectLayout(e) => write!(f, "project layout error: {e}"),
             Self::MissingSource { source_name, path } => write!(
                 f,

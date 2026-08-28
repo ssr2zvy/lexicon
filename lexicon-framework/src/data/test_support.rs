@@ -166,7 +166,7 @@ pub(crate) fn admit_fake_bundle(project: &FakeProject) -> AdmittedBundle {
 /// [`TEST_CWD_LOCK`]), for callers that only need the layout's derived paths.
 fn build_layout_for(project: &FakeProject) -> RuntimeProjectLayout {
     let previous = with_test_cwd(&project.project_root, || {
-        crate::data::project::resolve_project_layout(&project.source_name, DataOperation::Acquisition)
+        crate::data::project::resolve_project_layout(&project.source_name, "http", DataOperation::Acquisition)
     });
     previous.expect("resolve fake project layout").0
 }

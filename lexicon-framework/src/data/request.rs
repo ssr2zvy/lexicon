@@ -20,6 +20,7 @@ impl DataOperation {
 pub struct ForegroundDataRequest {
     pub operation: DataOperation,
     pub source_name: String,
+    pub protocol: String,
     pub abandon_past_failure: bool,
     pub background: bool,
     pub source_arguments: Vec<OsString>,

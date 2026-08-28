@@ -41,14 +41,21 @@ pub const OPERATOR_HOST_INVOCATION_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperatorHostInvocationV1 {
     source_name: String,
+    protocol: String,
     operation: DataOperation,
     session: SessionIdentity,
 }
 
 impl OperatorHostInvocationV1 {
-    pub fn new(source_name: impl Into<String>, operation: DataOperation, session: SessionIdentity) -> Self {
+    pub fn new(
+        source_name: impl Into<String>,
+        protocol: impl Into<String>,
+        operation: DataOperation,
+        session: SessionIdentity,
+    ) -> Self {
         Self {
             source_name: source_name.into(),
+            protocol: protocol.into(),
             operation,
             session,
         }
@@ -56,6 +63,10 @@ impl OperatorHostInvocationV1 {
 
     pub fn source_name(&self) -> &str {
         &self.source_name
+    }
+
+    pub fn protocol(&self) -> &str {
+        &self.protocol
     }
 
     pub fn operation(&self) -> DataOperation {
@@ -70,6 +81,7 @@ impl OperatorHostInvocationV1 {
         let document = OperatorHostInvocationDocumentV1 {
             schema_version: OPERATOR_HOST_INVOCATION_SCHEMA_VERSION,
             source_name: self.source_name.clone(),
+            protocol: self.protocol.clone(),
             operation: operation_identifier(self.operation).to_string(),
             session_id: self.session.id().to_string(),
         };
@@ -98,11 +110,18 @@ impl OperatorHostInvocationV1 {
             OperatorHostInvocationDecodingError::UnknownOperation(document.operation.clone())
         })?;
 
+        if document.protocol.trim().is_empty() {
+            return Err(OperatorHostInvocationDecodingError::InvalidProtocol(
+                "protocol cannot be empty".to_string(),
+            ));
+        }
+
         let session = SessionIdentity::new(document.session_id.clone())
             .map_err(|error| OperatorHostInvocationDecodingError::InvalidSessionIdentity(error.to_string()))?;
 
         Ok(Self {
             source_name: document.source_name,
+            protocol: document.protocol,
             operation,
             session,
         })
@@ -129,6 +148,7 @@ fn operation_from_identifier(value: &str) -> Option<DataOperation> {
 struct OperatorHostInvocationDocumentV1 {
     schema_version: u32,
     source_name: String,
+    protocol: String,
     operation: String,
     session_id: String,
 }
@@ -156,6 +176,7 @@ pub enum OperatorHostInvocationDecodingError {
     StructuralDocument(String),
     UnknownSchemaVersion(u32),
     UnknownOperation(String),
+    InvalidProtocol(String),
     InvalidSessionIdentity(String),
 }
 
@@ -172,6 +193,9 @@ impl fmt::Display for OperatorHostInvocationDecodingError {
             ),
             Self::UnknownOperation(value) => {
                 write!(formatter, "unknown operator-host invocation operation: {value}")
+            }
+            Self::InvalidProtocol(message) => {
+                write!(formatter, "invalid operator-host invocation protocol: {message}")
             }
             Self::InvalidSessionIdentity(message) => {
                 write!(formatter, "invalid operator-host invocation session identity: {message}")
@@ -190,6 +214,7 @@ mod tests {
     fn round_trips_through_json() {
         let reference = OperatorHostInvocationV1::new(
             "example-source",
+            "http",
             DataOperation::Acquisition,
             SessionIdentity::new("session-abc").unwrap(),
         );
@@ -202,7 +227,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_schema_version() {
-        let json = r#"{"schema_version":999,"source_name":"s","operation":"acquisition","session_id":"abc"}"#;
+        let json = r#"{"schema_version":999,"source_name":"s","protocol":"http","operation":"acquisition","session_id":"abc"}"#;
         let result = OperatorHostInvocationV1::from_json(json);
         assert!(matches!(
             result,
@@ -212,7 +237,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_operation() {
-        let json = r#"{"schema_version":1,"source_name":"s","operation":"bogus","session_id":"abc"}"#;
+        let json = r#"{"schema_version":1,"source_name":"s","protocol":"http","operation":"bogus","session_id":"abc"}"#;
         let result = OperatorHostInvocationV1::from_json(json);
         assert!(matches!(
             result,
@@ -221,20 +246,32 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_protocol() {
+        let json = r#"{"schema_version":1,"source_name":"s","protocol":"","operation":"acquisition","session_id":"abc"}"#;
+        let result = OperatorHostInvocationV1::from_json(json);
+        assert!(matches!(
+            result,
+            Err(OperatorHostInvocationDecodingError::InvalidProtocol(_))
+        ));
+    }
+
+    #[test]
     fn processing_operation_round_trips() {
         let reference = OperatorHostInvocationV1::new(
             "example-source",
+            "http",
             DataOperation::Processing,
             SessionIdentity::new("session-xyz").unwrap(),
         );
         let json = reference.to_json().unwrap();
         let decoded = OperatorHostInvocationV1::from_json(&json).unwrap();
         assert_eq!(decoded.operation(), DataOperation::Processing);
+        assert_eq!(decoded.protocol(), "http");
     }
 
     #[test]
     fn rejects_unknown_field() {
-        let json = r#"{"schema_version":1,"source_name":"s","operation":"acquisition","session_id":"abc","unexpected":true}"#;
+        let json = r#"{"schema_version":1,"source_name":"s","protocol":"http","operation":"acquisition","session_id":"abc","unexpected":true}"#;
         let result = OperatorHostInvocationV1::from_json(json);
         assert!(matches!(
             result,
@@ -254,7 +291,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_session_identity() {
-        let json = r#"{"schema_version":1,"source_name":"s","operation":"acquisition","session_id":""}"#;
+        let json = r#"{"schema_version":1,"source_name":"s","protocol":"http","operation":"acquisition","session_id":""}"#;
         let result = OperatorHostInvocationV1::from_json(json);
         assert!(matches!(
             result,

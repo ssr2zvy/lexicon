@@ -6,7 +6,7 @@ use crate::data::error::{
     ProjectDiscoveryError, RuntimeProjectLayoutError, SourcesRootValidationError,
 };
 use crate::data::request::DataOperation;
-use crate::{find_project_root, load_project_config, validate_source_name};
+use crate::{find_project_root, load_project_config, validate_protocol, validate_source_name};
 
 // ---------------------------------------------------------------------------
 // RuntimeProjectLayout
@@ -18,12 +18,13 @@ use crate::{find_project_root, load_project_config, validate_source_name};
 /// construction time:
 /// ```text
 /// sources_root = project_root/<configured-sources-directory>
-/// protocol_root = sources_root/<source_name>/http
+/// protocol_root = sources_root/<source_name>/<protocol>
 /// ```
 pub struct RuntimeProjectLayout {
     project_root: PathBuf,
     sources_root: PathBuf,
     source_name: String,
+    protocol: String,
     protocol_root: PathBuf,
 }
 
@@ -43,7 +44,12 @@ impl RuntimeProjectLayout {
         &self.source_name
     }
 
-    /// Absolute HTTP protocol root: `sources_root/<source_name>/http`.
+    /// Validated protocol name.
+    pub fn protocol(&self) -> &str {
+        &self.protocol
+    }
+
+    /// Absolute protocol root: `sources_root/<source_name>/<protocol>`.
     pub fn protocol_root(&self) -> &Path {
         &self.protocol_root
     }
@@ -111,9 +117,10 @@ impl RuntimeProjectLayout {
 // ---------------------------------------------------------------------------
 
 /// Discover the project, load configuration, validate the source layout, and
-/// construct a `RuntimeProjectLayout` for the given source and operation.
+/// construct a `RuntimeProjectLayout` for the given source, protocol, and operation.
 pub fn resolve_project_layout(
     source_name: &str,
+    protocol: &str,
     operation: DataOperation,
 ) -> Result<(RuntimeProjectLayout, String), ForegroundDataExecutionError> {
     let cwd = env::current_dir().map_err(|e| {
@@ -144,6 +151,9 @@ pub fn resolve_project_layout(
             ),
         ))?;
 
+    validate_protocol(protocol)
+        .map_err(|msg| ForegroundDataExecutionError::UnsupportedProtocol(msg))?;
+
     let source_dir = config.sources_root.join(source_name);
     require_directory(&source_dir, PathKind::SourceDirectory).map_err(|e| {
         // Map MissingPath to MissingSource for backward-compatible display.
@@ -158,7 +168,7 @@ pub fn resolve_project_layout(
         }
     })?;
 
-    let protocol_root = source_dir.join("http");
+    let protocol_root = source_dir.join(protocol);
     require_directory(&protocol_root, PathKind::ProtocolRoot).map_err(|e| {
         match &e {
             RuntimeProjectLayoutError::MissingPath { .. } => {
@@ -175,6 +185,7 @@ pub fn resolve_project_layout(
         project_root.clone(),
         config.sources_root.clone(),
         source_name.to_owned(),
+        protocol.to_owned(),
         protocol_root.clone(),
     )?;
 
@@ -239,6 +250,7 @@ fn build_layout(
     project_root: PathBuf,
     sources_root: PathBuf,
     source_name: String,
+    protocol: String,
     protocol_root: PathBuf,
 ) -> Result<RuntimeProjectLayout, ForegroundDataExecutionError> {
     // Lexical containment: sources_root must start with project_root.
@@ -264,8 +276,8 @@ fn build_layout(
         }
     }
 
-    // protocol_root must be sources_root/<source_name>/http.
-    let expected_protocol = sources_root.join(&source_name).join("http");
+    // protocol_root must be sources_root/<source_name>/<protocol>.
+    let expected_protocol = sources_root.join(&source_name).join(&protocol);
     if protocol_root != expected_protocol {
         return Err(ForegroundDataExecutionError::ProjectLayout(
             RuntimeProjectLayoutError::PathContainment(
@@ -281,6 +293,7 @@ fn build_layout(
         project_root,
         sources_root,
         source_name,
+        protocol,
         protocol_root,
     })
 }

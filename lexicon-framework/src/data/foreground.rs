@@ -324,7 +324,7 @@ pub(crate) fn execute_foreground_data_with_launcher(
     }
 
     // 1. Project discovery and layout validation.
-    let (layout, project_name) = resolve_project_layout(&request.source_name, request.operation)?;
+    let (layout, project_name) = resolve_project_layout(&request.source_name, &request.protocol, request.operation)?;
 
     // 2. Bundle admission.
     let admitted = admit_bundle(&layout, request.operation)?;
