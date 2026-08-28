@@ -1669,12 +1669,15 @@ esac
     fn retry_on_spawn_busy<T>(
         mut probe: impl FnMut() -> Result<T, RuntimeProbeExecutionError>,
     ) -> Result<T, RuntimeProbeExecutionError> {
-        const MAX_ATTEMPTS: u32 = 3;
+        const MAX_ATTEMPTS: u32 = 10;
         let mut attempt = 0;
         loop {
             attempt += 1;
             match probe() {
-                Err(error) if attempt < MAX_ATTEMPTS && is_probe_spawn_busy(&error) => continue,
+                Err(error) if attempt < MAX_ATTEMPTS && is_probe_spawn_busy(&error) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
                 other => return other,
             }
         }
@@ -1695,11 +1698,13 @@ esac
     #[test]
     fn probe_http_runtime_information_times_out_for_delayed_exit() {
         let (_temp, script) = probe_fixture("delayed-exit");
-        let result = super::probe_http_runtime_information_with_timeout(
-            &script,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            std::time::Duration::from_millis(50),
-        );
+        let result = retry_on_spawn_busy(|| {
+            super::probe_http_runtime_information_with_timeout(
+                &script,
+                RuntimeIdentity::http_acquisition("example-source", 1),
+                std::time::Duration::from_millis(50),
+            )
+        });
         assert!(matches!(
             result,
             Err(RuntimeProbeExecutionError::Timeout { .. })

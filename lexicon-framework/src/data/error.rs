@@ -595,6 +595,14 @@ pub enum ForegroundDataExecutionError {
     MissingSource { source_name: String, path: std::path::PathBuf },
     /// The expected protocol layout directory does not exist.
     MissingProtocolLayout { source_name: String, path: std::path::PathBuf },
+    /// The source manifest (`source.toml`) does not exist under the protocol layout directory.
+    MissingSourceManifest { source_name: String, path: std::path::PathBuf },
+    /// The source manifest (`source.toml`) is invalid or fails schema-2 validation.
+    InvalidSourceManifest {
+        source_name: String,
+        path: std::path::PathBuf,
+        error: crate::SourceManifestError,
+    },
     /// The expected operation workspace directory does not exist.
     MissingOperationLayout { operation: String, path: std::path::PathBuf },
     /// The runtime bundle directory does not exist; the user must run `lexicon source build`.
@@ -726,8 +734,17 @@ impl fmt::Display for ForegroundDataExecutionError {
             ),
             Self::MissingProtocolLayout { source_name, path } => write!(
                 f,
-                "HTTP protocol layout for source '{}' not found at {}",
-                source_name,
+                "HTTP protocol layout for source '{source_name}' not found at {}",
+                path.display()
+            ),
+            Self::MissingSourceManifest { source_name, path } => write!(
+                f,
+                "source manifest for source '{source_name}' not found at {}",
+                path.display()
+            ),
+            Self::InvalidSourceManifest { source_name, path, error } => write!(
+                f,
+                "invalid source manifest for source '{source_name}' at {}: {error}",
                 path.display()
             ),
             Self::MissingOperationLayout { operation, path } => write!(
@@ -924,6 +941,7 @@ impl std::error::Error for ForegroundDataExecutionError {
             }
             Self::MissingTerminalSession(err) => Some(err),
             Self::CorruptTerminalSession(err) => Some(err),
+            Self::InvalidSourceManifest { error, .. } => Some(error),
             Self::RootSummaryReconciliationFailed(err) => Some(err),
             Self::OperatorHostEncoding(err) => Some(err),
             Self::OperatorHostDecoding(err) => Some(err),

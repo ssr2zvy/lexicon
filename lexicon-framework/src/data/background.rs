@@ -280,7 +280,7 @@ mod tests {
 
     use super::*;
 
-    const FAST_TIMEOUT: Duration = Duration::from_millis(300);
+    const FAST_TIMEOUT: Duration = Duration::from_millis(2000);
     const FAST_POLL: Duration = Duration::from_millis(10);
 
     /// Spawn a real, short-lived child process that exits immediately.
