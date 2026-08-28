@@ -1490,24 +1490,31 @@ fn sidecar_path(
 
 // A prior `execution_tests` module here (matching-process dispatch, source-argument
 // fidelity, and success/handler-error assertions) predated `run_processing_runtime_invocation`
-// growing full session-store/lease/env-context binding. None of those tests ever set up a
+// growing full session-store/lease/env-context binding. Those tests never set up a
 // `SessionStore`, a `Prepared` session record, a held lease, or the `LEXICON_RUNTIME_CONTEXT_V1`
 // env var, so every test that expected the handler to be reached failed with
-// `Session(ContextDecode(MissingEnvironmentVariable))`. Rather than leave them disabled with
-// `#[ignore]`, they were removed outright; restoring that coverage requires a real
-// session-store test fixture (`SessionStore` backed by a temp dir, a `Prepared` record, a held
-// lease, and the env var set for the test thread), which is tracked as a dedicated follow-up
-// milestone. The tests below are the subset that never reached session-context decoding in the
-// first place (pure transport/admission rejection paths) and remain valid, unmodified coverage.
+// `Session(ContextDecode(MissingEnvironmentVariable))`, and were removed rather than left
+// disabled with `#[ignore]`. The tests immediately below are the subset that never reached
+// session-context decoding in the first place (pure transport/admission rejection paths) and
+// remain valid, unmodified coverage.
+//
+// Full handler-dispatch coverage is restored further down using
+// `crate::session::test_support::RuntimeInvocationFixture`, which builds the real minimum
+// session-store/lease/runtime-context environment (plus the raw/processed data directories
+// and real SQLite database the processing path requires) that the production path needs.
 #[cfg(test)]
 mod execution_tests {
     use std::ffi::OsString;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::processing::{ProcessingContext, ProcessingResult, ProcessingSourceContractV1};
+    use crate::processing::{
+        ProcessingContext, ProcessingError, ProcessingResult, ProcessingSourceContractV1,
+    };
     use crate::runtime::{
         ProjectInvocationIdentity, RuntimeExecutionMode, RuntimeIdentity,
         RuntimeInvocationEnvelopeV1, RuntimeSupervisionMode, SessionInvocationIdentity,
     };
+    use crate::session::test_support::RuntimeInvocationFixture;
 
     use super::{ProcessingRuntimeInvocationExecutionError, run_processing_runtime_invocation};
 
@@ -1751,4 +1758,204 @@ mod execution_tests {
         );
     }
 
+    // --- Fixture-backed handler-dispatch coverage ---
+    //
+    // Each test below builds a real `SessionStore`-backed `Prepared` session, an owned
+    // lease, real `data/raw` and `data/processed` directories, and a valid
+    // `LEXICON_RUNTIME_CONTEXT_V1` environment via `RuntimeInvocationFixture`, then drives
+    // `run_processing_runtime_invocation` through the unmodified production path (including
+    // the real SQLite open/commit/rollback sequence) so the process handler is genuinely
+    // reached.
+
+    // Test 11: a matching invocation reaches the process handler exactly once with a
+    // real, mutable `ProcessingContext`.
+    #[test]
+    fn matching_invocation_reaches_process_handler_exactly_once_with_real_context() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn process(context: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                context
+                    .protocol_root()
+                    .to_string_lossy()
+                    .contains("example-source")
+            );
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(example_identity());
+        let args = fixture.build_argv(&[]);
+
+        let result = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    // Test 12: background supervision also reaches the handler.
+    #[test]
+    fn background_invocation_reaches_handler() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::background_run(example_identity());
+        let args = fixture.build_argv(&[]);
+
+        let result = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    // Test 13: source-argument order and OS representation survive dispatch unchanged.
+    #[test]
+    fn source_argument_fidelity_is_preserved_across_dispatch() {
+        use std::sync::OnceLock;
+        static SEEN: OnceLock<Vec<OsString>> = OnceLock::new();
+        fn process(_ctx: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()> {
+            let _ = SEEN.set(args.to_vec());
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(example_identity());
+        let source_args = vec![
+            OsString::from("alpha"),
+            OsString::from("alpha"),
+            OsString::from(""),
+            OsString::from("--looks-like-a-flag"),
+        ];
+        let args = fixture.build_argv(&source_args);
+
+        let result = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(SEEN.get().unwrap(), &source_args);
+    }
+
+    // Test 14: a source-authored failure maps to `Handler(_)` with exactly one dispatch
+    // and the database rolled back rather than committed.
+    #[test]
+    fn source_authored_failure_returns_handler_error_without_reinvocation() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Err(ProcessingError::source_message("processing failed"))
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(example_identity());
+        let args = fixture.build_argv(&[]);
+
+        let err = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInvocationExecutionError::Handler(_)
+        ));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    // Test 15: a successful handler moves the session Prepared -> Running -> Succeeded.
+    #[test]
+    fn session_transitions_to_succeeded_after_successful_handler() {
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(example_identity());
+        let args = fixture.build_argv(&[]);
+
+        let result = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+        );
+        assert!(result.is_ok(), "{result:?}");
+
+        let record = fixture.store().load(fixture.session()).unwrap();
+        assert_eq!(record.state(), crate::session::SessionState::Succeeded);
+    }
+
+    // Test 16: a source-authored failure moves the session Prepared -> Running -> Failed.
+    #[test]
+    fn session_transitions_to_failed_after_source_authored_failure() {
+        fn process(_ctx: &mut ProcessingContext, _args: &[OsString]) -> ProcessingResult<()> {
+            Err(ProcessingError::source_message("processing failed"))
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(example_identity());
+        let args = fixture.build_argv(&[]);
+
+        let result = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process),
+        );
+        assert!(result.is_err());
+
+        let record = fixture.store().load(fixture.session()).unwrap();
+        assert_eq!(record.state(), crate::session::SessionState::Failed);
+    }
+
+    // Test 17: session/lease identities are validated before dispatch — an envelope
+    // session that was never prepared/leased in this fixture's store is rejected before
+    // the handler is ever invoked.
+    #[test]
+    fn session_identity_mismatch_is_rejected_before_handler_dispatch() {
+        fn process_must_not_be_called(
+            _ctx: &mut ProcessingContext,
+            _args: &[OsString],
+        ) -> ProcessingResult<()> {
+            panic!("process must not be called when the envelope session was never prepared");
+        }
+
+        // Establishes a real session-store/lease/env-context environment for a
+        // different session id than the one encoded below.
+        let _fixture = RuntimeInvocationFixture::foreground_run(example_identity());
+
+        let foreign_envelope = RuntimeInvocationEnvelopeV1::new(
+            ProjectInvocationIdentity::new("example-project").unwrap(),
+            example_identity(),
+            SessionInvocationIdentity::new("never-prepared-session").unwrap(),
+            RuntimeExecutionMode::Run,
+            RuntimeSupervisionMode::Foreground,
+        )
+        .unwrap();
+        let args = vec![
+            OsString::from("--lexicon-invocation-v1"),
+            OsString::from(foreign_envelope.to_json().unwrap()),
+            OsString::from("--"),
+        ];
+
+        let err = run_processing_runtime_invocation(
+            &args,
+            example_identity(),
+            &ProcessingSourceContractV1::new(process_must_not_be_called),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProcessingRuntimeInvocationExecutionError::Session(_)
+        ));
+    }
 }

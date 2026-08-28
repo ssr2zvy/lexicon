@@ -1652,8 +1652,7 @@ esac
     /// (the default container storage driver): the kernel can briefly still consider a
     /// freshly written-and-chmod'd file open for writing at the moment it is exec'd,
     /// even though the writer has already closed its file handle. It is unrelated to
-    /// probe logic; the test fixture always creates a fresh temp file per test. Treat
-    /// it as inconclusive (skip) rather than failing the test on it.
+    /// probe logic; the test fixture always creates a fresh temp file per test.
     fn is_probe_spawn_busy(error: &RuntimeProbeExecutionError) -> bool {
         matches!(
             error,
@@ -1662,22 +1661,34 @@ esac
         )
     }
 
+    /// Retries `probe` when it fails to spawn with `ExecutableFileBusy`, up to a small
+    /// fixed attempt bound. Any other outcome (success or a different error) is
+    /// returned immediately. Exhausting the retry budget returns the last
+    /// `ExecutableFileBusy` error unchanged; it is never converted into success, so an
+    /// environment that cannot execute the fixture still fails the test.
+    fn retry_on_spawn_busy<T>(
+        mut probe: impl FnMut() -> Result<T, RuntimeProbeExecutionError>,
+    ) -> Result<T, RuntimeProbeExecutionError> {
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match probe() {
+                Err(error) if attempt < MAX_ATTEMPTS && is_probe_spawn_busy(&error) => continue,
+                other => return other,
+            }
+        }
+    }
+
     #[test]
     fn probe_http_runtime_information_accepts_valid_probe_output() {
         let (_temp, script) = probe_fixture("valid");
-        let result = super::probe_http_runtime_information(
-            &script,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-        );
-        if let Err(error) = &result {
-            if is_probe_spawn_busy(error) {
-                eprintln!(
-                    "skipping probe_http_runtime_information_accepts_valid_probe_output: \
-                     ETXTBSY spawning the probe script (overlayfs exec race, not a logic failure): {error:?}"
-                );
-                return;
-            }
-        }
+        let result = retry_on_spawn_busy(|| {
+            super::probe_http_runtime_information(
+                &script,
+                RuntimeIdentity::http_acquisition("example-source", 1),
+            )
+        });
         assert!(result.is_ok(), "{:?}", result);
     }
 
@@ -1698,19 +1709,12 @@ esac
     #[test]
     fn probe_http_runtime_information_rejects_oversized_stdout() {
         let (_temp, script) = probe_fixture("oversized-stdout");
-        let result = super::probe_http_runtime_information(
-            &script,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-        );
-        if let Err(error) = &result {
-            if is_probe_spawn_busy(error) {
-                eprintln!(
-                    "skipping probe_http_runtime_information_rejects_oversized_stdout: \
-                     ETXTBSY spawning the probe script (overlayfs exec race, not a logic failure): {error:?}"
-                );
-                return;
-            }
-        }
+        let result = retry_on_spawn_busy(|| {
+            super::probe_http_runtime_information(
+                &script,
+                RuntimeIdentity::http_acquisition("example-source", 1),
+            )
+        });
         assert!(matches!(
             result,
             Err(RuntimeProbeExecutionError::StdoutTooLarge { .. })

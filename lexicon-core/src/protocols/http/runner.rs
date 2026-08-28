@@ -703,28 +703,34 @@ pub fn run_http_runtime_invocation(
 // A prior `execution_tests` module here (matching-acquire/resume dispatch, source-
 // argument fidelity, and success/handler-error assertions) predated
 // `run_http_runtime_invocation` growing full session-store/lease/env-context binding
-// (see the function's doc comment above: steps 3-8). None of those tests ever set up
-// a `SessionStore`, a `Prepared` session record, a held lease, or the
+// (see the function's doc comment above: steps 3-8). Those tests never set up a
+// `SessionStore`, a `Prepared` session record, a held lease, or the
 // `LEXICON_RUNTIME_CONTEXT_V1` env var, so every test that expected the handler to be
-// reached failed with `Session(ContextDecode(MissingEnvironmentVariable))`. Rather than
-// leave them disabled with `#[ignore]`, they were removed outright; restoring that
-// coverage requires a real session-store test fixture (`SessionStore` backed by a
-// temp dir, a `Prepared` record, a held lease, and the env var set for the test
-// thread), which is tracked as a dedicated follow-up milestone. The tests below are
+// reached failed with `Session(ContextDecode(MissingEnvironmentVariable))`, and were
+// removed rather than left disabled with `#[ignore]`. The tests immediately below are
 // the subset that never reached session-context decoding in the first place (pure
 // transport/admission rejection paths) and remain valid, unmodified coverage.
+//
+// Full handler-dispatch coverage is restored further down using
+// `crate::session::test_support::RuntimeInvocationFixture`, which builds the real
+// minimum session-store/lease/runtime-context environment the production path
+// requires (see `session::test_support` for the fixture's design).
 #[cfg(test)]
 mod execution_tests {
     use std::ffi::OsString;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::HttpAcquisitionContext;
     use crate::protocols::http::{
-        AcquisitionResult, HttpCapability, HttpCapabilitySet, HttpSourceContractV1,
+        AcquisitionError, AcquisitionResult, HttpCapability, HttpCapabilitySet,
+        HttpSourceContractV1,
     };
     use crate::runtime::{
         ProjectInvocationIdentity, RuntimeExecutionMode, RuntimeIdentity,
         RuntimeInvocationEnvelopeV1, RuntimeSupervisionMode, SessionInvocationIdentity,
     };
+    use crate::session::test_support::RuntimeInvocationFixture;
 
     use super::{HttpRuntimeInvocationExecutionError, run_http_runtime_invocation};
 
@@ -994,4 +1000,292 @@ mod execution_tests {
         );
     }
 
+    // --- Fixture-backed handler-dispatch coverage ---
+    //
+    // Each test below builds a real `SessionStore`-backed `Prepared` session, an owned
+    // lease, and a valid `LEXICON_RUNTIME_CONTEXT_V1` environment via
+    // `RuntimeInvocationFixture`, then drives `run_http_runtime_invocation` through the
+    // unmodified production path so the acquire/resume handler is genuinely reached.
+
+    // Test 11: a matching invocation reaches the acquire handler exactly once with a
+    // real, mutable `HttpAcquisitionContext`.
+    #[test]
+    fn matching_invocation_reaches_acquire_handler_exactly_once_with_real_context() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn acquire(
+            context: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            assert!(context.session_identity().is_some());
+            assert!(
+                context
+                    .protocol_root()
+                    .to_string_lossy()
+                    .contains("example-source")
+            );
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(RuntimeIdentity::http_acquisition(
+            "example-source",
+            1,
+        ));
+        let args = fixture.build_argv(&[]);
+
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    // Test 12: background supervision also reaches the handler.
+    #[test]
+    fn background_invocation_reaches_handler() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::background_run(RuntimeIdentity::http_acquisition(
+            "example-source",
+            1,
+        ));
+        let args = fixture.build_argv(&[]);
+
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    // Test 13: a resume-mode invocation reaches the resume handler, never acquire.
+    #[test]
+    fn resume_invocation_reaches_resume_handler_not_acquire() {
+        static ACQUIRE_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static RESUME_CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            ACQUIRE_CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn resume(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            RESUME_CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::new(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            RuntimeExecutionMode::Resume,
+            RuntimeSupervisionMode::Foreground,
+        );
+        let args = fixture.build_argv(&[]);
+
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire).with_resume(resume),
+            HttpCapabilitySet::empty(),
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(ACQUIRE_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(RESUME_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    // Test 14: source-argument fidelity — order, duplicates, empty values, a literal
+    // `--`, reserved-looking flags, and Unicode all survive dispatch unchanged.
+    #[test]
+    fn source_argument_fidelity_is_preserved_across_dispatch() {
+        static SEEN: OnceLock<Vec<OsString>> = OnceLock::new();
+        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
+            let _ = SEEN.set(args.to_vec());
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(RuntimeIdentity::http_acquisition(
+            "example-source",
+            1,
+        ));
+        let source_args = vec![
+            OsString::from("alpha"),
+            OsString::from("alpha"),
+            OsString::from(""),
+            OsString::from("--"),
+            OsString::from("--looks-like-a-flag"),
+            OsString::from("héllo-üñîçødé"),
+        ];
+        let args = fixture.build_argv(&source_args);
+
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(SEEN.get().unwrap(), &source_args);
+    }
+
+    // Test 15: non-UTF-8 Unix source arguments are preserved byte-for-byte.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_unix_source_argument_is_preserved_byte_for_byte() {
+        use std::os::unix::ffi::OsStringExt;
+
+        static SEEN: OnceLock<Vec<OsString>> = OnceLock::new();
+        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
+            let _ = SEEN.set(args.to_vec());
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(RuntimeIdentity::http_acquisition(
+            "example-source",
+            1,
+        ));
+        let source_args = vec![OsString::from_vec(vec![b'a', 0x80, b'z'])];
+        let args = fixture.build_argv(&source_args);
+
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(SEEN.get().unwrap(), &source_args);
+    }
+
+    // Test 16: a source-authored error maps to `Handler(_)` with exactly one dispatch.
+    #[test]
+    fn source_authored_error_returns_handler_error_without_reinvocation() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Err(AcquisitionError::source_message("network unreachable"))
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(RuntimeIdentity::http_acquisition(
+            "example-source",
+            1,
+        ));
+        let args = fixture.build_argv(&[]);
+
+        let err = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, HttpRuntimeInvocationExecutionError::Handler(_)));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    // Test 17: a successful handler moves the session Prepared -> Running -> Succeeded.
+    #[test]
+    fn session_transitions_to_succeeded_after_successful_handler() {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(RuntimeIdentity::http_acquisition(
+            "example-source",
+            1,
+        ));
+        let args = fixture.build_argv(&[]);
+
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+
+        let record = fixture.store().load(fixture.session()).unwrap();
+        assert_eq!(record.state(), crate::session::SessionState::Succeeded);
+    }
+
+    // Test 18: a source-authored failure moves the session Prepared -> Running -> Failed.
+    #[test]
+    fn session_transitions_to_failed_after_source_authored_error() {
+        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            Err(AcquisitionError::source_message("network unreachable"))
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(RuntimeIdentity::http_acquisition(
+            "example-source",
+            1,
+        ));
+        let args = fixture.build_argv(&[]);
+
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_err());
+
+        let record = fixture.store().load(fixture.session()).unwrap();
+        assert_eq!(record.state(), crate::session::SessionState::Failed);
+    }
+
+    // Test 19: an envelope session that was never prepared/leased in this fixture's
+    // store is rejected before the handler is ever dispatched (lease/invocation
+    // session identities must agree).
+    #[test]
+    fn session_identity_mismatch_is_rejected_before_handler_dispatch() {
+        fn acquire_must_not_be_called(
+            _ctx: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            panic!("acquire must not be called when the envelope session was never prepared");
+        }
+
+        // Establishes a real session-store/lease/env-context environment for a
+        // different session id than the one encoded below.
+        let _fixture = RuntimeInvocationFixture::foreground_run(RuntimeIdentity::http_acquisition(
+            "example-source",
+            1,
+        ));
+
+        let foreign_envelope = RuntimeInvocationEnvelopeV1::new(
+            ProjectInvocationIdentity::new("example-project").unwrap(),
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            SessionInvocationIdentity::new("never-prepared-session").unwrap(),
+            RuntimeExecutionMode::Run,
+            RuntimeSupervisionMode::Foreground,
+        )
+        .unwrap();
+        let args = vec![
+            OsString::from("--lexicon-invocation-v1"),
+            OsString::from(foreign_envelope.to_json().unwrap()),
+            OsString::from("--"),
+        ];
+
+        let err = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire_must_not_be_called),
+            HttpCapabilitySet::empty(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, HttpRuntimeInvocationExecutionError::Session(_)));
+    }
 }
