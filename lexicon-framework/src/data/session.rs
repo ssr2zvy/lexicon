@@ -82,11 +82,17 @@ pub fn build_coordinator(
 ///
 /// For acquisition: supports run, resume (if available), and abandon-then-run.
 /// For processing: supports run and abandon-then-run; resume is not supported.
+///
+/// `supervision` controls whether the freshly `Prepared` session records
+/// `Foreground` (used by `execute_foreground_data`) or `Background` (used by
+/// the initiating process of `execute_background_data`, which then hands the
+/// prepared session off to the operator host).
 pub fn select_and_prepare_session(
     coordinator: &SessionCoordinator,
     operation: DataOperation,
     abandon_past_failure: bool,
     admitted_bundle: &AdmittedBundle,
+    supervision: RuntimeSupervisionMode,
 ) -> Result<PreparedSessionLaunch, ForegroundDataExecutionError> {
     // Reconcile stale ownership first.
     coordinator
@@ -97,10 +103,10 @@ pub fn select_and_prepare_session(
 
     match operation {
         DataOperation::Acquisition => {
-            select_and_prepare_acquisition(coordinator, abandon_past_failure, admitted_bundle)
+            select_and_prepare_acquisition(coordinator, abandon_past_failure, admitted_bundle, supervision)
         }
         DataOperation::Processing => {
-            select_and_prepare_processing(coordinator, abandon_past_failure)
+            select_and_prepare_processing(coordinator, abandon_past_failure, supervision)
         }
     }
 }
@@ -109,6 +115,7 @@ fn select_and_prepare_acquisition(
     coordinator: &SessionCoordinator,
     abandon_past_failure: bool,
     admitted_bundle: &AdmittedBundle,
+    supervision: RuntimeSupervisionMode,
 ) -> Result<PreparedSessionLaunch, ForegroundDataExecutionError> {
     // Load current status after stale reconciliation.
     let current_status = coordinator_current_status(coordinator)?;
@@ -116,7 +123,7 @@ fn select_and_prepare_acquisition(
     match current_status {
         CurrentStatus::None | CurrentStatus::Succeeded | CurrentStatus::Abandoned => {
             coordinator
-                .prepare_run(RuntimeSupervisionMode::Foreground)
+                .prepare_run(supervision)
                 .map_err(ForegroundDataExecutionError::SessionPreparation)
         }
         CurrentStatus::Live => {
@@ -132,7 +139,7 @@ fn select_and_prepare_acquisition(
                     .map_err(ForegroundDataExecutionError::Abandonment)?;
 
                 coordinator
-                    .prepare_run(RuntimeSupervisionMode::Foreground)
+                    .prepare_run(supervision)
                     .map_err(ForegroundDataExecutionError::SessionPreparation)
             } else {
                 // No abandon flag: try to resume if the handler is registered.
@@ -145,7 +152,7 @@ fn select_and_prepare_acquisition(
 
                 if has_resume {
                     coordinator
-                        .prepare_resume(RuntimeSupervisionMode::Foreground)
+                        .prepare_resume(supervision)
                         .map_err(ForegroundDataExecutionError::SessionPreparation)
                 } else {
                     Err(ForegroundDataExecutionError::ResumeHandlerUnavailable)
@@ -158,13 +165,14 @@ fn select_and_prepare_acquisition(
 fn select_and_prepare_processing(
     coordinator: &SessionCoordinator,
     abandon_past_failure: bool,
+    supervision: RuntimeSupervisionMode,
 ) -> Result<PreparedSessionLaunch, ForegroundDataExecutionError> {
     let current_status = coordinator_current_status(coordinator)?;
 
     match current_status {
         CurrentStatus::None | CurrentStatus::Succeeded | CurrentStatus::Abandoned => {
             coordinator
-                .prepare_run(RuntimeSupervisionMode::Foreground)
+                .prepare_run(supervision)
                 .map_err(ForegroundDataExecutionError::SessionPreparation)
         }
         CurrentStatus::Live => {
@@ -178,7 +186,7 @@ fn select_and_prepare_processing(
                     .abandon_current_failure()
                     .map_err(ForegroundDataExecutionError::Abandonment)?;
                 coordinator
-                    .prepare_run(RuntimeSupervisionMode::Foreground)
+                    .prepare_run(supervision)
                     .map_err(ForegroundDataExecutionError::SessionPreparation)
             } else {
                 Err(ForegroundDataExecutionError::SessionSelection(

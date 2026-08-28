@@ -32,3 +32,18 @@ pub enum ObservedChildTermination {
     Signaled { signal: Option<i32> },
     UnknownAbnormalTermination,
 }
+
+/// Outcome of successfully handing a prepared session off to the background
+/// operator host.
+///
+/// This is returned once the operator-host process has acquired the session
+/// lease (durable ownership confirmed); it does not imply the operation
+/// itself has finished. The operator host continues running and supervising
+/// the runtime independently of the initiating process from this point on.
+#[derive(Debug)]
+pub struct BackgroundHandoffOutcome {
+    pub project: String,
+    pub source: String,
+    pub operation: DataOperation,
+    pub session: SessionIdentity,
+}

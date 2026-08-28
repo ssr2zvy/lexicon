@@ -3,11 +3,13 @@ use clap::{CommandFactory, Parser, Subcommand};
 pub mod build;
 pub mod data;
 pub mod init;
+pub mod operator_host;
 pub mod source;
 
 pub use build::BuildCommand;
 pub use data::{DataCommand, DataMode};
 pub use init::InitCommand;
+pub use operator_host::OperatorHostCommand;
 pub use source::{SourceAction, SourceCommand};
 
 #[derive(Parser, Debug, Clone)]
@@ -28,6 +30,10 @@ pub enum RootCommand {
     Source(SourceCommand),
     Init(InitCommand),
     Build(BuildCommand),
+    /// Reserved internal entrypoint; not part of the public CLI surface. Naming
+    /// and hiding come from `OperatorHostCommand`'s own `#[command(...)]`
+    /// attribute, matching the pattern used by the other variants above.
+    OperatorHost(OperatorHostCommand),
 }
 
 pub fn dispatch(cli: Cli) -> Result<(), String> {
@@ -44,24 +50,40 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                 DataMode::Get(source) => (lexicon_framework::data::DataOperation::Acquisition, source),
                 DataMode::Process(source) => (lexicon_framework::data::DataOperation::Processing, source),
             };
+            let background = command.bg;
             let request = lexicon_framework::data::ForegroundDataRequest {
                 operation,
                 source_name,
                 abandon_past_failure: command.abandon_past_fail,
-                background: command.bg,
+                background,
                 source_arguments: command.passthrough,
             };
-            match lexicon_framework::data::execute_foreground_data(request) {
-                Ok(outcome) => {
-                    println!(
-                        "[lexicon] {} complete: source='{}' session={}",
-                        outcome.operation.display_name(),
-                        outcome.source,
-                        outcome.session.id()
-                    );
-                    Ok(())
+            if background {
+                match lexicon_framework::data::execute_background_data(request) {
+                    Ok(outcome) => {
+                        println!(
+                            "[lexicon] {} handed off to background: source='{}' session={}",
+                            outcome.operation.display_name(),
+                            outcome.source,
+                            outcome.session.id()
+                        );
+                        Ok(())
+                    }
+                    Err(err) => Err(err.to_string()),
                 }
-                Err(err) => Err(err.to_string()),
+            } else {
+                match lexicon_framework::data::execute_foreground_data(request) {
+                    Ok(outcome) => {
+                        println!(
+                            "[lexicon] {} complete: source='{}' session={}",
+                            outcome.operation.display_name(),
+                            outcome.source,
+                            outcome.session.id()
+                        );
+                        Ok(())
+                    }
+                    Err(err) => Err(err.to_string()),
+                }
             }
         }
         Some(RootCommand::Source(command)) => match command.action {
@@ -110,6 +132,23 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
         Some(RootCommand::Build(_)) => {
             println!("Parsed build command: build");
             Ok(())
+        }
+        Some(RootCommand::OperatorHost(command)) => {
+            let reference =
+                lexicon_framework::supervision::OperatorHostInvocationV1::from_json(&command.reference)
+                    .map_err(|error| error.to_string())?;
+            match lexicon_framework::data::execute_operator_host(reference, command.passthrough) {
+                Ok(outcome) => {
+                    println!(
+                        "[lexicon] {} complete: source='{}' session={}",
+                        outcome.operation.display_name(),
+                        outcome.source,
+                        outcome.session.id()
+                    );
+                    Ok(())
+                }
+                Err(err) => Err(err.to_string()),
+            }
         }
     }
 }

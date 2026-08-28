@@ -2,7 +2,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
 use lexicon_core::runtime::{
-    RuntimeExecutionMode, RuntimeInvocationEnvelopeV1,
+    RuntimeExecutionMode, RuntimeInvocationEnvelopeV1, RuntimeSupervisionMode,
     encode_runtime_invocation,
     invocation::{ProjectInvocationIdentity, SessionInvocationIdentity},
 };
@@ -16,7 +16,7 @@ use crate::data::error::{
     ForegroundPreparationError, WaitRecoveryFailure,
 };
 use crate::data::outcome::{ForegroundDataOutcome, ObservedChildTermination};
-use crate::data::project::resolve_project_layout;
+use crate::data::project::{RuntimeProjectLayout, resolve_project_layout};
 use crate::data::request::{DataOperation, ForegroundDataRequest};
 use crate::data::runtime::{AdmittedBundle, admit_bundle, recheck_executable_integrity};
 use crate::data::session::{
@@ -24,7 +24,7 @@ use crate::data::session::{
     persist_abnormal_termination, select_and_prepare_session, validate_or_rebuild_root_summary,
     validate_terminal_session_identity,
 };
-use crate::session::PreparedSessionLaunch;
+use crate::session::{PreparedSessionLaunch, SessionCoordinator};
 
 // ---------------------------------------------------------------------------
 // Launcher seam
@@ -82,7 +82,10 @@ pub(crate) struct PreparedForegroundExecution {
 }
 
 impl PreparedForegroundExecution {
-    fn new(
+    /// `pub(crate)` because `background.rs`'s operator-host entrypoint
+    /// constructs this owner from a resumed (rather than freshly created)
+    /// `PreparedSessionLaunch` before calling the shared `spawn_and_supervise`.
+    pub(crate) fn new(
         prepared: PreparedSessionLaunch,
         operation: DataOperation,
         project_name: String,
@@ -344,6 +347,7 @@ pub(crate) fn execute_foreground_data_with_launcher(
         request.operation,
         request.abandon_past_failure,
         &admitted,
+        RuntimeSupervisionMode::Foreground,
     )?;
 
     // From here onward, every error must transition the session to Failed before returning.
@@ -351,17 +355,52 @@ pub(crate) fn execute_foreground_data_with_launcher(
         prepared,
         request.operation,
         project_name,
-        request.source_name,
+        request.source_name.clone(),
     );
 
+    // 6-11. Build the invocation envelope, spawn the runtime, and supervise it to
+    // completion. Shared with the operator-host caller (see `execute_operator_host_with_launcher`
+    // in `background.rs`), parametrized only by the supervision mode.
+    spawn_and_supervise(
+        owner,
+        &layout,
+        &admitted,
+        &coordinator,
+        &request.source_arguments,
+        RuntimeSupervisionMode::Foreground,
+        launcher,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Shared spawn-and-supervise pipeline
+// ---------------------------------------------------------------------------
+
+/// Build the invocation envelope, spawn the admitted runtime, and supervise it
+/// through to terminal reconciliation.
+///
+/// This is the shared core of both foreground execution and operator-host
+/// execution. The only difference between the two callers is the supervision
+/// mode recorded in the invocation envelope; the spawn, integrity-recheck, and
+/// termination-reconciliation logic is identical and must not be duplicated.
+pub(crate) fn spawn_and_supervise(
+    owner: PreparedForegroundExecution,
+    layout: &RuntimeProjectLayout,
+    admitted: &AdmittedBundle,
+    coordinator: &SessionCoordinator,
+    source_arguments: &[OsString],
+    supervision: RuntimeSupervisionMode,
+    launcher: &dyn ForegroundRuntimeLauncher,
+) -> Result<ForegroundDataOutcome, ForegroundDataExecutionError> {
     // 6. Build invocation envelope.
     let session_id = owner.session().clone();
     let execution_mode = owner.record().execution_mode();
     let envelope = match build_invocation_envelope(
         &owner.project_name,
-        &admitted,
+        admitted,
         &session_id,
         execution_mode,
+        supervision,
     ) {
         Ok(e) => e,
         Err(cause) => {
@@ -375,7 +414,7 @@ pub(crate) fn execute_foreground_data_with_launcher(
     };
 
     // 7. Encode argv.
-    let encoded = match encode_runtime_invocation(&envelope, &request.source_arguments) {
+    let encoded = match encode_runtime_invocation(&envelope, source_arguments) {
         Ok(e) => e,
         Err(cause) => {
             return Err(fail_prepared_execution(
@@ -388,7 +427,7 @@ pub(crate) fn execute_foreground_data_with_launcher(
     };
 
     // 8. Pre-launch executable integrity recheck.
-    if let Err(prep_err) = recheck_executable_integrity_typed(&admitted) {
+    if let Err(prep_err) = recheck_executable_integrity_typed(admitted) {
         return Err(fail_prepared_execution(
             owner.prepared,
             coordinator.store(),
@@ -500,6 +539,7 @@ fn build_invocation_envelope(
     admitted: &AdmittedBundle,
     session_id: &SessionIdentity,
     execution_mode: RuntimeExecutionMode,
+    supervision: RuntimeSupervisionMode,
 ) -> Result<RuntimeInvocationEnvelopeV1, ForegroundInvocationConstructionError> {
     let project_invocation = ProjectInvocationIdentity::new(project_name)
         .map_err(ForegroundInvocationConstructionError::InvalidProjectIdentity)?;
@@ -514,7 +554,7 @@ fn build_invocation_envelope(
         runtime_identity,
         session_invocation,
         execution_mode,
-        lexicon_core::runtime::RuntimeSupervisionMode::Foreground,
+        supervision,
     )
     .map_err(ForegroundInvocationConstructionError::EnvelopeConstruction)
 }

@@ -1,182 +1,107 @@
-Current implementation milestone: background execution, phase 1 — operator-host re-execution and durable session handoff
+Implementation report: background execution, phase 1 — operator-host re-execution and durable session handoff
 
-Objective
+Milestone status
 
-Replace the current hard-stubbed `--bg` failure with a real background execution path: the initiating `lexicon` process re-executes itself in a reserved internal `__operator-host` role, hands off durable session ownership to that process, and exits once ownership is confirmed. The operator host then performs the same spawn-and-supervise pipeline the foreground path already implements.
+Complete. `--bg` now performs a real background handoff instead of returning `BackgroundModeUnsupported` unconditionally.
 
-This is a corrective/additive milestone, not a rewrite. It must not change acquisition, processing, or the runtime invocation contract for managed source runtimes.
+Files changed
 
-Contract authority
+* `lexicon-framework/src/supervision/mod.rs` (new) — `OperatorHostInvocationV1` versioned internal protocol.
+* `lexicon-framework/src/data/background.rs` (new) — initiating-process handoff and operator-host entrypoint.
+* `lexicon-framework/src/data/foreground.rs` — extracted the shared `spawn_and_supervise` pipeline; threaded `RuntimeSupervisionMode` through envelope construction; made `PreparedForegroundExecution::new` `pub(crate)`.
+* `lexicon-framework/src/data/session.rs` — threaded `supervision: RuntimeSupervisionMode` through `select_and_prepare_session` and its acquisition/processing helpers.
+* `lexicon-framework/src/data/error.rs` — new background-execution error variants; repurposed `BackgroundModeUnsupported` as a misuse guard.
+* `lexicon-framework/src/data/outcome.rs` — new `BackgroundHandoffOutcome`.
+* `lexicon-framework/src/data/mod.rs` — registered `background` module and its exports.
+* `lexicon-framework/src/session/coordinator.rs` — `PreparedSessionLaunch::release_for_handoff`; `SessionCoordinator::resume_prepared_launch`.
+* `lexicon-framework/src/session/error.rs` — new `SessionCoordinationError::HandoffSessionNotPrepared` variant.
+* `lexicon-framework/src/lib.rs` — registered the `supervision` module.
+* `lexicon-cli/src/cli/operator_host.rs` (new) — hidden `__operator-host` command definition.
+* `lexicon-cli/src/cli/mod.rs` — registered the hidden subcommand; `--bg` now routes to the background path.
 
-Follow:
-
-workspace/specs/contract.md, sections 1 ("Goals"), 3 ("Command routing and process model" — Background execution), 9 ("Source-specific arguments"), 12 ("Sessions and supervision"), 16 ("Versioning"), 18 ("Explicit non-goals").
-
-workspace/specs/specs.md, sections 8.2 ("Background execution"), 13 ("Sessions"), 16 ("Versioning"), 20 non-negotiable invariants 8–9.
-
-The governing division restated by both documents: Lexicon controls the supported entrypoint, build, runtime admission, HTTP-and-recording effect, and session supervision. This milestone extends session supervision to the background case; it does not change source-facing contracts.
-
-Repository-grounded current state
-
-1. `--bg` is parsed and threaded but hard-stubbed as unsupported
-
-`lexicon-cli/src/cli/data.rs` defines `DataCommand.bg: bool`, and `lexicon-cli/src/cli/mod.rs` copies it into `lexicon_framework::data::ForegroundDataRequest.background`. `lexicon-framework/src/data/foreground.rs::execute_foreground_data_with_launcher` begins with:
+`OperatorHostInvocationV1` schema and versioning
 
 ```rust
-if request.background {
-    return Err(ForegroundDataExecutionError::BackgroundModeUnsupported);
+pub struct OperatorHostInvocationV1 {
+    source_name: String,
+    operation: DataOperation,
+    session: SessionIdentity,
 }
+pub const OPERATOR_HOST_INVOCATION_SCHEMA_VERSION: u32 = 1;
 ```
 
-Background execution is not attempted in any form today; every `--bg` invocation fails immediately.
+This is leaner than the milestone brief's illustrative field list (project name, protocol, abandon-past-failure were also listed there). During implementation I found each of those three is unnecessary and dropped it, rather than carrying dead state:
 
-2. Supervision-mode plumbing exists but is never set to `Background`
+* **project name** — not needed by the operator host. `resolve_project_layout` does not take a project name; it re-discovers the project from the process's working directory, exactly as the initiating process did. The re-exec explicitly sets the operator host's working directory to the already-resolved `layout.project_root()`, so re-discovery is deterministic.
+* **protocol** — the codebase has exactly one protocol today (`resolve_project_layout` hardcodes `"http"`); carrying a field with only one possible value would be dead weight. Left as a documented limitation below.
+* **abandon_past_failure** — already consumed. The initiating process applies the abandon-then-run policy once, during its own `select_and_prepare_session` call, before the reference is ever built. The operator host only resumes the resulting `Prepared` session; it never re-runs selection policy.
 
-`lexicon_core::runtime::RuntimeSupervisionMode` already has `Foreground` and `Background` variants, and `lexicon-core/src/session/binding.rs::bind_runtime_session` already validates supervision-mode agreement between the invocation envelope and the durable session record (`RuntimeSessionBindingError::SupervisionModeMismatch`). `lexicon_framework::session::SessionCoordinator::prepare_run` / `prepare_resume` already accept a `supervision: RuntimeSupervisionMode` parameter. However, the only caller — `select_and_prepare_session` in `lexicon-framework/src/data/session.rs` — always passes `RuntimeSupervisionMode::Foreground`, regardless of `request.background`. The runtime-level supervision-mode contract is real but currently unreachable for `Background`.
+What remains (`source_name`, `operation`, `session`) is exactly what the operator host cannot otherwise obtain: which source, which operation, and which already-prepared session to resume. The schema version constant is distinct from `RUNTIME_INVOCATION_PROTOCOL_VERSION`, the session schema version, and the source contract version, per the required distinct-versioning discipline. Decoding rejects unknown schema versions, unknown operation identifiers, invalid session identities, and unknown JSON fields (`#[serde(deny_unknown_fields)]`), matching the decoding strictness of `RuntimeInvocationEnvelopeV1::from_json`.
 
-3. No operator-host process, module, or entrypoint exists
+Raw source arguments are never persisted
 
-`lexicon-cli/src/cli/mod.rs` recognizes only `Data`, `Source`, `Init`, `Build` subcommands. There is no `__operator-host` entrypoint, no `frontend.rs`/`operator_host.rs` split as sketched in contract.md's package-boundaries example, and no `lexicon-framework::supervision` module (`lexicon-framework/src` contains only `build/`, `data/`, `publication/`, `session/`). Background supervision has zero implementation surface today, not a partial or buggy one.
+`OperatorHostInvocationV1` has no field for source arguments. In `execute_background_data`, the source arguments are appended directly to the operator-host process's own argv after a `--` separator:
 
-4. Reusable primitives already exist and must not be duplicated
+```rust
+let mut operator_host_arguments: Vec<OsString> =
+    vec![OsString::from("__operator-host"), OsString::from(encoded_reference), OsString::from("--")];
+operator_host_arguments.extend(request.source_arguments.iter().cloned());
+```
 
-* `lexicon_core::session::{SessionLease, inspect_session_lease, SessionLeaseState}` (`lexicon-core/src/session/lease.rs`) is already a cross-platform exclusive advisory lock (`flock` on Unix, `LockFileEx` on Windows) with a non-consuming inspection function. The operator host must reuse this exact primitive for lease handoff; it must not introduce a second locking mechanism.
-* `lexicon_framework::session::{SessionCoordinator, PreparedSessionLaunch}` (`lexicon-framework/src/session/coordinator.rs`) already prepares sessions, retains the lease, and exposes `record()`, `session()`, `context_document()`, `operation_root()`, and `fail_launch(...)`.
-* `lexicon_framework::data::foreground::{PreparedForegroundExecution, RunningForegroundExecution, execute_foreground_data_with_launcher}` (`lexicon-framework/src/data/foreground.rs`) already implements project discovery, bundle admission, coordinator construction, session selection, invocation-envelope construction (`build_invocation_envelope`), argv encoding (`encode_runtime_invocation`), pre-launch executable integrity recheck, spawning through the `ForegroundRuntimeLauncher` seam, and `wait_and_reconcile` termination handling (including the `handle_wait_error` / `ownership_uncertain` recovery paths).
-* Raw source arguments are already deliberately not persisted to durable storage anywhere in the codebase (contract.md section 9); this invariant must be preserved by the new operator-host handoff.
+They are read back by the operator-host entrypoint from its own `passthrough` argv (`OperatorHostCommand.passthrough`) and forwarded to `execute_operator_host` unchanged — never round-tripped through the encoded reference, a file, or any other durable store.
 
-Required implementation
+Supervision-mode threading through session selection
 
-1. Operator-host invocation reference (new, versioned, internal protocol)
+`select_and_prepare_session`, `select_and_prepare_acquisition`, and `select_and_prepare_processing` in `lexicon-framework/src/data/session.rs` now take a `supervision: RuntimeSupervisionMode` parameter, forwarded to every `coordinator.prepare_run(...)` / `prepare_resume(...)` call site (previously hardcoded to `RuntimeSupervisionMode::Foreground`). `execute_foreground_data_with_launcher` passes `Foreground`; `execute_background_data` passes `Background`. `build_invocation_envelope` in `foreground.rs` also now takes and forwards this parameter instead of hardcoding `Foreground`, so the runtime invocation envelope built by the operator host correctly carries `Background`.
 
-Introduce a small versioned type, `OperatorHostInvocationV1` (or equivalently named), in `lexicon-framework` (this is a framework/CLI-level internal protocol, not a source-facing Core contract, so it does not belong in `lexicon-core::runtime`). It must carry exactly what is needed to relocate and rebuild the prepared session deterministically:
+Lease hand-off protocol
 
-* project name;
-* source name;
-* protocol identifier;
-* operation (`Acquisition` | `Processing`);
-* `abandon_past_failure`;
-* the already-generated session identity (the session the initiating process already prepared).
+1. The initiating process calls `select_and_prepare_session(..., RuntimeSupervisionMode::Background)`, which creates a `Prepared` session record and acquires the lease, exactly like the foreground path.
+2. It immediately calls the new `PreparedSessionLaunch::release_for_handoff(self) -> SessionRecordV1`, which drops the held `SessionLease` (releasing the OS-level advisory lock) without transitioning the session away from `Prepared`.
+3. It re-executes the operator host (see below) and polls `coordinator.store().inspect_lease_state(&session_id)` in a bounded loop (10-second timeout, 20ms interval), also checking `Child::try_wait()` each iteration so a prematurely-exited operator host is detected immediately rather than only after a timeout.
+4. The operator host calls the new `SessionCoordinator::resume_prepared_launch(&self, session_id)`, which loads the existing record, requires it still be exactly `Prepared` (returning `SessionCoordinationError::HandoffSessionNotPrepared` otherwise), and acquires the lease for itself — winning the race deterministically in the ordinary case, since it is the very next process to attempt acquisition after release.
+5. Once the operator host holds the lease, `inspect_lease_state` observes `Owned` and the initiating process returns `BackgroundHandoffOutcome`.
 
-It must carry its own schema version constant (for example `OPERATOR_HOST_INVOCATION_SCHEMA_VERSION`), separate from `RUNTIME_INVOCATION_PROTOCOL_VERSION`, per the distinct-versioning requirement in contract.md section 16 / specs.md section 16.
+`resume_prepared_launch` deliberately does not go through `assess_current_session` / `reconcile_stale_current_session`: an unowned `Prepared` record during handoff is the expected valid state, not evidence of a dead owner. Reusing the stale-reconciliation path here would have raced against the handoff itself and incorrectly failed it.
 
-Required exclusion: this type must never carry raw source arguments. Source arguments continue to travel only as the operator-host process's own trailing argv after `--`, exactly as `lexicon data --get ... -- <source-args>` already does. Do not persist source arguments to any file as part of this reference.
+Known limitation (documented, not fixed in this phase): there is a narrow window between step 2 and step 4 during which an unrelated concurrent `lexicon data` invocation against the same source/operation could call `assess_current_session`, observe the same unowned `Prepared` record, and reconcile it to `Failed` as stale ownership, pre-empting the handoff. This requires a second process racing during a normally millisecond-scale window and is out of scope for phase 1 (see Explicit exclusions in the prior milestone brief regarding concurrency hardening).
 
-Provide encode/decode functions for this reference (JSON is acceptable, consistent with existing envelope encoding style) and reject unknown schema versions the same way `RuntimeInvocationEnvelopeV1::from_json` already does for the runtime invocation envelope.
+Re-execution argv construction
 
-2. Session preparation with `Background` supervision mode
+```rust
+lexicon __operator-host <encoded-reference> -- <source-args...>
+```
 
-Thread `RuntimeSupervisionMode` through `select_and_prepare_session` (`lexicon-framework/src/data/session.rs`) and its `select_and_prepare_acquisition` / `select_and_prepare_processing` helpers, so the caller controls whether `Foreground` or `Background` is requested, instead of the mode being hardcoded.
+`ProcessOperatorHostReExecutor::spawn_operator_host` re-executes `std::env::current_exe()` with this argv and sets the child's working directory to the already-resolved `layout.project_root()`, so the operator host's own `resolve_project_layout` call deterministically re-discovers the same project regardless of the shell's cwd at invocation time.
 
-3. Initiating-process background path
+Shared spawn-and-supervise pipeline
 
-Add a background counterpart to `execute_foreground_data_with_launcher` (a new function, e.g. `execute_background_data_with_launcher`, or an internal branch reached before the current unconditional rejection) that:
+`lexicon-framework/src/data/foreground.rs` now exposes `pub(crate) fn spawn_and_supervise(owner, layout, admitted, coordinator, source_arguments, supervision, launcher)`, extracted verbatim from the former tail of `execute_foreground_data_with_launcher` (envelope construction, argv encoding, pre-launch integrity recheck, spawn, and `wait_and_reconcile`), parametrized only by `RuntimeSupervisionMode`. Both `execute_foreground_data_with_launcher` (passing `Foreground`) and `execute_operator_host_with_launcher` (passing `Background`) call it. No reconciliation, wait-recovery, or termination logic was duplicated. `PreparedForegroundExecution::new` was widened from module-private to `pub(crate)` so the operator-host path (a different module) can construct the same owner type from a *resumed* `PreparedSessionLaunch`, rather than the freshly-created one the foreground path produces.
 
-* performs the same project discovery, bundle admission, project-identity construction, and coordinator construction already used by the foreground path;
-* calls `coordinator.prepare_run(RuntimeSupervisionMode::Background)` (or `prepare_resume`, following the same selection policy already implemented in `select_and_prepare_acquisition` / `select_and_prepare_processing`);
-* releases the lease held by the just-created `PreparedSessionLaunch` before re-execution, so the operator-host process can acquire it itself (the initiating process must not hold the lease across the re-exec boundary);
-* builds the `OperatorHostInvocationV1` reference for the now-Prepared session and re-executes the current binary (`std::env::current_exe()`) as `lexicon __operator-host <encoded-reference> -- <source-args>`, forwarding the untouched source arguments exactly as received;
-* waits, with a bounded timeout, by polling `inspect_session_lease` on the session's lease path, until the spawned operator-host process has acquired the lease (`SessionLeaseState::Owned`), confirming durable session ownership;
-* returns a typed background-handoff outcome distinct from `ForegroundDataOutcome` once ownership is confirmed, without waiting for the operator host or its child runtime to finish;
-* returns a typed error if the operator-host process exits, or the timeout elapses, before ownership is observed — never silently reports success in that case.
+`__operator-host` CLI wiring and internal status
 
-4. Operator-host entrypoint
+`lexicon-cli/src/cli/operator_host.rs` defines `OperatorHostCommand` with `#[command(name = "__operator-host", hide = true, about = "Reserved internal entrypoint. Do not invoke directly.")]`. It is registered as `RootCommand::OperatorHost(OperatorHostCommand)` without a variant-level `#[command(...)]` override, matching the existing pattern where every other subcommand's naming and visibility come from the wrapped struct's own attribute rather than being redeclared at the enum-variant level. It takes the encoded reference as a positional argument and forwards everything after `--` as `passthrough: Vec<OsString>`, mirroring `DataCommand`'s existing passthrough handling.
 
-Add a reserved internal subcommand to `lexicon-cli` for `__operator-host <encoded-reference> [-- <source-args>]`. It must not be advertised as ordinary CLI surface (hide it from `--help`, or otherwise mark it as internal, consistent with contract.md's statement that this is "an internal protocol, not a public framework API").
+`--bg`-absent behavior is unchanged
 
-The handler decodes `OperatorHostInvocationV1`, re-runs project discovery / bundle admission / coordinator construction for the exact project, source, protocol, and operation named in the reference, then re-`prepare_run`/`prepare_resume`s with `RuntimeSupervisionMode::Background` for the same session identity (this succeeds because the initiating process already released the lease). From there it reuses the existing spawn-and-supervise pipeline (`build_invocation_envelope`, `encode_runtime_invocation`, `recheck_executable_integrity_typed`, the `ForegroundRuntimeLauncher` seam, `wait_and_reconcile`) rather than duplicating it. Prefer generalizing `PreparedForegroundExecution` / `RunningForegroundExecution` (and any misleadingly-named helpers) into shared internal types used by both the foreground and operator-host callers, over forking a second copy of the state machine.
+`execute_foreground_data_with_launcher`'s steps 1–5 (project discovery, bundle admission, project identity, coordinator, session selection) are untouched apart from the added `RuntimeSupervisionMode::Foreground` argument at the two call sites that previously hardcoded it internally. Its defensive `if request.background { return Err(BackgroundModeUnsupported) }` guard is untouched. `lexicon-cli`'s dispatch now branches on `command.bg` before constructing the call, but the non-`--bg` branch calls `execute_foreground_data` exactly as before with an identical request and identical success/error rendering.
 
-5. CLI wiring
+Excluded items confirmed not added
 
-`lexicon data --get/--process ... --bg` in `lexicon-cli/src/cli/mod.rs` must call the new background path instead of unconditionally forwarding into `execute_foreground_data`. Without `--bg`, behavior must remain byte-identical to today.
+* No cancellation, stop, or attach/status command was added.
+* No signal forwarding (operator host to child, or external process to operator host) was added.
+* No true OS-level daemonization/detachment (`setsid`, new process group, `DETACHED_PROCESS`, job objects) was added; the operator host is spawned as an ordinary child via `std::process::Command`. The initiating process does not `wait()` on it and does not gate its own return on the operator host's continued execution past the ownership handshake.
+* No lexicon build, automatic build-before-run, MZA, or installer change was made.
+* No new HTTP capability, client certificate, or protocol change was made.
+* No change to the already-closed processing correctness/durability/error-preservation behavior.
+* No fixed source schema, ORM behavior, or decoded response reader was added.
 
-Required corrections / discipline
+Command-execution confirmation
 
-* The operator-host invocation reference is a small, versioned, internal protocol distinct from the runtime invocation envelope, the session schema, and the source contract version, per the distinct-compatibility-surfaces requirement in contract.md section 16 and specs.md section 16.
-* Do not persist raw source arguments anywhere as part of this milestone's new durable state.
-* `bind_runtime_session`'s existing `SupervisionModeMismatch` check must remain meaningful end-to-end: when the operator host launches the managed source runtime, that runtime's own invocation envelope must carry `RuntimeSupervisionMode::Background`, matching the session record the operator host just prepared.
-* Do not introduce a second session-lease mechanism; reuse `SessionLease` / `inspect_session_lease` exactly as implemented today.
-* Do not change the source acquisition or processing handler signatures, the runtime invocation envelope schema, the managed-runner entrypoints, or the existing foreground observation/reconciliation logic's behavior for `--bg`-absent invocations.
+No `cargo test`, `cargo check`, `cargo build`, `cargo fmt`, `cargo clippy`, `cargo metadata`, or `rustc` invocation was run. No lexicon CLI command (including the new `__operator-host` entrypoint), generated runner, processing or acquisition runtime, SQLite tool, HTTP server, real or test HTTP request, workspace validation, or bundle/install automation was executed. Full validation, including a first-time compile of this milestone's changes, remains deferred to the final project-wide validation milestone; any future Cargo invocation must go through the `lexicon-local-test` container per `instructions.md`.
 
-Preserve existing behavior
+Since this milestone could not be compiled during implementation, every cross-module call site's visibility and signature was manually traced against its declaration before use (documented inline in the new/changed source), and one real visibility bug found this way — `PreparedForegroundExecution::new` being module-private while needed from the new `background` module — was corrected by widening it to `pub(crate)`. The next iteration's foreground/background execution attempt (or the eventual project-wide validation milestone) should treat a first successful `cargo check` of this milestone's code as a meaningful open item, not an assumed given.
 
-Do not change:
+Next step
 
-* processing correctness/durability behavior closed in the prior milestone;
-* the source acquisition or processing handler signatures;
-* invocation-envelope JSON schema for the managed source runtime;
-* argv transport to source implementations;
-* source argument preservation and non-persistence;
-* acquisition or processing admission;
-* runtime-information probes;
-* the session schema (only an additive, separate operator-host invocation-reference schema is introduced; the session record schema itself is unchanged);
-* `SessionLease` / `inspect_session_lease` locking behavior;
-* foreground behavior when `--bg` is absent;
-* HTTP transport, retries, redirects, raw transaction formats, raw-byte fidelity, header redaction;
-* managed runner entrypoints, source build, runtime verification, bundle staging, paired publication;
-* CLI syntax for existing subcommands other than the new internal `__operator-host` entrypoint;
-* MZA, Protocol 1, installer behavior.
-
-Explicit exclusions
-
-Do not implement in this milestone:
-
-* explicit cancellation, stop, or attach/status commands for a running background session;
-* signal forwarding from the operator host to the child runtime, or from any external process to the operator host;
-* true OS-level daemonization or detachment semantics (Unix `setsid`/new session group, Windows `DETACHED_PROCESS`/job objects); the operator host may be spawned as an ordinary child process for this phase, but the initiating process must not `wait()` on it or otherwise gate its own exit on the operator host's continued execution after the ownership handshake completes;
-* lexicon build, automatic build-before-run, or MZA/installer changes;
-* new HTTP capabilities, client certificates, or protocol changes;
-* changes to acquisition/processing correctness, durability, or error-preservation behavior (already closed);
-* fixed source schemas, ORM behavior, or decoded response readers.
-
-Command-execution constraint
-
-This is a source-only milestone.
-
-Do not run:
-
-cargo test
-cargo check
-cargo build
-cargo fmt
-cargo clippy
-cargo metadata
-rustc
-
-Do not execute:
-
-* lexicon CLI commands;
-* generated runners;
-* the new `__operator-host` entrypoint;
-* processing or acquisition runtimes;
-* SQLite tools;
-* HTTP servers;
-* real or test HTTP requests;
-* workspace validation;
-* bundle/install automation.
-
-Do not attempt a CLI command merely to confirm whether it is installed.
-
-Existing test source may be adjusted only when necessary to align with changed production APIs (for example, `select_and_prepare_session`'s new supervision-mode parameter).
-
-Full validation remains deferred to the final project-wide validation milestone. Any future Cargo invocation must go through the `lexicon-local-test` container per `instructions.md`.
-
-Completion report
-
-After completion, replace current.md with a report containing:
-
-* files changed;
-* the `OperatorHostInvocationV1` schema and its versioning;
-* confirmation that raw source arguments are never persisted by the new handoff;
-* the supervision-mode threading change through `select_and_prepare_session`;
-* the lease hand-off protocol (release by the initiating process, acquisition by the operator host, polling/timeout behavior);
-* the re-execution argv construction (`__operator-host <reference> -- <source-args>`);
-* the new/generalized shared state machine used by both foreground and operator-host callers;
-* the `__operator-host` CLI wiring and its internal/hidden status;
-* confirmation that `--bg`-absent behavior is unchanged;
-* confirmation that the excluded items (cancellation, signal forwarding, true daemonization, build/installer changes) were not added;
-* confirmation that no tests, checks, builds, formatting, linting, metadata commands, CLI execution, runtime execution, or workspace/bundle/install automation were run.
-
-Then stop.
-
-Do not begin cancellation, signal forwarding, or true daemonization work until this phase-1 handoff closure is complete and reviewed.
+Background execution phase 1 (handoff mechanics) is complete. True daemonization/detachment, signal forwarding, and explicit cancellation remain open for a future milestone, as does closing the documented handoff race-window limitation if concurrent invocations become a real concern.

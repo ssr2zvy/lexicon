@@ -1,7 +1,7 @@
 use std::fmt;
 
 use lexicon_core::session::{
-    RuntimeContextError, SessionLeaseError, SessionStoreError,
+    RuntimeContextError, SessionLeaseError, SessionState, SessionStoreError,
 };
 
 /// Errors arising from session coordination operations.
@@ -25,6 +25,10 @@ pub enum SessionCoordinationError {
     ContextEncoding(RuntimeContextError),
     /// Session operation root could not be derived from the given paths.
     InvalidOperationRoot(RuntimeContextError),
+    /// Background-execution handoff: the referenced session is no longer
+    /// `Prepared` (some other process already advanced or terminated it), so
+    /// `resume_prepared_launch` refuses to take ownership of it.
+    HandoffSessionNotPrepared { actual_state: SessionState },
 }
 
 impl fmt::Display for SessionCoordinationError {
@@ -53,6 +57,10 @@ impl fmt::Display for SessionCoordinationError {
             Self::InvalidOperationRoot(err) => {
                 write!(f, "invalid session operation root: {err}")
             }
+            Self::HandoffSessionNotPrepared { actual_state } => write!(
+                f,
+                "background handoff session is no longer Prepared (found {actual_state:?}); it may have already been claimed or terminated"
+            ),
         }
     }
 }
@@ -66,7 +74,8 @@ impl std::error::Error for SessionCoordinationError {
             | Self::UnresolvedFailure
             | Self::ResumeUnavailable
             | Self::ResumeNotSupportedForOperation
-            | Self::AbandonmentUnavailable { .. } => None,
+            | Self::AbandonmentUnavailable { .. }
+            | Self::HandoffSessionNotPrepared { .. } => None,
             Self::ContextEncoding(err) => Some(err),
             Self::InvalidOperationRoot(err) => Some(err),
         }
