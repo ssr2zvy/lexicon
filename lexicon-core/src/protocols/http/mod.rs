@@ -1,4 +1,5 @@
 pub mod capability;
+pub mod checkpoint;
 pub mod context;
 pub mod contract;
 pub mod error;
@@ -18,6 +19,12 @@ pub use crate::runtime::{
     RuntimeInformationV1, RuntimeOperation, RuntimeProtocol,
 };
 pub use capability::{HttpCapability, HttpCapabilitySet};
+pub use checkpoint::{
+    CommittedHttpCheckpoint, HTTP_CHECKPOINT_SCHEMA_VERSION, MAX_HTTP_CHECKPOINT_DOCUMENT_BYTES,
+    HttpCheckpointAdmissionError, HttpCheckpointCommitError, HttpCheckpointDecodingError,
+    HttpCheckpointEncodingError, HttpCheckpointKeyError, HttpCheckpointLookupError,
+    HttpCheckpointPartialCommitError, admit_http_checkpoint_from_disk,
+};
 pub use contract::{HttpAcquireFn, HttpResumeFn, HttpSourceContractV1};
 pub use error::{
     AcquisitionError, AcquisitionResult, HttpExecutionError, HttpRedirectFailure,
