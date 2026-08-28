@@ -231,4 +231,34 @@ mod tests {
         let decoded = OperatorHostInvocationV1::from_json(&json).unwrap();
         assert_eq!(decoded.operation(), DataOperation::Processing);
     }
+
+    #[test]
+    fn rejects_unknown_field() {
+        let json = r#"{"schema_version":1,"source_name":"s","operation":"acquisition","session_id":"abc","unexpected":true}"#;
+        let result = OperatorHostInvocationV1::from_json(json);
+        assert!(matches!(
+            result,
+            Err(OperatorHostInvocationDecodingError::StructuralDocument(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_syntactically_invalid_json() {
+        let json = "{not valid json";
+        let result = OperatorHostInvocationV1::from_json(json);
+        assert!(matches!(
+            result,
+            Err(OperatorHostInvocationDecodingError::JsonSyntax(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_session_identity() {
+        let json = r#"{"schema_version":1,"source_name":"s","operation":"acquisition","session_id":""}"#;
+        let result = OperatorHostInvocationV1::from_json(json);
+        assert!(matches!(
+            result,
+            Err(OperatorHostInvocationDecodingError::InvalidSessionIdentity(_))
+        ));
+    }
 }

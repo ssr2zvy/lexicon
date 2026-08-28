@@ -471,3 +471,107 @@ pub fn reconcile_terminal_session(
         .map_err(ForegroundDataExecutionError::RootSummaryReconciliationFailed)?;
     Ok(ReconciledTerminalSession { record })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::select_and_prepare_session;
+    use crate::data::test_support::{admit_fake_bundle, build_fake_coordinator, build_fake_project};
+    use crate::session::SessionCoordinationError;
+
+    use super::{DataOperation, ForegroundDataExecutionError, RuntimeSupervisionMode};
+
+    /// `select_and_prepare_session` records the requested supervision mode
+    /// (`Background`) on the resulting `PreparedSessionLaunch`.
+    #[test]
+    fn records_background_supervision_mode_when_requested() {
+        let project = build_fake_project("example-source");
+        let coordinator = build_fake_coordinator(&project, DataOperation::Acquisition);
+        let admitted = admit_fake_bundle(&project);
+
+        let prepared = select_and_prepare_session(
+            &coordinator,
+            DataOperation::Acquisition,
+            false,
+            &admitted,
+            RuntimeSupervisionMode::Background,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.record().supervision_mode(), RuntimeSupervisionMode::Background);
+    }
+
+    /// `select_and_prepare_session` records `Foreground` when requested,
+    /// exercising the same call path `execute_foreground_data` uses.
+    #[test]
+    fn records_foreground_supervision_mode_when_requested() {
+        let project = build_fake_project("example-source");
+        let coordinator = build_fake_coordinator(&project, DataOperation::Acquisition);
+        let admitted = admit_fake_bundle(&project);
+
+        let prepared = select_and_prepare_session(
+            &coordinator,
+            DataOperation::Acquisition,
+            false,
+            &admitted,
+            RuntimeSupervisionMode::Foreground,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.record().supervision_mode(), RuntimeSupervisionMode::Foreground);
+    }
+
+    /// The processing selection path also threads the supervision mode
+    /// through, even though it never inspects the admitted bundle.
+    #[test]
+    fn processing_operation_records_requested_supervision_mode() {
+        let project = build_fake_project("example-source");
+        let coordinator = build_fake_coordinator(&project, DataOperation::Processing);
+        let admitted = admit_fake_bundle(&project);
+
+        let prepared = select_and_prepare_session(
+            &coordinator,
+            DataOperation::Processing,
+            false,
+            &admitted,
+            RuntimeSupervisionMode::Background,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.record().supervision_mode(), RuntimeSupervisionMode::Background);
+    }
+
+    /// A second selection attempt against an already-live (Prepared, still
+    /// leased) session is rejected, regardless of supervision mode. This
+    /// preserves the pre-existing live-session-rejection scenario now that
+    /// `select_and_prepare_session` takes an extra parameter.
+    #[test]
+    fn rejects_selection_when_a_live_session_is_already_active() {
+        let project = build_fake_project("example-source");
+        let coordinator = build_fake_coordinator(&project, DataOperation::Acquisition);
+        let admitted = admit_fake_bundle(&project);
+
+        let _first = select_and_prepare_session(
+            &coordinator,
+            DataOperation::Acquisition,
+            false,
+            &admitted,
+            RuntimeSupervisionMode::Background,
+        )
+        .unwrap();
+
+        let second = select_and_prepare_session(
+            &coordinator,
+            DataOperation::Acquisition,
+            false,
+            &admitted,
+            RuntimeSupervisionMode::Foreground,
+        );
+
+        assert!(matches!(
+            second,
+            Err(ForegroundDataExecutionError::SessionSelection(
+                SessionCoordinationError::LiveSessionAlreadyActive
+            ))
+        ));
+    }
+}
