@@ -17,5 +17,8 @@ tempfile = "3"
 url = "2.5"
 uuid = { version = "1.11", features = ["v4"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 trybuild = "1.0"

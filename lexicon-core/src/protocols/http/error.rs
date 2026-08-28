@@ -3,7 +3,7 @@ use std::fmt;
 use super::request::HttpRequestError;
 use super::transaction::{HttpResponseStatusError, RecordedTransaction};
 use super::transport::{HttpTransportConfigurationError, HttpTransportFailure};
-use super::{ProgressPersistenceError, SessionValidationError};
+use super::{HttpProgressPartialCommit, SessionValidationError};
 use crate::protocols::http::transaction::error::HttpRecorderError;
 
 pub type AcquisitionResult<T> = Result<T, AcquisitionError>;
@@ -270,7 +270,7 @@ pub enum HttpExecutionError {
     RedirectFailure(HttpRedirectFailure),
     RetryExhausted(HttpRetryExhaustionError),
     CounterOverflow,
-    Progress(ProgressPersistenceError),
+    ProgressPartialCommit(HttpProgressPartialCommit),
 }
 
 impl fmt::Display for HttpExecutionError {
@@ -293,7 +293,7 @@ impl fmt::Display for HttpExecutionError {
             Self::RedirectFailure(_) => formatter.write_str("HTTP redirect handling failed"),
             Self::RetryExhausted(_) => formatter.write_str("HTTP retry policy exhausted"),
             Self::CounterOverflow => formatter.write_str("HTTP execution counter overflow"),
-            Self::Progress(_) => {
+            Self::ProgressPartialCommit(_) => {
                 formatter.write_str("HTTP acquisition progress persistence failed")
             }
         }
@@ -310,7 +310,7 @@ impl std::error::Error for HttpExecutionError {
             Self::RecordedTransportFailure(error) => Some(error),
             Self::RedirectFailure(error) => Some(error),
             Self::RetryExhausted(error) => Some(error),
-            Self::Progress(error) => Some(error),
+            Self::ProgressPartialCommit(error) => Some(error),
             Self::UnmanagedContext | Self::CounterOverflow => None,
         }
     }

@@ -6,7 +6,9 @@ use reqwest::header::HeaderName;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::error::{HttpRecorderError, ManagedPathKind, validate_managed_path};
+use super::error::{
+    HttpManagedPathError, HttpManagedPathValidationMode, validate_managed_path,
+};
 use super::identity::{HttpTransactionIdentity, HttpTransactionIdentityError};
 use super::{
     HttpAttemptIdentity, HttpLogicalRequestKey, HttpLogicalRequestKeyError, HttpRecordedOutcome,
@@ -41,7 +43,6 @@ pub enum StoredTransportFailureClass {
     Timeout,
     BodyWrite,
     ExchangeIo,
-    Tls,
 }
 
 impl From<HttpTransportFailure> for StoredTransportFailureClass {
@@ -53,7 +54,6 @@ impl From<HttpTransportFailure> for StoredTransportFailureClass {
             HttpTransportFailure::Timeout => Self::Timeout,
             HttpTransportFailure::BodyWrite => Self::BodyWrite,
             HttpTransportFailure::ExchangeIo => Self::ExchangeIo,
-            HttpTransportFailure::Tls => Self::Tls,
         }
     }
 }
@@ -67,7 +67,6 @@ impl From<StoredTransportFailureClass> for HttpTransportFailure {
             StoredTransportFailureClass::Timeout => Self::Timeout,
             StoredTransportFailureClass::BodyWrite => Self::BodyWrite,
             StoredTransportFailureClass::ExchangeIo => Self::ExchangeIo,
-            StoredTransportFailureClass::Tls => Self::Tls,
         }
     }
 }
@@ -145,7 +144,6 @@ pub enum AcquisitionProgressValidationError {
     UnknownSchemaVersion { found: u32 },
     EmptySessionId,
     SessionMismatch,
-    RevisionMismatch { expected: u64, found: u64 },
     CounterInvariantViolated,
     RevisionCountMismatch,
     LastTransactionInconsistent,
@@ -163,9 +161,6 @@ impl std::fmt::Display for AcquisitionProgressValidationError {
             }
             Self::EmptySessionId => f.write_str("acquisition progress session_id is empty"),
             Self::SessionMismatch => f.write_str("acquisition progress session_id does not match"),
-            Self::RevisionMismatch { .. } => {
-                f.write_str("acquisition progress revision does not match")
-            }
             Self::CounterInvariantViolated => {
                 f.write_str("acquisition progress counter invariant violated")
             }
@@ -244,7 +239,6 @@ impl AcquisitionProgressDocument {
     pub fn validate_existing(
         doc: &AcquisitionProgressDocument,
         session_id: &str,
-        expected_revision: u64,
     ) -> Result<(), AcquisitionProgressValidationError> {
         if doc.schema_version != HTTP_ACQUISITION_PROGRESS_SCHEMA_VERSION {
             return Err(AcquisitionProgressValidationError::UnknownSchemaVersion {
@@ -256,12 +250,6 @@ impl AcquisitionProgressDocument {
         }
         if doc.session_id != session_id {
             return Err(AcquisitionProgressValidationError::SessionMismatch);
-        }
-        if doc.revision != expected_revision {
-            return Err(AcquisitionProgressValidationError::RevisionMismatch {
-                expected: expected_revision,
-                found: doc.revision,
-            });
         }
         if doc.transport_failure_count > doc.completed_transaction_count
             || doc.redirect_count > doc.completed_transaction_count
@@ -319,8 +307,7 @@ impl AcquisitionProgressDocument {
             return Err(AcquisitionProgressAdvanceError::InvalidTimestamp);
         }
         let session_id = self.session_id.clone();
-        let prior_revision = self.revision;
-        Self::validate_existing(&self, &session_id, prior_revision)
+        Self::validate_existing(&self, &session_id)
             .map_err(AcquisitionProgressAdvanceError::Validation)?;
 
         let completed_transaction_count = self
@@ -366,7 +353,7 @@ impl AcquisitionProgressDocument {
             revision,
         };
 
-        Self::validate_existing(&next, &session_id, revision)
+        Self::validate_existing(&next, &session_id)
             .map_err(AcquisitionProgressAdvanceError::Validation)?;
         Ok(next)
     }
@@ -374,7 +361,18 @@ impl AcquisitionProgressDocument {
 
 #[derive(Debug)]
 pub enum HttpTransactionAdmissionError {
-    ManagedPath(HttpRecorderError),
+    ManagedPath(HttpManagedPathError),
+    TransactionDirectoryNameInvalid,
+    PartialDirectoryRejected,
+    DirectoryNotImmediateChild,
+    UnexpectedTopLevelEntry,
+    MissingTopLevelEntry,
+    UnexpectedRequestEntry,
+    UnexpectedResponseEntry,
+    NestedDirectoryRejected,
+    EntrySymlinkRejected,
+    MetadataFileTypeInvalid,
+    BodyFileTypeInvalid,
     RequestMetadataRead(std::io::Error),
     ResponseMetadataRead(std::io::Error),
     RequestMetadataDecode(serde_json::Error),
@@ -386,6 +384,11 @@ pub enum HttpTransactionAdmissionError {
     InvalidSessionId,
     InvalidLogicalRequestKey(HttpLogicalRequestKeyError),
     InvalidParentTransactionIdentity(HttpTransactionIdentityError),
+    TransactionIdDirectoryMismatch,
+    RequestTimestampInvariant,
+    ResponseTimestampInvariant,
+    AttemptInvariant,
+    ParentIdentityInvariant,
     HeaderNameInvalid,
     HeaderValueEncodingInvalid,
     SensitiveHeaderRedactionInvalid,
@@ -401,6 +404,39 @@ impl std::fmt::Display for HttpTransactionAdmissionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ManagedPath(_) => formatter.write_str("managed HTTP transaction path is invalid"),
+            Self::TransactionDirectoryNameInvalid => {
+                formatter.write_str("HTTP transaction directory name is invalid")
+            }
+            Self::PartialDirectoryRejected => {
+                formatter.write_str("partial HTTP transaction directory cannot be admitted")
+            }
+            Self::DirectoryNotImmediateChild => formatter.write_str(
+                "HTTP transaction directory must be an immediate child of the trusted raw root",
+            ),
+            Self::UnexpectedTopLevelEntry => {
+                formatter.write_str("HTTP transaction directory contains unexpected entries")
+            }
+            Self::MissingTopLevelEntry => {
+                formatter.write_str("HTTP transaction directory is missing required entries")
+            }
+            Self::UnexpectedRequestEntry => {
+                formatter.write_str("HTTP request directory contains unexpected entries")
+            }
+            Self::UnexpectedResponseEntry => {
+                formatter.write_str("HTTP response directory contains unexpected entries")
+            }
+            Self::NestedDirectoryRejected => formatter.write_str(
+                "HTTP transaction request/response entries must be regular files only",
+            ),
+            Self::EntrySymlinkRejected => {
+                formatter.write_str("HTTP transaction directory cannot contain symlinks")
+            }
+            Self::MetadataFileTypeInvalid => {
+                formatter.write_str("HTTP transaction metadata entries must be regular files")
+            }
+            Self::BodyFileTypeInvalid => {
+                formatter.write_str("HTTP transaction body entry must be a regular file")
+            }
             Self::RequestMetadataRead(_) => formatter.write_str("failed to read HTTP request metadata"),
             Self::ResponseMetadataRead(_) => {
                 formatter.write_str("failed to read HTTP response metadata")
@@ -429,6 +465,19 @@ impl std::fmt::Display for HttpTransactionAdmissionError {
             }
             Self::InvalidParentTransactionIdentity(_) => {
                 formatter.write_str("HTTP parent transaction identity is invalid")
+            }
+            Self::TransactionIdDirectoryMismatch => {
+                formatter.write_str("HTTP transaction metadata does not match directory identity")
+            }
+            Self::RequestTimestampInvariant => {
+                formatter.write_str("HTTP request timestamp is invalid")
+            }
+            Self::ResponseTimestampInvariant => {
+                formatter.write_str("HTTP response timestamp is invalid")
+            }
+            Self::AttemptInvariant => formatter.write_str("HTTP attempt metadata is invalid"),
+            Self::ParentIdentityInvariant => {
+                formatter.write_str("HTTP parent transaction metadata is invalid")
             }
             Self::HeaderNameInvalid => formatter.write_str("HTTP recorded header name is invalid"),
             Self::HeaderValueEncodingInvalid => {
@@ -472,10 +521,32 @@ impl std::error::Error for HttpTransactionAdmissionError {
 }
 
 pub(crate) fn admit_transaction_from_disk(
+    trusted_raw_root: &Path,
     directory: &Path,
 ) -> Result<RecordedTransaction, HttpTransactionAdmissionError> {
-    validate_managed_path(directory, ManagedPathKind::Directory)
+    validate_managed_path(
+        trusted_raw_root,
+        trusted_raw_root,
+        HttpManagedPathValidationMode::ExistingDirectory,
+    )
+    .map_err(HttpTransactionAdmissionError::ManagedPath)?;
+    validate_managed_path(
+        trusted_raw_root,
+        directory,
+        HttpManagedPathValidationMode::ExistingDirectory,
+    )
         .map_err(HttpTransactionAdmissionError::ManagedPath)?;
+    if directory.parent() != Some(trusted_raw_root) {
+        return Err(HttpTransactionAdmissionError::DirectoryNotImmediateChild);
+    }
+    let dir_name = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(HttpTransactionAdmissionError::TransactionDirectoryNameInvalid)?;
+    if dir_name.starts_with(".partial-") {
+        return Err(HttpTransactionAdmissionError::PartialDirectoryRejected);
+    }
+    let (dir_timestamp, dir_transaction_id) = parse_transaction_directory_name(dir_name)?;
 
     let request_dir = directory.join("request");
     let response_dir = directory.join("response");
@@ -484,17 +555,34 @@ pub(crate) fn admit_transaction_from_disk(
     let request_body_path = request_dir.join("body");
     let response_body_path = response_dir.join("body");
 
-    for path in [&request_dir, &response_dir] {
-        validate_managed_path(path, ManagedPathKind::Directory)
-            .map_err(HttpTransactionAdmissionError::ManagedPath)?;
-    }
+    validate_expected_top_level_entries(directory)?;
+    validate_managed_path(
+        trusted_raw_root,
+        &request_dir,
+        HttpManagedPathValidationMode::ExistingDirectory,
+    )
+    .map_err(HttpTransactionAdmissionError::ManagedPath)?;
+    validate_managed_path(
+        trusted_raw_root,
+        &response_dir,
+        HttpManagedPathValidationMode::ExistingDirectory,
+    )
+    .map_err(HttpTransactionAdmissionError::ManagedPath)?;
+    validate_expected_request_entries(&request_dir)?;
+    validate_expected_response_entries(&response_dir)?;
     for path in [&request_metadata_path, &response_metadata_path] {
-        validate_managed_path(path, ManagedPathKind::RegularFileIfPresent)
-            .map_err(HttpTransactionAdmissionError::ManagedPath)?;
-    }
-    for path in [&request_body_path, &response_body_path] {
-        validate_managed_path(path, ManagedPathKind::RegularFileIfPresent)
-            .map_err(HttpTransactionAdmissionError::ManagedPath)?;
+        validate_managed_path(
+            trusted_raw_root,
+            path,
+            HttpManagedPathValidationMode::ExistingRegularFile,
+        )
+        .map_err(HttpTransactionAdmissionError::ManagedPath)?;
+        if !fs::metadata(path)
+            .map_err(|_| HttpTransactionAdmissionError::MetadataFileTypeInvalid)?
+            .is_file()
+        {
+            return Err(HttpTransactionAdmissionError::MetadataFileTypeInvalid);
+        }
     }
 
     let request_metadata: RequestMetadataDocument =
@@ -527,11 +615,25 @@ pub(crate) fn admit_transaction_from_disk(
     if identity != response_identity {
         return Err(HttpTransactionAdmissionError::TransactionIdMismatch);
     }
+    if identity.id() != dir_transaction_id {
+        return Err(HttpTransactionAdmissionError::TransactionIdDirectoryMismatch);
+    }
     if request_metadata.session_id.is_empty() {
         return Err(HttpTransactionAdmissionError::InvalidSessionId);
     }
-    if request_metadata.created_at_unix_nanos == 0 {
-        return Err(HttpTransactionAdmissionError::RequestBodyInvariant);
+    if request_metadata.created_at_unix_nanos == 0
+        || request_metadata.created_at_unix_nanos != dir_timestamp
+    {
+        return Err(HttpTransactionAdmissionError::RequestTimestampInvariant);
+    }
+
+    if request_metadata.physical_attempt_index == 0 {
+        return Err(HttpTransactionAdmissionError::AttemptInvariant);
+    }
+    if request_metadata.redirect_index > request_metadata.physical_attempt_index - 1
+        || request_metadata.retry_index > request_metadata.physical_attempt_index - 1
+    {
+        return Err(HttpTransactionAdmissionError::AttemptInvariant);
     }
 
     let attempt_identity = HttpAttemptIdentity::new(
@@ -545,6 +647,14 @@ pub(crate) fn admit_transaction_from_disk(
         .map(HttpTransactionIdentity::from_validated)
         .transpose()
         .map_err(HttpTransactionAdmissionError::InvalidParentTransactionIdentity)?;
+    if request_metadata.physical_attempt_index == 1 && parent_transaction_id.is_some() {
+        return Err(HttpTransactionAdmissionError::ParentIdentityInvariant);
+    }
+    if let Some(parent) = &parent_transaction_id {
+        if parent == &identity {
+            return Err(HttpTransactionAdmissionError::ParentIdentityInvariant);
+        }
+    }
     let logical_request_key = request_metadata
         .logical_request_key
         .clone()
@@ -562,11 +672,18 @@ pub(crate) fn admit_transaction_from_disk(
             body_sha256,
             completed_at_unix_nanos,
         } => {
-            if completed_at_unix_nanos == 0 {
-                return Err(HttpTransactionAdmissionError::ResponseBodyInvariant);
+            if completed_at_unix_nanos == 0
+                || completed_at_unix_nanos < request_metadata.created_at_unix_nanos
+            {
+                return Err(HttpTransactionAdmissionError::ResponseTimestampInvariant);
             }
             let recorded_headers = admit_headers(&headers)?;
-            verify_body_file(&response_body_path, body_length, Some(body_sha256.as_str()))?;
+            verify_body_file(
+                trusted_raw_root,
+                &response_body_path,
+                body_length,
+                Some(body_sha256.as_str()),
+            )?;
             RecordedHttpResponse::new(
                 Some(status),
                 RecordedHeaderCollection::new(recorded_headers),
@@ -581,14 +698,16 @@ pub(crate) fn admit_transaction_from_disk(
             retryable,
             failed_at_unix_nanos,
         } => {
-            if failed_at_unix_nanos == 0 {
-                return Err(HttpTransactionAdmissionError::ResponseBodyInvariant);
+            if failed_at_unix_nanos == 0
+                || failed_at_unix_nanos < request_metadata.created_at_unix_nanos
+            {
+                return Err(HttpTransactionAdmissionError::ResponseTimestampInvariant);
             }
             let failure = HttpTransportFailure::from(failure_class);
             if failure.retryable() != retryable {
                 return Err(HttpTransactionAdmissionError::TransportFailureRetryabilityMismatch);
             }
-            verify_body_file(&response_body_path, 0, None)?;
+            verify_body_file(trusted_raw_root, &response_body_path, 0, None)?;
             RecordedHttpResponse::new(
                 None,
                 RecordedHeaderCollection::new(Vec::new()),
@@ -609,6 +728,7 @@ pub(crate) fn admit_transaction_from_disk(
             .clone()
             .ok_or(HttpTransactionAdmissionError::RequestBodyInvariant)?;
         verify_body_file(
+            trusted_raw_root,
             &request_body_path,
             request_metadata.body_length,
             Some(body_sha256.as_str()),
@@ -637,6 +757,138 @@ pub(crate) fn admit_transaction_from_disk(
         request,
         response,
     ))
+}
+
+fn parse_transaction_directory_name(
+    name: &str,
+) -> Result<(u64, &str), HttpTransactionAdmissionError> {
+    let (timestamp, transaction_id) = name
+        .split_once('-')
+        .ok_or(HttpTransactionAdmissionError::TransactionDirectoryNameInvalid)?;
+    if timestamp.is_empty()
+        || !timestamp.bytes().all(|b| b.is_ascii_digit())
+        || transaction_id.is_empty()
+    {
+        return Err(HttpTransactionAdmissionError::TransactionDirectoryNameInvalid);
+    }
+    let parsed_timestamp = timestamp
+        .parse::<u64>()
+        .map_err(|_| HttpTransactionAdmissionError::TransactionDirectoryNameInvalid)?;
+    if parsed_timestamp == 0 {
+        return Err(HttpTransactionAdmissionError::RequestTimestampInvariant);
+    }
+    Ok((parsed_timestamp, transaction_id))
+}
+
+fn validate_expected_top_level_entries(directory: &Path) -> Result<(), HttpTransactionAdmissionError> {
+    let mut seen_request = false;
+    let mut seen_response = false;
+    let entries = fs::read_dir(directory).map_err(HttpTransactionAdmissionError::RequestMetadataRead)?;
+    for entry in entries {
+        let entry = entry.map_err(HttpTransactionAdmissionError::RequestMetadataRead)?;
+        let file_type = entry
+            .file_type()
+            .map_err(HttpTransactionAdmissionError::RequestMetadataRead)?;
+        if file_type.is_symlink() {
+            return Err(HttpTransactionAdmissionError::EntrySymlinkRejected);
+        }
+        let name = entry.file_name();
+        match name.to_string_lossy().as_ref() {
+            "request" => {
+                if !file_type.is_dir() {
+                    return Err(HttpTransactionAdmissionError::UnexpectedTopLevelEntry);
+                }
+                seen_request = true;
+            }
+            "response" => {
+                if !file_type.is_dir() {
+                    return Err(HttpTransactionAdmissionError::UnexpectedTopLevelEntry);
+                }
+                seen_response = true;
+            }
+            _ => return Err(HttpTransactionAdmissionError::UnexpectedTopLevelEntry),
+        }
+    }
+    if !seen_request || !seen_response {
+        return Err(HttpTransactionAdmissionError::MissingTopLevelEntry);
+    }
+    Ok(())
+}
+
+fn validate_expected_request_entries(request_dir: &Path) -> Result<(), HttpTransactionAdmissionError> {
+    let mut has_metadata = false;
+    let entries = fs::read_dir(request_dir).map_err(HttpTransactionAdmissionError::RequestMetadataRead)?;
+    for entry in entries {
+        let entry = entry.map_err(HttpTransactionAdmissionError::RequestMetadataRead)?;
+        let file_type = entry
+            .file_type()
+            .map_err(HttpTransactionAdmissionError::RequestMetadataRead)?;
+        if file_type.is_symlink() {
+            return Err(HttpTransactionAdmissionError::EntrySymlinkRejected);
+        }
+        let name = entry.file_name();
+        match name.to_string_lossy().as_ref() {
+            "metadata.json" => {
+                if !file_type.is_file() {
+                    return Err(HttpTransactionAdmissionError::MetadataFileTypeInvalid);
+                }
+                has_metadata = true;
+            }
+            "body" => {
+                if !file_type.is_file() {
+                    return Err(HttpTransactionAdmissionError::BodyFileTypeInvalid);
+                }
+            }
+            _ => return Err(HttpTransactionAdmissionError::UnexpectedRequestEntry),
+        }
+        if file_type.is_dir() {
+            return Err(HttpTransactionAdmissionError::NestedDirectoryRejected);
+        }
+    }
+    if !has_metadata {
+        return Err(HttpTransactionAdmissionError::UnexpectedRequestEntry);
+    }
+    Ok(())
+}
+
+fn validate_expected_response_entries(
+    response_dir: &Path,
+) -> Result<(), HttpTransactionAdmissionError> {
+    let mut has_metadata = false;
+    let mut has_body = false;
+    let entries = fs::read_dir(response_dir).map_err(HttpTransactionAdmissionError::ResponseMetadataRead)?;
+    for entry in entries {
+        let entry = entry.map_err(HttpTransactionAdmissionError::ResponseMetadataRead)?;
+        let file_type = entry
+            .file_type()
+            .map_err(HttpTransactionAdmissionError::ResponseMetadataRead)?;
+        if file_type.is_symlink() {
+            return Err(HttpTransactionAdmissionError::EntrySymlinkRejected);
+        }
+        let name = entry.file_name();
+        match name.to_string_lossy().as_ref() {
+            "metadata.json" => {
+                if !file_type.is_file() {
+                    return Err(HttpTransactionAdmissionError::MetadataFileTypeInvalid);
+                }
+                has_metadata = true;
+            }
+            "body" => {
+                if !file_type.is_file() {
+                    return Err(HttpTransactionAdmissionError::BodyFileTypeInvalid);
+                }
+                has_body = true;
+            }
+            _ => return Err(HttpTransactionAdmissionError::UnexpectedResponseEntry),
+        }
+        if file_type.is_dir() {
+            return Err(HttpTransactionAdmissionError::NestedDirectoryRejected);
+        }
+    }
+    if !has_metadata || !has_body {
+        return Err(HttpTransactionAdmissionError::UnexpectedResponseEntry);
+    }
+    Ok(())
 }
 
 fn admit_headers(
@@ -682,11 +934,16 @@ fn admit_headers(
 }
 
 fn verify_body_file(
+    trusted_root: &Path,
     path: &Path,
     expected_length: u64,
     expected_sha256: Option<&str>,
 ) -> Result<(), HttpTransactionAdmissionError> {
-    validate_managed_path(path, ManagedPathKind::RegularFileIfPresent)
+    validate_managed_path(
+        trusted_root,
+        path,
+        HttpManagedPathValidationMode::ExistingRegularFile,
+    )
         .map_err(HttpTransactionAdmissionError::ManagedPath)?;
     let metadata = fs::metadata(path).map_err(|_| HttpTransactionAdmissionError::ResponseBodyInvariant)?;
     if metadata.len() != expected_length {

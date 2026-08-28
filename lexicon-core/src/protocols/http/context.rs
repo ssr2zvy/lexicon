@@ -18,14 +18,17 @@ use super::error::{
 };
 use super::policy::HttpRedirectPolicy;
 use super::request::{FinalizedHttpRequest, HttpRequest};
-use super::transaction::error::{HttpClockError, HttpRecorderError, ManagedPathKind, validate_managed_path};
+use super::transaction::error::{
+    HttpClockError, HttpManagedPathError, HttpManagedPathValidationMode, validate_managed_path,
+};
 use super::transaction::metadata::{
     AcquisitionProgressAdvanceError, AcquisitionProgressDocument,
     AcquisitionProgressValidationError,
 };
 use super::transaction::{
-    FinalizedRecordedAttempt, HttpRecordedOutcome, ProgressPublishedRecordedAttempt,
-    RecordedAttemptContext, RecordedTransaction, record_transaction_attempt,
+    FinalizedRecordedAttempt, HttpAttemptIdentity, HttpRecordedOutcome, HttpRecordedOutcomeKind,
+    ProgressPublishedRecordedAttempt, RecordedAttemptContext, RecordedTransaction,
+    record_transaction_attempt,
 };
 use super::transport::{HttpTransport, HttpTransportConfigurationError, ReqwestHttpTransport};
 
@@ -201,8 +204,8 @@ impl HttpAcquisitionContext {
                     redirect_response,
                     retry_attempt,
                 )
-                .map_err(|(_, error)| {
-                    AcquisitionError::execution(HttpExecutionError::Progress(error))
+                .map_err(|error| {
+                    AcquisitionError::execution(HttpExecutionError::ProgressPartialCommit(error))
                 })?;
 
                 let ProgressPublishedRecordedAttempt {
@@ -210,9 +213,12 @@ impl HttpAcquisitionContext {
                     location_text,
                     invalid_location_encoding,
                 } = published;
-                let outcome = transaction.response().outcome().clone();
-                match outcome {
-                    HttpRecordedOutcome::TransportFailure(failure) => {
+                match transaction.response().outcome().kind() {
+                    HttpRecordedOutcomeKind::TransportFailure => {
+                        let failure = match transaction.response().outcome() {
+                            HttpRecordedOutcome::TransportFailure(failure) => failure,
+                            HttpRecordedOutcome::Response => unreachable!(),
+                        };
                         if failure.retryable()
                             && request.retry_policy.retryable_transport_failures()
                             && retry_index
@@ -249,7 +255,7 @@ impl HttpAcquisitionContext {
                             ),
                         ));
                     }
-                    HttpRecordedOutcome::Response => {
+                    HttpRecordedOutcomeKind::Response => {
                         let status = transaction.response_status().ok_or_else(|| {
                             AcquisitionError::response_status(
                                 super::transaction::HttpResponseStatusError::new_missing(),
@@ -291,32 +297,36 @@ impl HttpAcquisitionContext {
                                         ));
                                     }
 
-                                    let location = location_text.as_deref().ok_or_else(|| {
-                                        AcquisitionError::execution(
-                                            HttpExecutionError::RedirectFailure(
-                                                HttpRedirectFailure::new(
-                                                    transaction.clone(),
-                                                    HttpRedirectFailureKind::MissingLocation,
-                                                    redirect_count,
-                                                    physical_attempt_index,
-                                                ),
-                                            ),
-                                        )
-                                    })?;
-
-                                    let next_request = redirect_request_from(&request, status, location)
-                                        .map_err(|kind| {
-                                            AcquisitionError::execution(
+                                    let location = match location_text.as_deref() {
+                                        Some(location) => location,
+                                        None => {
+                                            return Err(AcquisitionError::execution(
                                                 HttpExecutionError::RedirectFailure(
                                                     HttpRedirectFailure::new(
-                                                        transaction.clone(),
+                                                        transaction,
+                                                        HttpRedirectFailureKind::MissingLocation,
+                                                        redirect_count,
+                                                        physical_attempt_index,
+                                                    ),
+                                                ),
+                                            ));
+                                        }
+                                    };
+                                    let next_request = match redirect_request_from(&request, status, location) {
+                                        Ok(next_request) => next_request,
+                                        Err(kind) => {
+                                            return Err(AcquisitionError::execution(
+                                                HttpExecutionError::RedirectFailure(
+                                                    HttpRedirectFailure::new(
+                                                        transaction,
                                                         kind,
                                                         redirect_count,
                                                         physical_attempt_index,
                                                     ),
                                                 ),
-                                            )
-                                        })?;
+                                            ));
+                                        }
+                                    };
 
                                     let canonical = next_request.url.to_string();
                                     if !seen_redirect_targets.insert(canonical) {
@@ -381,8 +391,12 @@ impl HttpAcquisitionContext {
             self.session_directory(),
             self.raw_data_directory(),
         ] {
-            validate_managed_path(path, ManagedPathKind::Directory)
-                .map_err(map_path_validation_error)?;
+            validate_managed_path(
+                self.protocol_root(),
+                path,
+                HttpManagedPathValidationMode::ExistingDirectory,
+            )
+            .map_err(SessionValidationError::ManagedPath)?;
         }
 
         validate_running_acquisition_session(
@@ -428,13 +442,6 @@ fn map_session_load_error(error: SessionStoreError) -> SessionValidationError {
     match error {
         SessionStoreError::MissingSession => SessionValidationError::MissingSession,
         _ => SessionValidationError::SessionLoadFailed,
-    }
-}
-
-fn map_path_validation_error(error: HttpRecorderError) -> SessionValidationError {
-    match error {
-        HttpRecorderError::SymlinkRejected { .. } => SessionValidationError::SymlinkRejected,
-        _ => SessionValidationError::InvalidPaths,
     }
 }
 
@@ -509,65 +516,63 @@ fn persist_progress(
     transport_failure: bool,
     redirect: bool,
     retry: bool,
-) -> Result<ProgressPublishedRecordedAttempt, (FinalizedRecordedAttempt, ProgressPersistenceError)> {
+) -> Result<ProgressPublishedRecordedAttempt, HttpProgressPartialCommit> {
     if let Err(error) = validate_running_acquisition_session(operation_root, session_identity) {
-        let persistence_error = ProgressPersistenceError::PartialCommit {
-            transaction_id: finalized.transaction.identity().id().to_string(),
-            transaction_path: finalized.transaction.directory().to_path_buf(),
-            source: Box::new(AcquisitionProgressError::from_session_validation(error)),
-        };
-        return Err((finalized, persistence_error));
+        return Err(progress_partial_commit(
+            finalized,
+            AcquisitionProgressError::from_session_validation(error),
+        ));
     }
 
-    if let Err(error) = validate_managed_path(session_directory, ManagedPathKind::Directory) {
-        let persistence_error = partial_commit_error(
-            &finalized.transaction,
+    if let Err(error) = validate_managed_path(
+        session_directory,
+        session_directory,
+        HttpManagedPathValidationMode::ExistingDirectory,
+    ) {
+        return Err(progress_partial_commit(
+            finalized,
             AcquisitionProgressError::ManagedPath(error),
-        );
-        return Err((finalized, persistence_error));
+        ));
     }
 
     let progress_path = session_directory.join("acquisition_progress.json");
-    if let Err(error) = validate_managed_path(&progress_path, ManagedPathKind::RegularFileIfPresent)
-    {
-        let persistence_error = partial_commit_error(
-            &finalized.transaction,
+    if let Err(error) = validate_managed_path(
+        session_directory,
+        &progress_path,
+        HttpManagedPathValidationMode::CreatableRegularFile,
+    ) {
+        return Err(progress_partial_commit(
+            finalized,
             AcquisitionProgressError::ManagedPath(error),
-        );
-        return Err((finalized, persistence_error));
+        ));
     }
 
     let current = if progress_path.exists() {
         let text = match std::fs::read_to_string(&progress_path) {
             Ok(text) => text,
             Err(error) => {
-                let persistence_error = partial_commit_error(
-                    &finalized.transaction,
+                return Err(progress_partial_commit(
+                    finalized,
                     AcquisitionProgressError::Load(error),
-                );
-                return Err((finalized, persistence_error));
+                ));
             }
         };
 
         let parsed: AcquisitionProgressDocument = match serde_json::from_str(&text) {
             Ok(parsed) => parsed,
             Err(error) => {
-                let persistence_error = partial_commit_error(
-                    &finalized.transaction,
+                return Err(progress_partial_commit(
+                    finalized,
                     AcquisitionProgressError::Decode(error),
-                );
-                return Err((finalized, persistence_error));
+                ));
             }
         };
 
-        if let Err(error) =
-            AcquisitionProgressDocument::validate_existing(&parsed, session_id, parsed.revision)
-        {
-            let persistence_error = partial_commit_error(
-                &finalized.transaction,
+        if let Err(error) = AcquisitionProgressDocument::validate_existing(&parsed, session_id) {
+            return Err(progress_partial_commit(
+                finalized,
                 AcquisitionProgressError::InvalidInvariant(error),
-            );
-            return Err((finalized, persistence_error));
+            ));
         }
 
         parsed
@@ -575,11 +580,10 @@ fn persist_progress(
         let now = match now_nanos() {
             Ok(now) => now,
             Err(error) => {
-                let persistence_error = partial_commit_error(
-                    &finalized.transaction,
+                return Err(progress_partial_commit(
+                    finalized,
                     AcquisitionProgressError::Clock(error),
-                );
-                return Err((finalized, persistence_error));
+                ));
             }
         };
         AcquisitionProgressDocument::new_initial(session_id.to_string(), now)
@@ -588,13 +592,13 @@ fn persist_progress(
     let advance_now = match now_nanos() {
         Ok(now) => now,
         Err(error) => {
-            let persistence_error = partial_commit_error(
-                &finalized.transaction,
+            return Err(progress_partial_commit(
+                finalized,
                 AcquisitionProgressError::Clock(error),
-            );
-            return Err((finalized, persistence_error));
+            ));
         }
     };
+    let expected_prior_revision = current.revision;
     let next = match current.advance(
         finalized.transaction.identity(),
         finalized.transaction.logical_request_key(),
@@ -605,17 +609,40 @@ fn persist_progress(
     ) {
         Ok(next) => next,
         Err(error) => {
-            let persistence_error = partial_commit_error(
-                &finalized.transaction,
+            return Err(progress_partial_commit(
+                finalized,
                 AcquisitionProgressError::Advance(error),
-            );
-            return Err((finalized, persistence_error));
+            ));
         }
     };
+    let expected_next_revision = match expected_prior_revision.checked_add(1) {
+        Some(revision) => revision,
+        None => {
+            return Err(progress_partial_commit(
+                finalized,
+                AcquisitionProgressError::Advance(AcquisitionProgressAdvanceError::CounterOverflow),
+            ));
+        }
+    };
+    if next.revision != expected_next_revision {
+        return Err(progress_partial_commit(
+            finalized,
+            AcquisitionProgressError::InvalidInvariant(
+                AcquisitionProgressValidationError::RevisionCountMismatch,
+            ),
+        ));
+    }
 
-    if let Err(error) = write_progress_atomic(&progress_path, &next) {
-        let persistence_error = partial_commit_error(&finalized.transaction, error);
-        return Err((finalized, persistence_error));
+    if let Err(error) = write_progress_atomic(
+        session_directory,
+        &progress_path,
+        &next,
+        operation_root,
+        session_identity,
+        session_id,
+        expected_prior_revision,
+    ) {
+        return Err(progress_partial_commit(finalized, error));
     }
 
     Ok(ProgressPublishedRecordedAttempt {
@@ -625,20 +652,63 @@ fn persist_progress(
     })
 }
 
-fn partial_commit_error(
-    transaction: &RecordedTransaction,
+fn progress_partial_commit(
+    finalized: FinalizedRecordedAttempt,
     source: AcquisitionProgressError,
-) -> ProgressPersistenceError {
-    ProgressPersistenceError::PartialCommit {
-        transaction_id: transaction.identity().id().to_string(),
-        transaction_path: transaction.directory().to_path_buf(),
-        source: Box::new(source),
+) -> HttpProgressPartialCommit {
+    HttpProgressPartialCommit { finalized, source }
+}
+
+fn revalidate_progress_ownership(
+    operation_root: &Path,
+    session_identity: &crate::session::SessionIdentity,
+    session_directory: &Path,
+    progress_path: &Path,
+    session_id: &str,
+    expected_prior_revision: u64,
+) -> Result<(), AcquisitionProgressError> {
+    validate_running_acquisition_session(operation_root, session_identity)
+        .map_err(AcquisitionProgressError::from_session_validation)?;
+    validate_managed_path(
+        session_directory,
+        progress_path,
+        HttpManagedPathValidationMode::CreatableRegularFile,
+    )
+    .map_err(AcquisitionProgressError::ManagedPath)?;
+
+    if !progress_path.exists() {
+        if expected_prior_revision == 0 {
+            return Ok(());
+        }
+        return Err(AcquisitionProgressError::RevisionConflict {
+            expected: expected_prior_revision,
+            found: None,
+        });
     }
+
+    let text = std::fs::read_to_string(progress_path).map_err(AcquisitionProgressError::Load)?;
+    let parsed: AcquisitionProgressDocument =
+        serde_json::from_str(&text).map_err(AcquisitionProgressError::Decode)?;
+    AcquisitionProgressDocument::validate_existing(&parsed, session_id)
+        .map_err(AcquisitionProgressError::InvalidInvariant)?;
+
+    if parsed.revision != expected_prior_revision {
+        return Err(AcquisitionProgressError::RevisionConflict {
+            expected: expected_prior_revision,
+            found: Some(parsed.revision),
+        });
+    }
+    Ok(())
 }
 
 fn write_progress_atomic(
+    trusted_root: &Path,
     path: &Path,
     progress: &AcquisitionProgressDocument,
+    operation_root: &Path,
+    session_identity: &crate::session::SessionIdentity,
+    session_id: &str,
+    expected_prior_revision: u64,
 ) -> Result<(), AcquisitionProgressError> {
     let parent = path
         .parent()
@@ -650,10 +720,18 @@ fn write_progress_atomic(
         })?;
 
     std::fs::create_dir_all(parent).map_err(AcquisitionProgressError::Persistence)?;
-    validate_managed_path(parent, ManagedPathKind::Directory)
-        .map_err(AcquisitionProgressError::ManagedPath)?;
-    validate_managed_path(path, ManagedPathKind::RegularFileIfPresent)
-        .map_err(AcquisitionProgressError::ManagedPath)?;
+    validate_managed_path(
+        trusted_root,
+        parent,
+        HttpManagedPathValidationMode::ExistingDirectory,
+    )
+    .map_err(AcquisitionProgressError::ManagedPath)?;
+    validate_managed_path(
+        trusted_root,
+        path,
+        HttpManagedPathValidationMode::CreatableRegularFile,
+    )
+    .map_err(AcquisitionProgressError::ManagedPath)?;
 
     let bytes = serde_json::to_vec(progress).map_err(AcquisitionProgressError::Encode)?;
 
@@ -667,6 +745,14 @@ fn write_progress_atomic(
     file.write_all(&bytes)
         .map_err(AcquisitionProgressError::Persistence)?;
     file.sync_all().map_err(AcquisitionProgressError::Persistence)?;
+    revalidate_progress_ownership(
+        operation_root,
+        session_identity,
+        trusted_root,
+        path,
+        session_id,
+        expected_prior_revision,
+    )?;
     temp_path
         .persist(path)
         .map_err(|error| AcquisitionProgressError::Persistence(error.error))?;
@@ -689,8 +775,7 @@ fn now_nanos() -> Result<u64, HttpClockError> {
 #[derive(Debug)]
 pub enum SessionValidationError {
     UnmanagedContext,
-    InvalidPaths,
-    SymlinkRejected,
+    ManagedPath(HttpManagedPathError),
     StoreOpen,
     MissingSession,
     SessionLoadFailed,
@@ -706,8 +791,7 @@ impl fmt::Display for SessionValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnmanagedContext => formatter.write_str("managed HTTP session context is unavailable"),
-            Self::InvalidPaths => formatter.write_str("managed HTTP context paths are invalid"),
-            Self::SymlinkRejected => formatter.write_str("managed HTTP paths must not be symlinks"),
+            Self::ManagedPath(_) => formatter.write_str("managed HTTP context paths are invalid"),
             Self::StoreOpen => formatter.write_str("failed to open session store"),
             Self::MissingSession => formatter.write_str("session record is missing"),
             Self::SessionLoadFailed => formatter.write_str("failed to load session record"),
@@ -721,11 +805,18 @@ impl fmt::Display for SessionValidationError {
     }
 }
 
-impl std::error::Error for SessionValidationError {}
+impl std::error::Error for SessionValidationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ManagedPath(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum AcquisitionProgressError {
-    ManagedPath(HttpRecorderError),
+    ManagedPath(HttpManagedPathError),
     Load(std::io::Error),
     Decode(serde_json::Error),
     Encode(serde_json::Error),
@@ -740,6 +831,7 @@ pub enum AcquisitionProgressError {
     Persistence(std::io::Error),
     DirectorySyncFailed(std::io::Error),
     Clock(HttpClockError),
+    RevisionConflict { expected: u64, found: Option<u64> },
 }
 
 impl AcquisitionProgressError {
@@ -751,6 +843,7 @@ impl AcquisitionProgressError {
             SessionValidationError::SessionIdentityMismatch => Self::SessionMismatch,
             SessionValidationError::LeaseUnavailable => Self::LeaseUnavailable,
             SessionValidationError::LeaseInspectionFailed => Self::LeaseInspectionFailed,
+            SessionValidationError::ManagedPath(error) => Self::ManagedPath(error),
             _ => Self::LeaseInspectionFailed,
         }
     }
@@ -776,6 +869,9 @@ impl fmt::Display for AcquisitionProgressError {
                 formatter.write_str("acquisition progress replaced but session directory sync failed")
             }
             Self::Clock(_) => formatter.write_str("failed to acquire acquisition progress timestamp"),
+            Self::RevisionConflict { .. } => formatter.write_str(
+                "acquisition progress revision conflict detected before replacement",
+            ),
         }
     }
 }
@@ -792,37 +888,52 @@ impl std::error::Error for AcquisitionProgressError {
             Self::Persistence(error) => Some(error),
             Self::DirectorySyncFailed(error) => Some(error),
             Self::Clock(error) => Some(error),
+            Self::RevisionConflict { .. } => None,
             _ => None,
         }
     }
 }
 
 #[derive(Debug)]
-pub enum ProgressPersistenceError {
-    Progress(AcquisitionProgressError),
-    PartialCommit {
-        transaction_id: String,
-        transaction_path: PathBuf,
-        source: Box<AcquisitionProgressError>,
-    },
+pub struct HttpProgressPartialCommit {
+    finalized: FinalizedRecordedAttempt,
+    source: AcquisitionProgressError,
 }
 
-impl fmt::Display for ProgressPersistenceError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Progress(_) => formatter.write_str("acquisition progress persistence failed"),
-            Self::PartialCommit { .. } => formatter.write_str(
-                "transaction finalized but progress publication failed (partial commit)",
-            ),
-        }
+impl HttpProgressPartialCommit {
+    pub fn transaction(&self) -> &RecordedTransaction {
+        &self.finalized.transaction
+    }
+
+    pub fn transaction_identity(&self) -> &super::transaction::HttpTransactionIdentity {
+        self.finalized.transaction.identity()
+    }
+
+    pub fn transaction_path(&self) -> &Path {
+        self.finalized.transaction.directory()
+    }
+
+    pub fn attempt_identity(&self) -> HttpAttemptIdentity {
+        self.finalized.attempt_identity
+    }
+
+    pub fn outcome(&self) -> &HttpRecordedOutcome {
+        self.finalized.transaction.response().outcome()
+    }
+
+    pub fn progress_error(&self) -> &AcquisitionProgressError {
+        &self.source
     }
 }
 
-impl std::error::Error for ProgressPersistenceError {
+impl fmt::Display for HttpProgressPartialCommit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("transaction finalized but progress publication failed (partial commit)")
+    }
+}
+
+impl std::error::Error for HttpProgressPartialCommit {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Progress(error) => Some(error),
-            Self::PartialCommit { source, .. } => Some(source.as_ref()),
-        }
+        Some(&self.source)
     }
 }
