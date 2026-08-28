@@ -411,3 +411,154 @@ fn build_session_paths(
         session,
     )
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use lexicon_core::runtime::RuntimeSupervisionMode;
+    use lexicon_core::session::{
+        SessionLeaseState, SessionState, SessionTransition, inspect_session_lease,
+    };
+
+    use super::SessionCoordinationError;
+    use crate::data::request::DataOperation;
+    use crate::data::test_support::{build_fake_coordinator, build_fake_project, open_store};
+
+    /// `resume_prepared_launch` succeeds for a `Prepared` session and returns
+    /// a launch whose record matches the original.
+    #[test]
+    fn resume_prepared_launch_succeeds_for_prepared_session() {
+        let project = build_fake_project("example-source");
+        let coordinator = build_fake_coordinator(&project, DataOperation::Acquisition);
+
+        let prepared = coordinator
+            .prepare_run(RuntimeSupervisionMode::Background)
+            .unwrap();
+        let session_id = prepared.session().clone();
+        let original_record = prepared.record().clone();
+        prepared.release_for_handoff();
+
+        let resumed = coordinator.resume_prepared_launch(&session_id).unwrap();
+        assert_eq!(resumed.record(), &original_record);
+    }
+
+    /// `resume_prepared_launch` acquires the lease: it reports `Owned` until
+    /// the returned launch is dropped.
+    #[test]
+    fn resume_prepared_launch_acquires_the_lease() {
+        let project = build_fake_project("example-source");
+        let coordinator = build_fake_coordinator(&project, DataOperation::Acquisition);
+        let store = open_store(&project, DataOperation::Acquisition);
+
+        let prepared = coordinator
+            .prepare_run(RuntimeSupervisionMode::Background)
+            .unwrap();
+        let session_id = prepared.session().clone();
+        prepared.release_for_handoff();
+
+        let lease_path = store.operation_root().lease_path(&session_id);
+        assert_eq!(
+            inspect_session_lease(&lease_path).unwrap(),
+            SessionLeaseState::Available
+        );
+
+        let resumed = coordinator.resume_prepared_launch(&session_id).unwrap();
+        assert_eq!(
+            inspect_session_lease(&lease_path).unwrap(),
+            SessionLeaseState::Owned
+        );
+
+        drop(resumed);
+        assert_eq!(
+            inspect_session_lease(&lease_path).unwrap(),
+            SessionLeaseState::Available
+        );
+    }
+
+    /// `resume_prepared_launch` rejects a session that is no longer `Prepared`.
+    #[test]
+    fn resume_prepared_launch_rejects_non_prepared_session() {
+        let project = build_fake_project("example-source");
+        let coordinator = build_fake_coordinator(&project, DataOperation::Acquisition);
+        let store = open_store(&project, DataOperation::Acquisition);
+
+        let prepared = coordinator
+            .prepare_run(RuntimeSupervisionMode::Background)
+            .unwrap();
+        let session_id = prepared.session().clone();
+        let revision = prepared.record().revision();
+        drop(prepared);
+
+        // Advance the session past Prepared without going through the handoff.
+        store
+            .transition(&session_id, revision, SessionTransition::ToAbandoned)
+            .unwrap();
+
+        let error = coordinator.resume_prepared_launch(&session_id).unwrap_err();
+        assert!(matches!(
+            error,
+            SessionCoordinationError::HandoffSessionNotPrepared { actual_state: SessionState::Abandoned }
+        ));
+    }
+
+    /// `release_for_handoff` releases the lease while leaving the durable
+    /// record `Prepared`.
+    #[test]
+    fn release_for_handoff_releases_lease_and_preserves_prepared_state() {
+        let project = build_fake_project("example-source");
+        let coordinator = build_fake_coordinator(&project, DataOperation::Acquisition);
+        let store = open_store(&project, DataOperation::Acquisition);
+
+        let prepared = coordinator
+            .prepare_run(RuntimeSupervisionMode::Background)
+            .unwrap();
+        let session_id = prepared.session().clone();
+        let lease_path = store.operation_root().lease_path(&session_id);
+
+        assert_eq!(
+            inspect_session_lease(&lease_path).unwrap(),
+            SessionLeaseState::Owned
+        );
+
+        prepared.release_for_handoff();
+
+        assert_eq!(
+            inspect_session_lease(&lease_path).unwrap(),
+            SessionLeaseState::Available
+        );
+        assert_eq!(store.load(&session_id).unwrap().state(), SessionState::Prepared);
+    }
+
+    /// Documents the known handoff race-window limitation: an unrelated
+    /// `prepare_run` call that runs after `release_for_handoff` but before the
+    /// operator host calls `resume_prepared_launch` observes the unowned
+    /// `Prepared` record as stale and reconciles it to `Failed`. This test
+    /// pins that *current* behavior; it is not a desired outcome, and fixing
+    /// the race is out of scope for this milestone.
+    #[test]
+    fn concurrent_prepare_run_during_handoff_window_reconciles_prepared_session_to_failed() {
+        let project = build_fake_project("example-source");
+        let coordinator = build_fake_coordinator(&project, DataOperation::Acquisition);
+        let store = open_store(&project, DataOperation::Acquisition);
+
+        let prepared = coordinator
+            .prepare_run(RuntimeSupervisionMode::Background)
+            .unwrap();
+        let handed_off_session = prepared.session().clone();
+        prepared.release_for_handoff();
+
+        // Simulates an unrelated concurrent `lexicon data` invocation racing the handoff.
+        let racing_prepared = coordinator
+            .prepare_run(RuntimeSupervisionMode::Foreground)
+            .unwrap();
+
+        assert_ne!(racing_prepared.session(), &handed_off_session);
+        assert_eq!(
+            store.load(&handed_off_session).unwrap().state(),
+            SessionState::Failed
+        );
+    }
+}

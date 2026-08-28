@@ -119,4 +119,40 @@ mod tests {
             other => panic!("expected Data subcommand, got {other:?}"),
         }
     }
+
+    #[test]
+    fn parses_operator_host_command_with_reference_and_passthrough() {
+        let cli = Cli::try_parse_from([
+            "lexicon",
+            "__operator-host",
+            "{\"schema_version\":1}",
+            "--",
+            "--from",
+            "2024-01-01",
+        ])
+        .expect("lexicon __operator-host should parse");
+
+        match cli.command {
+            Some(RootCommand::OperatorHost(command)) => {
+                assert_eq!(command.reference, "{\"schema_version\":1}");
+                assert_eq!(
+                    command.passthrough,
+                    vec![OsString::from("--from"), OsString::from("2024-01-01")]
+                );
+            }
+            other => panic!("expected OperatorHost subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn operator_host_command_is_hidden_from_help_output() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+        assert!(
+            !help.contains("__operator-host"),
+            "the reserved internal __operator-host entrypoint must not appear in --help output:\n{help}"
+        );
+    }
 }

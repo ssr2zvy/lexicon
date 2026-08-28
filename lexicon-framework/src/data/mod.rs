@@ -11,6 +11,8 @@ pub mod project;
 pub mod request;
 pub mod runtime;
 pub mod session;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use background::{execute_background_data, execute_operator_host};
 pub use error::ForegroundDataExecutionError;

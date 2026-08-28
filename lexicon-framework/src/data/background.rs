@@ -95,6 +95,26 @@ pub(crate) fn execute_background_data_with_re_executor(
     request: ForegroundDataRequest,
     re_executor: &dyn OperatorHostReExecutor,
 ) -> Result<BackgroundHandoffOutcome, ForegroundDataExecutionError> {
+    execute_background_data_with_re_executor_and_timing(
+        request,
+        re_executor,
+        OWNERSHIP_HANDOFF_TIMEOUT,
+        OWNERSHIP_POLL_INTERVAL,
+    )
+}
+
+/// Test-only seam: identical to [`execute_background_data_with_re_executor`],
+/// but with the ownership-handoff timeout and poll interval injectable so
+/// tests do not have to wait out the real 10-second production timeout.
+/// `execute_background_data` and `execute_background_data_with_re_executor`
+/// always pass the fixed production constants; this function does not change
+/// their externally observable behavior.
+pub(crate) fn execute_background_data_with_re_executor_and_timing(
+    request: ForegroundDataRequest,
+    re_executor: &dyn OperatorHostReExecutor,
+    ownership_handoff_timeout: Duration,
+    ownership_poll_interval: Duration,
+) -> Result<BackgroundHandoffOutcome, ForegroundDataExecutionError> {
     // 1. Project discovery and layout validation.
     let (layout, project_name) = resolve_project_layout(&request.source_name, request.operation)?;
 
@@ -147,7 +167,7 @@ pub(crate) fn execute_background_data_with_re_executor(
         .map_err(ForegroundDataExecutionError::OperatorHostReExec)?;
 
     // 8. Wait, bounded, for the operator host to acquire durable ownership.
-    let deadline = Instant::now() + OWNERSHIP_HANDOFF_TIMEOUT;
+    let deadline = Instant::now() + ownership_handoff_timeout;
     loop {
         match operator_host_child.try_wait() {
             Ok(Some(status)) => {
@@ -175,7 +195,7 @@ pub(crate) fn execute_background_data_with_re_executor(
             return Err(ForegroundDataExecutionError::OperatorHostOwnershipTimeout);
         }
 
-        std::thread::sleep(OWNERSHIP_POLL_INTERVAL);
+        std::thread::sleep(ownership_poll_interval);
     }
 
     Ok(BackgroundHandoffOutcome {
@@ -240,4 +260,295 @@ pub(crate) fn execute_operator_host_with_launcher(
         RuntimeSupervisionMode::Background,
         launcher,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::process::Child;
+
+    use lexicon_core::session::SafeSessionFailure;
+
+    use crate::data::request::DataOperation;
+    use crate::data::test_support::{build_fake_project, with_test_cwd};
+    use crate::session::{PreparedSessionLaunch, SessionCoordinationError, SessionCoordinator};
+
+    use super::*;
+
+    const FAST_TIMEOUT: Duration = Duration::from_millis(300);
+    const FAST_POLL: Duration = Duration::from_millis(10);
+
+    /// Spawn a real, short-lived child process that exits immediately.
+    fn spawn_immediately_exiting_process() -> Child {
+        #[cfg(windows)]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "exit", "0"])
+                .spawn()
+                .expect("spawn immediately-exiting process")
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .expect("spawn immediately-exiting process")
+        }
+    }
+
+    /// Spawn a real child process that stays alive for a while, so tests can
+    /// observe `try_wait() == Ok(None)` before it is dropped (which reaps and
+    /// implicitly terminates it on scope exit for the purposes of this test
+    /// binary; the OS is responsible for eventual cleanup regardless).
+    fn spawn_long_running_process() -> Child {
+        #[cfg(windows)]
+        {
+            std::process::Command::new("cmd")
+                .args(["/C", "ping -n 5 127.0.0.1 >NUL"])
+                .spawn()
+                .expect("spawn long-running process")
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("sh")
+                .args(["-c", "sleep 5"])
+                .spawn()
+                .expect("spawn long-running process")
+        }
+    }
+
+    fn background_request(source_name: &str) -> ForegroundDataRequest {
+        ForegroundDataRequest {
+            operation: DataOperation::Acquisition,
+            source_name: source_name.to_string(),
+            abandon_past_failure: false,
+            background: true,
+            source_arguments: Vec::new(),
+        }
+    }
+
+    /// A fake re-executor that resumes whatever session the coordinator most
+    /// recently prepared (simulating the operator host taking ownership) and
+    /// retains the resumed lease for as long as this value lives, so the
+    /// caller's polling loop observes `Owned`. Releases the lease when this
+    /// executor (and therefore the held `RefCell`) is dropped at the end of
+    /// the test, well before the fixture's temp directory is removed.
+    struct ResumesMostRecentSessionAndHoldsLease<'a> {
+        coordinator: &'a SessionCoordinator,
+        held: RefCell<Option<PreparedSessionLaunch>>,
+    }
+
+    impl<'a> ResumesMostRecentSessionAndHoldsLease<'a> {
+        fn new(coordinator: &'a SessionCoordinator) -> Self {
+            Self {
+                coordinator,
+                held: RefCell::new(None),
+            }
+        }
+    }
+
+    impl OperatorHostReExecutor for ResumesMostRecentSessionAndHoldsLease<'_> {
+        fn spawn_operator_host(
+            &self,
+            _arguments: &[OsString],
+            _working_directory: &Path,
+        ) -> Result<Child, std::io::Error> {
+            let status = self
+                .coordinator
+                .store()
+                .load_status()
+                .expect("load status")
+                .expect("status exists after preparation");
+            let session_id = status.current_session().expect("current session").clone();
+            let resumed = self
+                .coordinator
+                .resume_prepared_launch(&session_id)
+                .expect("resume prepared launch");
+            *self.held.borrow_mut() = Some(resumed);
+            Ok(spawn_long_running_process())
+        }
+    }
+
+    /// A fake re-executor whose spawned process exits immediately without
+    /// ever acquiring the lease.
+    struct ExitsWithoutAcquiringLease;
+
+    impl OperatorHostReExecutor for ExitsWithoutAcquiringLease {
+        fn spawn_operator_host(
+            &self,
+            _arguments: &[OsString],
+            _working_directory: &Path,
+        ) -> Result<Child, std::io::Error> {
+            Ok(spawn_immediately_exiting_process())
+        }
+    }
+
+    /// A fake re-executor whose spawned process never exits and never
+    /// acquires the lease, exercising the timeout path.
+    struct NeverAcquiresLease;
+
+    impl OperatorHostReExecutor for NeverAcquiresLease {
+        fn spawn_operator_host(
+            &self,
+            _arguments: &[OsString],
+            _working_directory: &Path,
+        ) -> Result<Child, std::io::Error> {
+            Ok(spawn_long_running_process())
+        }
+    }
+
+    /// A fake re-executor that fails to spawn anything.
+    struct FailsToSpawn;
+
+    impl OperatorHostReExecutor for FailsToSpawn {
+        fn spawn_operator_host(
+            &self,
+            _arguments: &[OsString],
+            _working_directory: &Path,
+        ) -> Result<Child, std::io::Error> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "fake spawn failure"))
+        }
+    }
+
+    #[test]
+    fn successful_handoff_returns_outcome_once_lease_is_owned() {
+        let project = build_fake_project("example-source");
+
+        let (layout, _project_name) = with_test_cwd(&project.project_root, || {
+            resolve_project_layout("example-source", DataOperation::Acquisition)
+        })
+        .unwrap();
+        let admitted = admit_bundle(&layout, DataOperation::Acquisition).unwrap();
+        let project_identity = build_project_identity("test-project").unwrap();
+        let coordinator = build_coordinator(
+            &layout,
+            project_identity,
+            admitted.identity().clone(),
+            DataOperation::Acquisition,
+        )
+        .unwrap();
+
+        let re_executor = ResumesMostRecentSessionAndHoldsLease::new(&coordinator);
+        let request = background_request("example-source");
+
+        let outcome = with_test_cwd(&project.project_root, || {
+            execute_background_data_with_re_executor_and_timing(
+                request,
+                &re_executor,
+                FAST_TIMEOUT,
+                FAST_POLL,
+            )
+        })
+        .unwrap();
+
+        assert_eq!(outcome.source, "example-source");
+        assert_eq!(outcome.operation, DataOperation::Acquisition);
+    }
+
+    #[test]
+    fn operator_host_exiting_before_ownership_is_a_typed_error() {
+        let project = build_fake_project("example-source");
+        let request = background_request("example-source");
+
+        let result = with_test_cwd(&project.project_root, || {
+            execute_background_data_with_re_executor_and_timing(
+                request,
+                &ExitsWithoutAcquiringLease,
+                FAST_TIMEOUT,
+                FAST_POLL,
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ForegroundDataExecutionError::OperatorHostExitedBeforeOwnership { .. })
+        ));
+    }
+
+    #[test]
+    fn ownership_timeout_is_a_typed_error() {
+        let project = build_fake_project("example-source");
+        let request = background_request("example-source");
+
+        let result = with_test_cwd(&project.project_root, || {
+            execute_background_data_with_re_executor_and_timing(
+                request,
+                &NeverAcquiresLease,
+                FAST_TIMEOUT,
+                FAST_POLL,
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ForegroundDataExecutionError::OperatorHostOwnershipTimeout)
+        ));
+    }
+
+    #[test]
+    fn re_exec_spawn_failure_is_a_typed_error() {
+        let project = build_fake_project("example-source");
+        let request = background_request("example-source");
+
+        let result = with_test_cwd(&project.project_root, || {
+            execute_background_data_with_re_executor_and_timing(
+                request,
+                &FailsToSpawn,
+                FAST_TIMEOUT,
+                FAST_POLL,
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ForegroundDataExecutionError::OperatorHostReExec(_))
+        ));
+    }
+
+    #[test]
+    fn operator_host_rejects_a_session_that_is_no_longer_prepared() {
+        let project = build_fake_project("example-source");
+
+        let (layout, project_name) = with_test_cwd(&project.project_root, || {
+            resolve_project_layout("example-source", DataOperation::Acquisition)
+        })
+        .unwrap();
+        let admitted = admit_bundle(&layout, DataOperation::Acquisition).unwrap();
+        let project_identity = build_project_identity(&project_name).unwrap();
+        let coordinator = build_coordinator(
+            &layout,
+            project_identity,
+            admitted.identity().clone(),
+            DataOperation::Acquisition,
+        )
+        .unwrap();
+
+        let prepared = coordinator.prepare_run(RuntimeSupervisionMode::Background).unwrap();
+        let session_id = prepared.session().clone();
+        // Release, then resume-and-fail, so the session is durably advanced
+        // out of `Prepared` without going through a real operator host.
+        prepared.release_for_handoff();
+        let first_resume = coordinator.resume_prepared_launch(&session_id).unwrap();
+        first_resume
+            .fail_launch(coordinator.store(), SafeSessionFailure::source_failure())
+            .unwrap();
+
+        let reference =
+            OperatorHostInvocationV1::new("example-source", DataOperation::Acquisition, session_id);
+
+        let result = with_test_cwd(&project.project_root, || {
+            execute_operator_host_with_launcher(reference, Vec::new(), &ProcessCommandLauncher)
+        });
+
+        assert!(matches!(
+            result,
+            Err(ForegroundDataExecutionError::SessionPreparation(
+                SessionCoordinationError::HandoffSessionNotPrepared { .. }
+            ))
+        ));
+    }
 }
