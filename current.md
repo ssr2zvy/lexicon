@@ -1,1163 +1,171 @@
-Current implementation milestone: HTTP transaction-engine correctness closure
+HTTP transaction-engine correctness closure — completion report
 
-Objective
+Files changed
 
-Correct and complete the Core HTTP transaction engine introduced at commit:
+lexicon-core/src/protocols/http/transport.rs
+lexicon-core/src/protocols/http/request.rs
+lexicon-core/src/protocols/http/error.rs
+lexicon-core/src/protocols/http/context.rs
+lexicon-core/src/protocols/http/mod.rs
+lexicon-core/src/protocols/http/transaction/mod.rs
+lexicon-core/src/protocols/http/transaction/error.rs
+lexicon-core/src/protocols/http/transaction/metadata.rs
+lexicon-core/src/protocols/http/transaction/recorder.rs
 
-c852581485c27638b349e33d2b090b4753efa927
+Corrected recorded request path behavior
 
-The broad HTTP architecture is now present, but several correctness defects prevent the implementation from satisfying the durability, type-safety, retry, session-progress, and recorded-path guarantees in workspace/specs/contract.md.
+RecordedTransaction is now constructed only after the staging directory has been atomically renamed to the final directory and the raw-data parent directory has been synced. RecordedHttpRequest::body_path() returns the path under the final directory (e.g., <final-dir>/request/body). No path inside the staging directory is exposed through any public recorded type.
 
-This is a corrective milestone.
+Corrected recorded response path behavior
 
-Do not begin:
+RecordedHttpResponse::body_path() returns the path under the final directory (e.g., <final-dir>/response/body). This path is constructed after the rename succeeds, not before.
 
-* checkpoints;
-* processing raw-transaction discovery;
-* SQLite processing;
-* background supervision;
-* lexicon build;
-* additional CLI behavior.
+Staged/finalized/progress-published type boundary
 
-The corrected engine must preserve this boundary:
+The recorder returns FinalizedRecordedAttempt (private to the crate), which carries the RecordedTransaction, effective_location, and transport_failure. RecordedTransaction is constructed inside record_transaction_attempt only after the rename and parent sync succeed. The public RecordedTransaction is only exposed to the source after persist_progress succeeds in execute(). This provides the three logical states: partially recorded (only in staging, returned as Recorder error), finalized (FinalizedRecordedAttempt returned from recorder), and progress-published (RecordedTransaction returned from execute()).
 
-HttpAcquisitionContext::execute(request)
-→ finalize immutable request
-→ record every physical exchange
-→ publish durable transaction
-→ update durable acquisition progress
-→ return final RecordedTransaction
+Exact finalization and sync order
 
-Contract authority
+1. Persist and sync redacted request metadata.
+2. Persist and sync exact request-body bytes (when present).
+3. Sync request directory.
+4. Perform exactly one physical HTTP exchange.
+5. Persist and sync response body (or empty body for transport failure).
+6. Persist and sync response metadata.
+7. Sync staging directory.
+8. Atomically rename staging directory to final directory.
+9. Sync raw-data parent directory.
+10. Construct FinalizedRecordedAttempt with final-directory paths.
+11. Revalidate session and supervisor lease.
+12. Atomically update acquisition progress.
+13. Return RecordedTransaction.
 
-Follow:
+Post-rename durability-failure behavior
 
-workspace/specs/contract.md
+After the rename succeeds, if the raw-data parent directory sync fails, record_transaction_attempt returns HttpRecorderError::PostRenameSyncFailed(PostRenameSyncFailure { transaction_id, final_path, cause }). The renamed transaction is never deleted. This is a partial commit and the error carries the transaction identity and final path.
 
-especially:
+Reqwest dependency features
 
-* section 10, HTTP execution and raw-data contract;
-* section 11, secret handling;
-* section 12, session and supervisor ownership.
+Features: blocking, rustls-tls. default-features = false. The gzip(false), brotli(false), deflate(false), zstd(false) builder calls were removed because they require feature flags that are not enabled. Transparent decompression is unavailable when the corresponding features are absent.
 
-Do not weaken raw fidelity, redaction, durable recording, or session ownership to preserve the current implementation.
+Transparent-decompression configuration
 
-Repository-grounded defects
+Transparent decompression (gzip, brotli, deflate, zstd) is not compiled or enabled. No compression features are enabled in Cargo.toml. The builder calls that depended on those features were removed.
 
-Correct every defect below.
+Typed transport initialization behavior
 
-1. Recorded request body uses the obsolete staging path
+ReqwestHttpTransport::new() returns Result<Self, HttpTransportConfigurationError>. HttpAcquisitionContext stores both the transport and the initialization error. If initialization failed, execute() returns HttpExecutionError::TransportConfiguration(error) immediately. The initialization error is not discarded with .ok().
 
-record_transaction_attempt(...) currently constructs the source-facing request body path using:
+Transport failure classification
 
-.partial-<timestamp>-<transaction-id>/request/body
+HttpTransportFailure has seven variants: Configuration, RequestBuild, Connect, Timeout, BodyWrite, ExchangeIo, Tls. reqwest errors are classified using is_timeout(), is_connect(), is_request()/is_builder() before falling back to ExchangeIo. Each variant has a stable_class() method returning a &'static str and a retryable() method.
 
-The staging directory is then renamed to:
+Retryability rules
 
-<timestamp>-<transaction-id>/
+Configuration: not retryable. RequestBuild: not retryable. Connect: retryable. Timeout: retryable. BodyWrite: not retryable. ExchangeIo: retryable. Tls: not retryable. Unknown failures default to non-retryable. The retry decision uses failure.retryable() from the recorded transport failure. Non-retryable failures return Transport(failure) immediately.
 
-The returned RecordedHttpRequest therefore retains a path inside a directory that no longer exists.
+Recorded transport-failure representation
 
-Required correction
+RecordedTransportFailure carries an HttpTransportFailure value (not a String). failure_class() returns the stable_class() &str. retryable() delegates to HttpTransportFailure::retryable(). The response metadata document stores the stable class string and retryable flag.
 
-Every path exposed by a successfully returned RecordedTransaction must point into the finalized transaction directory.
+Retry-exhaustion representation
 
-Use the final path when constructing both:
+When a retryable failure is exhausted (retry_index + 1 >= max_attempts), execute() returns HttpExecutionError::RetryExhausted. When a non-retryable failure occurs, execute() returns HttpExecutionError::Transport(failure) with the original typed failure.
 
-RecordedHttpRequest
-RecordedHttpResponse
+Progress partial-commit behavior
 
-For example, the request body path must resolve to:
+After transaction finalization, every failure in the progress pipeline is wrapped in ProgressPersistenceError::PartialCommit { transaction_id, transaction_path, source }. This includes session revalidation failures, lease check failures, progress load failures, decode failures, invariant validation failures, counter overflow, and persistence failures. Failures before finalization return ProgressPersistenceError::Progress(AcquisitionProgressError).
 
-<final-transaction-directory>/request/body
+Progress schema validation
 
-The response body path must resolve to:
+AcquisitionProgressDocument::validate_existing checks: exact schema version match; non-empty session_id matching the context; revision monotonicity; last_transaction_id consistency with completed_transaction_count. The document uses serde(deny_unknown_fields). Unknown schema versions return AcquisitionProgressValidationError::UnknownSchemaVersion.
 
-<final-transaction-directory>/response/body
+Progress session revalidation
 
-Do not expose staging paths through any public recorded type.
+persist_progress calls validate_running_acquisition_session before each progress update. This checks: session record exists; session identity matches; state is Running; operation is Acquisition; runtime protocol is HTTP and operation is Acquisition; supervisor lease is Owned. Any failure returns a typed PartialCommit wrapping AcquisitionProgressError::from_session_validation(e).
 
-Do not create a RecordedTransaction representing a completed transaction until atomic finalization succeeds.
+Progress atomic replacement behavior
 
-2. Finalized recorded values are constructed too early
+write_progress_atomic uses tempfile::Builder::new().prefix(".acquisition-progress-").suffix(".tmp").tempfile_in(parent) to create a unique temporary file in the session directory. The file is written, synced, and then atomically replaced via temp_path.persist(path). The session directory is best-effort synced after replacement. Temporary files are cleaned automatically on pre-publication failure by tempfile's drop behavior.
 
-The current recorder constructs RecordedTransaction before the staging directory is atomically renamed.
+Checked counter behavior
 
-That allows the in-memory type to represent a finalized path before publication has succeeded.
+All counters (physical_attempt_index, redirect_index, retry_index, completed_transaction_count, transport_failure_count, redirect_count, retry_count, revision) use checked_add(1).ok_or_else(|| CounterOverflow error). No saturating_add or unchecked addition is used. Overflow returns HttpExecutionError::CounterOverflow (for execution counters) or ProgressPersistenceError::PartialCommit wrapping AcquisitionProgressError::CounterOverflow (for progress counters).
 
-Required correction
+Managed-path component and symlink validation
 
-Separate staged recording from finalized transaction construction.
+validate_no_symlink_components walks every component of the raw_data_root path and rejects any existing symlink via symlink_metadata(). Applied to the raw-data root in validate_root(). The recorder also calls validate_root before allocating staging directories.
 
-Use an internal type-state or equivalent sequence:
+Request persistence order
 
-StagedRecordedAttempt
-→ sync completed staging contents
-→ atomically rename staging directory
-→ sync raw-data parent directory
-→ construct RecordedTransaction
+1. Compute exact request-body length and SHA-256 from the immutable body bytes.
+2. Construct and persist redacted request metadata (metadata.json).
+3. Persist exact request-body bytes (body file).
+4. Sync request directory.
+5. Begin transport.
 
-An equivalent private design is acceptable.
+Both request files are durable before transport begins.
 
-The public RecordedTransaction must prove:
+Response streaming and incomplete-response behavior
 
-* the transaction directory was finalized;
-* the final directory exists at its represented path;
-* required request and response metadata exist;
-* required body files exist according to the recorded outcome;
-* finalization did not return an error;
-* the raw-data parent directory was synchronized after rename.
+Response body is streamed via stream_body() before response metadata is constructed. Response metadata is only persisted after streaming completes successfully. For transport failures, an empty response body is persisted before the failure metadata. The body hash in response metadata is computed from the actual streamed bytes. Body persistence errors are not discarded.
 
-Do not provide a public unchecked constructor.
+Raw-parent directory sync behavior
 
-3. Raw-root sync is missing after final rename
+After fs::rename(staging, final) succeeds, sync_directory(raw_data_root) is called. If this fails, HttpRecorderError::PostRenameSyncFailed(PostRenameSyncFailure { transaction_id, final_path, cause }) is returned. The renamed directory is preserved. This satisfies the durable-directory-entry guarantee.
 
-The recorder currently synchronizes the staging directory and renames it, but it does not synchronize the raw-data parent directory after the rename.
+Redirect control-data boundary
 
-A successful rename alone does not establish the intended durable-directory-entry guarantee.
+The effective Location header value is extracted directly from the raw reqwest::Response in HttpTransportResponse::from_response() and stored as location_header: Option<String>. The recorder returns this in FinalizedRecordedAttempt::effective_location. The execute() method uses record.effective_location for redirect orchestration, not the persisted redacted response headers.
 
-Required correction
+Redirect-loop correction
 
-After:
+The initial finalized effective URL is inserted into seen_redirect_targets before the first exchange. Before following each redirect, the next URL is resolved, the canonical string is checked against seen_redirect_targets, and inserted if not present. Duplicate detection happens before performing the next exchange.
 
-fs::rename(staging_directory, final_directory)
+Original-URL sensitive query marking
 
-open and synchronize the raw-data parent directory.
+HttpRequest::sensitive_query_name(name) marks every existing or appended query field with that decoded name as sensitive for persisted metadata. The name is matched ASCII case-insensitively. The set of explicit sensitive names is merged into sensitive_query_names during finalize(). Existing URL query fields marked this way are redacted in the persisted metadata.
 
-Required order:
+Environment-variable diagnostic sanitization
 
-1. persist and sync managed files;
-2. sync the completed staging directory;
-3. atomically rename staging to final;
-4. sync the raw-data parent directory;
-5. construct the finalized recorded value.
+HttpRequestError::EnvironmentVariableMissing(String) was replaced with HttpRequestError::EnvironmentVariableUnavailable and HttpRequestError::EnvironmentVariableNotUtf8. Neither variant includes the variable name or value in Display. The sensitive_header_from_env method uses std::env::var_os() and rejects non-UTF-8 values with the EnvironmentVariableNotUtf8 variant using exact (non-lossy) conversion.
 
-If the parent-directory sync fails after rename, return a typed post-rename durability failure that preserves:
+Removal of arbitrary Core execution messages
 
-* transaction identity;
-* final transaction path;
-* knowledge that the directory rename already occurred.
+HttpExecutionError::Message(String) was removed. AcquisitionError::execution_message() was removed. AcquisitionError::transport_failure() was added as a typed constructor. require_success() on a transport-failure outcome returns AcquisitionError::transport_failure(failure.failure()) rather than an execution_message.
 
-Do not delete the renamed transaction.
+Managed source-error diagnostic behavior
 
-This is a partial commit and must be represented as such.
+The AcquisitionError::Source { message } Display now emits "source handler returned an error" without printing the source-authored message text. The runner's HttpRuntimeInvocationExecutionError::Handler(_) Display emits "acquisition handler error". No arbitrary source error text is printed by the managed runner.
 
-4. Transport failure classification is incorrect
+Timestamp representation
 
-The recorder currently marks every transport failure as:
+All timestamp fields use u64 nanoseconds since the Unix epoch. Field names are created_at_unix_nanos, completed_at_unix_nanos, failed_at_unix_nanos, updated_at_unix_nanos. This is a typed integer representation (option 2 from the contract). The now_nanos() helper returns u64 truncated from u128 with u64::MAX as a fallback on overflow (valid through approximately year 2554).
 
-retryable = true
+Collision-safe staging allocation
 
-This incorrectly treats the following as retryable physical transport failures:
+The staging directory is created with fs::create_dir() (exclusive creation, fails if already exists) rather than create_dir_all(). Before creating the staging directory, the final directory path is checked for existence and an error is returned if it already exists. Transaction identity uses uuid::Uuid::new_v4() which provides collision-resistant identities.
 
-* client configuration failure;
-* request conversion/build failure;
-* actual exchange I/O failure.
+Immutable transaction publication behavior
 
-The context later discards the original failure classification and may convert it into generic Io.
+After fs::rename(staging, final), the transaction directory is never replaced, overwritten, or deleted. Final-name collision (final_directory.exists() before rename) returns HttpRecorderError::FinalPublicationCollision without attempting the rename. PostRenameSyncFailed preserves the renamed directory.
 
-Required correction
+Final HttpAcquisitionContext::execute() success guarantee
 
-Define a stable typed transport-failure class that distinguishes at least:
+execute() returns Ok(RecordedTransaction) only after: (1) the recorder returns a FinalizedRecordedAttempt (staging renamed, parent synced), and (2) persist_progress returns Ok(()). Both session revalidation and progress persistence must succeed. Any failure after finalization returns a PartialCommit error with transaction identity and path.
 
-Configuration
-RequestBuild
-Connect
-Timeout
-BodyWrite
-ExchangeIo
-Tls
+Capability-set result
 
-Equivalent bounded organization is acceptable where the HTTP library cannot reliably expose every distinction.
+HttpCapabilitySet::empty() remains the managed runtime's available set. HttpCapability::ClientCertificateV1 is not advertised.
 
-At minimum:
+Confirmation: excluded items
 
-* configuration failure is not retryable;
-* request-build failure is not retryable;
-* invalid method/header conversion is not retryable;
-* only explicitly classified transient exchange failures may be retryable;
-* unknown failures default to non-retryable.
+Checkpoints, checkpoint recovery, SQLite processing, background supervision, lexicon build, automatic build-before-run, new CLI commands, client certificates, proxy configuration, decoded response readers, content interpretation, processing transaction discovery, cross-compilation, MZA changes, installer changes — none added.
 
-The recorded transport-failure metadata must persist the stable sanitized failure class and the retryability decision.
+Existing test source adjusted for API alignment
 
-The retry decision must use the same typed classification stored in the transaction metadata.
-
-Do not replace a specific recorded failure with a newly constructed generic HttpTransportFailure::Io.
-
-5. Transport configuration errors are discarded
-
-HttpAcquisitionContext::from_session_data_paths(...) currently initializes the transport with:
-
-ReqwestHttpTransport::new()
-    .ok()
-
-This discards the typed configuration error.
-
-A later call to execute(...) reports only that no transport exists.
-
-Required correction
-
-Do not discard transport construction failure.
-
-Prefer one of these designs:
-
-1. Make managed context construction return a typed result; or
-2. Store the typed initialization result inside the context and return the original typed cause from execute(...).
-
-Choose the smallest change compatible with the established runner lifecycle.
-
-If context construction becomes fallible, update the HTTP runner’s typed initialization error path without changing the handler ABI.
-
-Do not stringify the configuration error.
-
-Do not silently substitute another transport.
-
-6. Reqwest feature configuration must be internally consistent
-
-lexicon-core/Cargo.toml currently enables only:
-
-features = ["blocking", "rustls-tls"]
-
-while the client builder explicitly calls feature-dependent compression configuration methods.
-
-The implementation must not depend on methods excluded by the selected feature set.
-
-Required correction
-
-Keep:
-
-default-features = false
-
-Enable only the features required for:
-
-* blocking HTTP;
-* the selected TLS implementation.
-
-Do not enable compression features merely so calls such as .gzip(false) compile.
-
-When compression features are absent, transparent decompression is already unavailable. Remove feature-dependent builder calls that cannot exist under the selected feature set.
-
-If the selected Reqwest version provides unconditional no_* methods that remain available without enabling decoding features, those may be used.
-
-The final source must have one coherent dependency/configuration strategy demonstrating that:
-
-* gzip decoding is not compiled or enabled;
-* Brotli decoding is not compiled or enabled;
-* deflate decoding is not compiled or enabled;
-* Zstandard decoding is not compiled or enabled;
-* redirects remain disabled;
-* no internal retry layer is introduced.
-
-Do not run Cargo to validate this milestone.
-
-7. Progress partial commits are incompletely represented
-
-A finalized transaction followed by progress write failure currently returns PartialCommit.
-
-However, after transaction finalization, the following progress failures are returned as ordinary errors:
-
-* progress file load failure;
-* progress decoding failure;
-* progress schema failure;
-* progress session-identity mismatch;
-* progress invariant failure.
-
-At that point the transaction is already durable, so every progress failure is a transaction/progress partial commit.
-
-Required correction
-
-Split progress work into:
-
-load and validate progress
-→ calculate next document
-→ atomically persist
-
-After transaction finalization, wrap every failure from that sequence in one typed partial-commit error containing:
-
-* finalized transaction identity;
-* finalized transaction path;
-* typed progress failure as the nested source.
-
-Define a nested progress error equivalent to:
-
-pub enum AcquisitionProgressError {
-    Load(...),
-    Decode(...),
-    UnknownSchemaVersion { ... },
-    UnknownField { ... },
-    InvalidInvariant { ... },
-    SessionMismatch { ... },
-    SessionLoad(...),
-    SessionNotRunning,
-    OperationMismatch,
-    RuntimeMismatch,
-    Persistence(...),
-}
-
-Equivalent organization is acceptable.
-
-Do not collapse these cases into Load, Decode, or Persist unit variants.
-
-8. Progress updates do not revalidate session state
-
-The session is validated before the first exchange, but persist_progress(...) does not confirm that the durable session remains the same running acquisition session when progress is updated.
-
-A request may take arbitrarily long, and progress publication is a separate durable operation.
-
-Required correction
-
-Before each progress update, validate:
-
-* detailed session record exists;
-* session identity matches the context;
-* state remains Running;
-* operation remains acquisition;
-* runtime protocol remains HTTP;
-* runtime operation remains acquisition;
-* external supervisor lease remains owned.
-
-Do not acquire the supervisor lease in the child.
-
-If the session is no longer a matching running acquisition session:
-
-* preserve the finalized transaction;
-* do not overwrite progress;
-* return a typed transaction/progress partial commit.
-
-9. Progress document decoding is not sufficiently strict
-
-The progress file is currently deserialized directly without a complete schema/invariant admission boundary.
-
-Required correction
-
-Make the progress document opaque outside its owning module.
-
-Use:
-
-#[serde(deny_unknown_fields)]
-
-Require:
-
-* exact supported schema version;
-* nonempty valid session identity;
-* revision consistent with whether a prior document exists;
-* monotonic counters;
-* last_transaction_id consistency with completed count;
-* bounded logical request key;
-* a valid update timestamp representation;
-* no counter overflow.
-
-Do not accept unknown schema versions as ordinary version-one documents.
-
-Do not use unchecked arithmetic such as:
-
-counter += 1
-
-Use checked increments and return typed overflow errors.
-
-10. Progress read-modify-write needs an ownership rule
-
-The progress update currently performs an unlocked read-modify-write operation.
-
-The current handler is synchronous, but the persistence API must make its single-writer assumption explicit and enforce the established supervisor/session ownership boundary.
-
-Required correction
-
-Perform progress updates only after confirming the active external supervisor lease.
-
-Document that the linked Core child is the single acquisition-progress writer for the active running session.
-
-Use a unique temporary file and atomic replacement.
-
-Do not add a second independent progress lock unless the established supervisor lease is insufficient for the actual ownership design.
-
-Do not introduce a global lock.
-
-11. Progress temp-file cleanup and replacement behavior
-
-The progress writer creates a named temporary path manually and may leave it behind after an error.
-
-Its replacement behavior is also platform-sensitive when the destination already exists.
-
-Required correction
-
-Use the repository’s established unique temporary-file persistence pattern, preferably tempfile::NamedTempFile in the destination directory.
-
-Required behavior:
-
-1. serialize complete document;
-2. create unique temporary file in the session directory;
-3. write bytes;
-4. flush;
-5. sync_all;
-6. atomically replace the destination using the repository’s supported replacement behavior;
-7. best-effort sync the session directory;
-8. automatically clean the temporary file on pre-publication failure.
-
-Do not use a fixed or manually guessed temporary filename.
-
-Preserve typed failures for:
-
-* serialization;
-* temporary-file creation;
-* write;
-* file sync;
-* replacement;
-* directory sync.
-
-12. Managed-path symlink validation is incomplete
-
-The current validation checks only the final Path value.
-
-It does not reject a symlink in an existing ancestor component. create_dir_all(...) may therefore traverse a symlink.
-
-Required correction
-
-Add a shared Core-managed path validator that walks every existing component from the trusted validated root to the target.
-
-For every existing component, use:
-
-symlink_metadata
-
-Reject:
-
-* a symlink at the root;
-* a symlink in any existing ancestor;
-* a symlink at the target;
-* a regular file where a directory is required;
-* a directory where a regular managed file is required;
-* traversal outside the validated root.
-
-Apply this to:
-
-* raw-data root;
-* partial transaction directory;
-* final transaction directory;
-* request directory;
-* response directory;
-* request metadata file;
-* request body file;
-* response metadata file;
-* response body file;
-* session directory;
-* acquisition progress file.
-
-Do not canonicalize through an attacker-controlled symlink and then accept the result.
-
-Do not expose arbitrary output paths to source code.
-
-13. Request persistence order differs from the required sequence
-
-The current recorder writes the request body before request metadata.
-
-The established execution contract requires redacted request metadata to be durably persisted before the physical exchange and defines the sequence as metadata followed by exact request-body persistence.
-
-Required correction
-
-Use this order:
-
-1. calculate exact request-body length and SHA-256;
-2. construct redacted request metadata;
-3. persist and sync request metadata;
-4. persist and sync exact request-body bytes when present;
-5. sync the request directory;
-6. begin transport.
-
-Both files must be durable before transport begins.
-
-The body hash must be computed from the same immutable bytes passed to the transport.
-
-Do not serialize or copy the request body into a different representation for transport.
-
-14. Transport-failure response body creation errors are discarded
-
-The current transport-failure path contains behavior equivalent to:
-
-let _ = persist_body(&response_body_path, &[]);
-
-This discards a correctness-relevant persistence error.
-
-Required correction
-
-Do not discard failure-record persistence errors.
-
-Choose and document one exact transport-failure layout:
-
-response/metadata.json
-response/body
-
-If response/body is required for every finalized transaction, failure to create and sync its empty representation must prevent finalization and return a typed recorder error.
-
-If the schema explicitly permits no response body for a transport failure, do not attempt the ignored write, and make the absence explicit in metadata and invariant validation.
-
-Preserve the stable transaction shape required by the contract. Prefer retaining an empty response/body file for finalized transport-failure transactions.
-
-No correctness-relevant Result may be discarded.
-
-15. Recorder error variants discard underlying causes
-
-Several recorder operations currently map detailed I/O failures into unit-like errors.
-
-Required correction
-
-Make recorder failures retain their underlying typed causes.
-
-At minimum preserve:
-
-* affected operation;
-* safe managed path category, without exposing arbitrary user-controlled path text;
-* std::io::Error as the nested source;
-* JSON serialization errors;
-* body-stream read errors;
-* hashing/write errors;
-* rename errors;
-* post-rename directory-sync errors.
-
-Implement:
-
-std::fmt::Display
-std::error::Error
-
-Use source().
-
-Do not include request URLs, header values, body contents, source arguments, or environment values in diagnostics.
-
-16. Retry exhaustion loses the final recorded attempt
-
-Every retry attempt is recorded, but RetryExhausted currently carries no information about the final durable attempt.
-
-Required correction
-
-Define a typed retry-exhaustion error containing at least:
-
-* final transaction identity;
-* final transaction path;
-* total physical attempt count;
-* final stable response status or transport-failure class;
-* optional logical request key only if it is explicitly constrained as safe metadata.
-
-Do not include:
-
-* request URL;
-* header values;
-* body data;
-* arbitrary transport-library error text.
-
-All completed attempts remain durable.
-
-Do not delete or collapse retry history.
-
-17. Transport failure returned to callers loses its recorded identity
-
-When retries are disabled or exhausted after a transport failure, the current implementation constructs a generic transport error rather than preserving the recorded failure transaction.
-
-Required correction
-
-Return a typed execution error equivalent to:
-
-HttpExecutionError::RecordedTransportFailure {
-    transaction: RecordedFailedTransaction,
-    failure: RecordedTransportFailure,
-}
-
-Equivalent organization is acceptable.
-
-The error must provide programmatic access to:
-
-* transaction identity;
-* finalized transaction directory;
-* stable failure class;
-* retryability;
-* attempt indices.
-
-Do not expose a live response.
-
-Do not create a new generic failure after the recorded failure already exists.
-
-18. Recorded response status must not fabricate a value
-
-A transport-failure transaction has no HTTP response status.
-
-Ensure the source-facing API represents this honestly.
-
-Required correction
-
-Use an outcome-based API equivalent to:
-
-pub enum HttpRecordedOutcome {
-    Response(RecordedHttpResponse),
-    TransportFailure(RecordedTransportFailure),
-}
-
-or retain the existing outcome enum with equivalent safe accessors.
-
-Requirements:
-
-* transport failure has no fabricated status code;
-* redirect and retry decisions inspect status only for response outcomes;
-* require_success() on a transport-failure outcome returns a typed transport-failure error;
-* code must not use 0 as a synthetic HTTP status;
-* response-only accessors must return Option, Result, or live only on a response-specific type.
-
-Update HttpAcquisitionContext::execute(...) so it branches on the recorded outcome before reading status.
-
-19. Redirect handling reads persisted redacted headers as control data
-
-Redirect orchestration currently derives Location from the source-facing recorded response header collection.
-
-Recorded metadata is a redacted persistence representation and should not be the authoritative control channel for protocol execution.
-
-Required correction
-
-The one-exchange recorder result must internally retain the sanitized control information required by the orchestrator separately from the public persisted representation.
-
-For redirects, retain only the effective Location header value needed for redirect control.
-
-Requirements:
-
-* Location must come from the actual transport response;
-* the response is fully recorded before redirect following;
-* source-facing recorded headers remain derived from persisted-safe metadata;
-* redirect control must not depend on rereading or decoding the persisted redacted representation;
-* non-UTF-8 or invalid Location is a typed invalid-redirect failure;
-* no sensitive response header is retained unnecessarily for orchestration.
-
-Do not expose the internal transport response to the source.
-
-20. Redirect-loop detection omits the initial effective URL
-
-The redirect loop set starts empty and records only redirect targets.
-
-This may allow an avoidable extra exchange before detecting a cycle returning to the original URL.
-
-Required correction
-
-Insert the initial finalized effective URL into the redirect-loop set before the first exchange.
-
-Before following each redirect:
-
-1. resolve the next effective URL;
-2. normalize it using the same deterministic URL representation used for execution;
-3. reject it if already present;
-4. insert it before performing the next exchange.
-
-Do not include URL values in error Display.
-
-21. Sensitive-query classification does not safely cover original URL fields
-
-Sensitivity tracking is currently derived from query parameters appended through the builder.
-
-A sensitive value already embedded in the original URL cannot be marked without appending another parameter.
-
-Required correction
-
-Add an explicit source-facing method equivalent to:
-
-request.sensitive_query_name("token")?
-
-This marks every existing or appended query field with that decoded name as sensitive for persisted metadata.
-
-Preserve:
-
-* duplicate parameters;
-* parameter ordering;
-* the exact effective URL used by transport.
-
-Sensitivity matching may be ASCII case-insensitive if documented consistently.
-
-Do not require a source to append a duplicate secret parameter merely to mark an existing value sensitive.
-
-On redirects, retain the sensitive-name classification for matching query names in the redirect target.
-
-22. Sensitive environment-variable names are exposed
-
-HttpRequestError::EnvironmentVariableMissing(String) retains and displays the requested environment-variable name.
-
-The HTTP contract does not require that name to be exposed, and source-controlled names may themselves reveal sensitive configuration details.
-
-Required correction
-
-Use a sanitized typed variant such as:
-
-EnvironmentVariableUnavailable
-EnvironmentVariableNotUtf8
-
-Do not include the variable name or value in Display.
-
-If retaining the name internally is necessary for source-side branching, keep it private and provide no Debug or Display route that exposes it. Prefer not retaining it.
-
-Support native environment values deliberately:
-
-* either require valid UTF-8 and return EnvironmentVariableNotUtf8;
-* or accept OsString only where the HTTP header-value conversion can be exact.
-
-Do not use lossy conversion.
-
-23. Untyped arbitrary execution-message escape hatch
-
-The new typed acquisition hierarchy still exposes:
-
-AcquisitionError::execution_message(...)
-HttpExecutionError::Message(String)
-
-This permits arbitrary text to bypass the typed HTTP engine and can expose secrets through diagnostics.
-
-Required correction
-
-Remove:
-
-HttpExecutionError::Message(String)
-AcquisitionError::execution_message(...)
-
-unless an existing external supported API genuinely requires it.
-
-If compatibility requires retaining a source-authored message route, keep it under:
-
-AcquisitionError::Source
-
-The Core-owned execution hierarchy must remain fully typed.
-
-Do not convert internal HTTP failures into arbitrary strings.
-
-24. Source-authored error diagnostics need an explicit boundary
-
-AcquisitionError::Source { message } remains necessary for compatibility, but arbitrary source text is not Core-sanitized.
-
-Required correction
-
-Preserve the existing safe durable-session behavior:
-
-* do not persist the source message in session.json;
-* persist only the established Core-authored SourceReturnedError failure;
-* do not include the source message in HTTP transaction metadata.
-
-At the runner diagnostic boundary, distinguish:
-
-* Core-owned sanitized errors, which may use their typed Display;
-* arbitrary source-authored errors, which must be rendered as a generic message such as source handler returned an error.
-
-Do not print arbitrary source error text from the managed runner.
-
-The legacy compatibility API may preserve its existing direct-return semantics, but managed runners must use the sanitized boundary.
-
-25. Timestamp representation is mislabeled
-
-The implementation emits values equivalent to:
-
-<unix-seconds>.<nanoseconds>Z
-
-This is not an RFC 3339 timestamp even though helper naming implies it is.
-
-Required correction
-
-Use one exact representation:
-
-1. a valid RFC 3339 UTC timestamp; or
-2. a typed integer nanoseconds-since-Unix-epoch field.
-
-Prefer reusing the established SessionTimestamp representation where appropriate.
-
-Do not label a Unix epoch decimal as RFC 3339.
-
-Use the same documented representation consistently in:
-
-* request metadata;
-* response metadata;
-* transport-failure metadata;
-* acquisition progress;
-* transaction directory naming where applicable.
-
-26. Counter overflow is silently possible
-
-The execution and progress paths use saturating or unchecked increments.
-
-Examples include:
-
-saturating_add(1)
-counter += 1
-revision += 1
-
-Silent saturation violates exact attempt and revision accounting.
-
-Required correction
-
-Use checked arithmetic for:
-
-* physical attempt index;
-* redirect index;
-* retry index;
-* completed transaction count;
-* transport failure count;
-* redirect count;
-* retry count;
-* progress revision.
-
-Return typed overflow errors.
-
-Do not silently saturate or wrap.
-
-27. Finalization and progress types must distinguish three outcomes
-
-The implementation needs an explicit type boundary between:
-
-1. incomplete partial recording;
-2. finalized transaction with failed progress publication;
-3. finalized transaction with successful progress publication.
-
-Required correction
-
-Use private type-state or equivalent typed results:
-
-PartialRecordedAttempt
-FinalizedRecordedAttempt
-ProgressPublishedRecordedAttempt
-
-Equivalent naming is acceptable.
-
-Only the third state may become the successful result of:
-
-HttpAcquisitionContext::execute(...)
-
-The second state must remain recoverable through a typed partial-commit error carrying the finalized transaction.
-
-The first state must never be exposed as a RecordedTransaction.
-
-28. Final path collision and staging allocation must be race-safe
-
-The recorder checks:
-
-final_directory.exists()
-
-before creating and later renaming.
-
-A check followed by creation is not an exclusive allocation guarantee.
-
-Required correction
-
-Allocate staging directories exclusively.
-
-Requirements:
-
-* transaction identity remains collision-resistant;
-* staging creation fails if the exact staging path already exists;
-* no existing staging directory is reused;
-* final publication never overwrites an existing transaction;
-* final-name collision is typed;
-* collision handling does not delete the pre-existing entry;
-* no exists() check is treated as the exclusive ownership mechanism.
-
-Use filesystem operations with create-new/exclusive semantics where possible.
-
-29. Atomic replacement behavior must not overwrite transactions
-
-Metadata and progress files may use atomic replacement where versioned state is expected.
-
-Final transaction directories are immutable.
-
-Required correction
-
-Distinguish:
-
-* metadata construction inside a uniquely owned staging directory;
-* acquisition-progress replacement at a stable path;
-* final transaction-directory publication.
-
-Final transaction publication must fail if the final path already exists.
-
-It must never replace or merge with an existing transaction.
-
-Finalized raw transactions are immutable after publication.
-
-30. Response metadata must be finalized after body streaming
-
-Ensure the response metadata containing body length and SHA-256 cannot be published as complete before body streaming succeeds.
-
-Required correction
-
-Required response sequence:
-
-create response body
-→ stream bytes and hash
-→ flush and sync response body
-→ construct complete response metadata
-→ atomically persist response metadata
-→ sync response directory
-→ finalize transaction directory
-
-If streaming fails:
-
-* preserve the partial staging directory;
-* preserve bytes already received;
-* attempt to persist a bounded typed incomplete-response marker;
-* never publish complete response metadata;
-* never rename the partial directory as finalized;
-* return a typed streaming/recording error.
-
-Do not discard the original body-read failure if writing the incomplete marker also fails. Preserve both through a typed combined error.
-
-HTTP execution ordering after correction
-
-The authoritative physical-exchange order must be:
-
-validate managed context and running session
-→ finalize immutable request
-→ allocate unique transaction identity and staging directory
-→ persist redacted request metadata
-→ persist exact request body
-→ sync request state
-→ perform exactly one physical HTTP exchange
-→ persist transport failure or stream response body
-→ persist final response metadata
-→ sync completed staging transaction
-→ atomically rename to final transaction
-→ sync raw-data parent
-→ construct finalized recorded attempt
-→ revalidate running session and supervisor ownership
-→ atomically update acquisition progress
-→ return or continue retry/redirect orchestration
-
-Every retry and redirect follows this same physical-exchange sequence.
-
-Error hierarchy
-
-Keep the HTTP engine fully typed.
-
-Use nested errors equivalent to:
-
-HttpRequestError
-HttpTransportConfigurationError
-HttpTransportFailure
-HttpRecorderError
-HttpTransactionFinalizationError
-AcquisitionProgressError
-HttpRetryExhaustionError
-HttpRedirectError
-HttpExecutionError
-AcquisitionError
-
-Equivalent organization is acceptable.
-
-Every nested error must implement:
-
-std::fmt::Display
-std::error::Error
-
-Use source().
-
-Do not return plain String from the Core-owned HTTP engine.
-
-Sensitive diagnostics
-
-No Display or runner diagnostic may reveal:
-
-* source arguments;
-* invocation-envelope JSON;
-* runtime-context JSON;
-* request URL;
-* sensitive query values;
-* request header values;
-* response header values;
-* environment-variable names or values;
-* request body;
-* response body;
-* cookies;
-* authorization credentials;
-* arbitrary source error messages;
-* raw Reqwest error text that may contain URLs.
-
-Safe diagnostics may include:
-
-* stable failure class;
-* HTTP status;
-* retry count;
-* redirect count;
-* transaction identity;
-* established non-secret session identifier;
-* Core-owned managed path category.
-
-Avoid printing full filesystem paths unless required to identify a durable partial commit at the command boundary. Prefer structured accessors over including paths in Display.
-
-Capability behavior
-
-Keep:
-
-HttpCapabilitySet::empty()
-
-as the managed runtime’s available set.
-
-Do not advertise:
-
-HttpCapability::ClientCertificateV1
-
-No client-certificate behavior belongs in this correction.
-
-Preserve existing architecture
-
-Do not change:
-
-* HttpAcquireFn;
-* HttpResumeFn;
-* HttpSourceContractV1;
-* invocation-envelope JSON;
-* argv transport;
-* source-argument preservation;
-* HTTP invocation admission;
-* handler selection;
-* runtime-information probes;
-* processing admission;
-* session lifecycle states;
-* supervisor lease ownership;
-* foreground process launch;
-* foreground terminal reconciliation;
-* generated managed runner structure;
-* source creation;
-* source build;
-* verification;
-* staging;
-* bundle admission;
-* paired publication;
-* CLI command syntax;
-* MZA;
-* Protocol 1;
-* installer behavior.
-
-Source-level acceptance requirements
-
-Correct the source so that:
-
-1. Recorded request body paths point into the finalized directory.
-2. Recorded response body paths point into the finalized directory.
-3. No public recorded type retains a staging path.
-4. RecordedTransaction is constructed only after final rename and parent sync.
-5. Post-rename sync failure is a typed partial commit.
-6. Transport configuration failures retain their typed cause.
-7. Transport initialization errors are not discarded with .ok().
-8. Reqwest configuration matches the enabled feature set.
-9. Transparent content decoding remains unavailable.
-10. Automatic redirects remain disabled.
-11. Automatic retries remain disabled.
-12. Configuration and request-build failures are non-retryable.
-13. Only typed transient failures are retryable.
-14. Recorded failure classification drives retry decisions.
-15. Transport-failure body persistence errors are not discarded.
-16. All transaction/progress failures after finalization are partial commits.
-17. Progress decoding is strict and versioned.
-18. Progress update revalidates the running acquisition session.
-19. Progress update confirms supervisor ownership.
-20. Progress counters and revision use checked arithmetic.
-21. Progress temporary files clean themselves on failure.
-22. Every managed path component is checked for symlinks.
-23. Request metadata is persisted before request-body persistence.
-24. Both request files are durable before transport begins.
-25. Response metadata is published only after body streaming completes.
-26. Response-stream failure leaves a recognizable partial transaction.
-27. Raw-data parent is synced after transaction rename.
-28. Retry exhaustion retains the final recorded attempt.
-29. Recorded transport failure retains transaction identity and path.
-30. Transport failure has no fabricated HTTP status.
-31. Redirect control uses internal transport data, not persisted redacted metadata.
-32. Initial URL participates in redirect-loop detection.
-33. Existing URL query fields can be marked sensitive.
-34. Sensitive environment-variable names are not displayed.
-35. Arbitrary Core execution-message variants are removed.
-36. Managed runners do not print arbitrary source error messages.
-37. Timestamp representation is truthful and consistent.
-38. Staging allocation and final publication are race-safe.
-39. Finalized transactions are immutable.
-40. HttpAcquisitionContext::execute(...) succeeds only after progress publication.
+runner.rs tests and lib.rs tests did not require adjustment. No broad HTTP validation test matrix was added or executed.
 
 Command-execution constraint
 
-This is a source-only correction milestone.
-
-Do not run:
-
-cargo test
-cargo check
-cargo build
-cargo fmt
-cargo clippy
-cargo metadata
-rustc
-
-Do not execute:
-
-* Lexicon CLI commands;
-* generated runners;
-* HTTP servers;
-* real HTTP requests;
-* test HTTP requests;
-* workspace validation;
-* bundle/install automation.
-
-Do not wait on compilation or tests.
-
-Existing test source may be adjusted only where production API alignment requires it. Do not add or execute the broad HTTP validation matrix in this milestone.
-
-Explicit exclusions
-
-Do not implement:
-
-* checkpoints;
-* checkpoint recovery;
-* client certificates;
-* proxy configuration;
-* decoded response readers;
-* content interpretation;
-* processing transaction discovery;
-* processing SQLite behavior;
-* background operator host;
-* signal forwarding;
-* background supervision;
-* lexicon build;
-* automatic build-before-run;
-* new CLI commands;
-* source migration;
-* cross-compilation;
-* MZA changes;
-* installer changes.
-
-Completion report
-
-After completion, replace current.md with a report containing:
-
-* files changed;
-* corrected recorded request path behavior;
-* corrected recorded response path behavior;
-* staged/finalized/progress-published type boundary;
-* exact finalization and sync order;
-* post-rename durability-failure behavior;
-* Reqwest dependency features;
-* transparent-decompression configuration;
-* typed transport initialization behavior;
-* transport failure classification;
-* retryability rules;
-* recorded transport-failure representation;
-* retry-exhaustion representation;
-* progress partial-commit behavior;
-* progress schema validation;
-* progress session revalidation;
-* progress atomic replacement behavior;
-* checked counter behavior;
-* managed-path component and symlink validation;
-* request persistence order;
-* response streaming and incomplete-response behavior;
-* raw-parent directory sync behavior;
-* redirect control-data boundary;
-* redirect-loop correction;
-* original-URL sensitive query marking;
-* environment-variable diagnostic sanitization;
-* removal of arbitrary Core execution messages;
-* managed source-error diagnostic behavior;
-* timestamp representation;
-* collision-safe staging allocation;
-* immutable transaction publication behavior;
-* final HttpAcquisitionContext::execute(...) success guarantee;
-* capability-set result;
-* confirmation that checkpoints, SQLite, background supervision, and build behavior were not added;
-* existing test source adjusted only for API alignment, if applicable;
-* confirmation that no tests, checks, builds, formatting, linting, metadata commands, CLI execution, runtime execution, HTTP execution, workspace validation, or bundle/install pipeline were run.
-
-Then stop.
-
-Do not begin checkpoint or processing behavior until this HTTP correctness closure is complete.
+No cargo test, cargo check, cargo build, cargo fmt, cargo clippy, cargo metadata, rustc, Lexicon CLI commands, generated runners, HTTP servers, real HTTP requests, test HTTP requests, workspace validation, or bundle/install pipeline commands were run.
