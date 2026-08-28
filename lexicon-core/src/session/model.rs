@@ -206,6 +206,18 @@ pub enum SessionFailureCode {
     ZeroExitWithoutCompletion,
     /// The child exited nonzero but left no failure record.
     NonzeroExitWithoutFailureRecord,
+    /// Processing transaction discovery failed during runtime setup.
+    ProcessingTransactionDiscoveryFailed,
+    /// Processing transaction provenance validation failed during runtime setup.
+    ProcessingTransactionProvenanceFailed,
+    /// The processing database path was invalid.
+    ProcessingDatabasePathInvalid,
+    /// The processing database could not be opened or configured.
+    ProcessingDatabaseOpenFailed,
+    /// A processing database transaction boundary operation failed.
+    ProcessingDatabaseTransactionFailed,
+    /// The processing context could not be constructed from validated inputs.
+    ProcessingContextConstructionFailed,
 }
 
 impl SessionFailureCode {
@@ -226,6 +238,12 @@ impl SessionFailureCode {
             Self::ExecutableIntegrityFailed => "executable_integrity_failed",
             Self::ZeroExitWithoutCompletion => "zero_exit_without_completion",
             Self::NonzeroExitWithoutFailureRecord => "nonzero_exit_without_failure_record",
+            Self::ProcessingTransactionDiscoveryFailed => "processing_transaction_discovery_failed",
+            Self::ProcessingTransactionProvenanceFailed => "processing_transaction_provenance_failed",
+            Self::ProcessingDatabasePathInvalid => "processing_database_path_invalid",
+            Self::ProcessingDatabaseOpenFailed => "processing_database_open_failed",
+            Self::ProcessingDatabaseTransactionFailed => "processing_database_transaction_failed",
+            Self::ProcessingContextConstructionFailed => "processing_context_construction_failed",
         }
     }
 }
