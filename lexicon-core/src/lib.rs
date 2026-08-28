@@ -16,6 +16,8 @@ pub use session::{
     RUNTIME_CONTEXT_ENVIRONMENT_VARIABLE, RuntimeContextPaths, SessionDataPaths, SessionIdentity,
 };
 
+pub use rusqlite;
+
 pub trait HttpAcquisition {
     fn acquire(&self, context: &mut HttpAcquisitionContext) -> Result<(), String>;
 }
