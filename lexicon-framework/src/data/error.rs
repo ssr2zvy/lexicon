@@ -559,7 +559,6 @@ impl std::error::Error for ChildOwnershipUncertainError {
         Some(&self.wait_error)
     }
 }
-}
 
 // ---------------------------------------------------------------------------
 // Top-level execution error
