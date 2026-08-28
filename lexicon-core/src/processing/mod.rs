@@ -5,10 +5,15 @@ pub mod runner;
 pub mod runtime_information;
 
 mod contract;
+mod transactions;
 
 pub use context::ProcessingContext;
 pub use contract::{ProcessDataFn, ProcessingSourceContractV1};
-pub use error::{ProcessingError, ProcessingResult};
+pub use error::{
+    ProcessingContextConstructionError, ProcessingDatabaseOpenError,
+    ProcessingDatabasePartialCommit, ProcessingDatabasePathError,
+    ProcessingDatabaseTransactionError, ProcessingError, ProcessingResult,
+};
 pub use invocation::{
     AdmittedProcessingHandler, AdmittedProcessingRuntimeInvocation,
     ProcessingRuntimeInvocationAdmissionError, admit_processing_runtime_invocation,
@@ -23,3 +28,9 @@ pub use runtime_information::{
     ProcessingRuntimeInformationDecodingError, ProcessingRuntimeInformationEncodingError,
     ProcessingRuntimeInformationV1,
 };
+pub use transactions::{
+    ProcessingHttpTransaction, ProcessingHttpTransactionCatalog,
+    ProcessingTransactionDiscoveryError, ProcessingTransactionProvenanceError,
+};
+
+pub use rusqlite;

@@ -511,11 +511,25 @@ pub enum ProcessingRuntimeInvocationExecutionError {
     Transport(RuntimeInvocationTransportDecodingError),
     Admission(ProcessingRuntimeInvocationAdmissionError),
     Session(CoreRunnerSessionError),
+    TransactionDiscovery(crate::processing::ProcessingTransactionDiscoveryError),
+    ContextConstruction(crate::processing::ProcessingContextConstructionError),
+    DatabaseOpen(crate::processing::ProcessingDatabaseOpenError),
+    DatabaseTransaction(crate::processing::ProcessingDatabaseTransactionError),
     Handler(ProcessingError),
+    HandlerRollbackFailure {
+        handler_error: ProcessingError,
+        rollback_error: crate::processing::ProcessingDatabaseTransactionError,
+        terminal_persistence_error: Option<crate::session::SessionStoreError>,
+    },
     TerminalPersistence {
         handler_error: Option<ProcessingError>,
         session_error: crate::session::SessionStoreError,
     },
+    DatabaseCommitAndPersistenceFailure {
+        commit_error: crate::processing::ProcessingDatabaseTransactionError,
+        persistence_error: crate::session::SessionStoreError,
+    },
+    DatabaseCommittedSessionPersistenceFailed(crate::processing::ProcessingDatabasePartialCommit),
 }
 
 impl fmt::Display for ProcessingRuntimeInvocationExecutionError {
@@ -528,13 +542,30 @@ impl fmt::Display for ProcessingRuntimeInvocationExecutionError {
                 formatter.write_str("processing runtime invocation admission error")
             }
             Self::Session(_) => formatter.write_str("processing runtime session initialization error"),
+            Self::TransactionDiscovery(_) => {
+                formatter.write_str("processing transaction discovery failed")
+            }
+            Self::ContextConstruction(_) => {
+                formatter.write_str("processing context construction failed")
+            }
+            Self::DatabaseOpen(_) => formatter.write_str("processing database open failed"),
+            Self::DatabaseTransaction(_) => formatter.write_str("processing database transaction failed"),
             Self::Handler(_) => formatter.write_str("processing handler error"),
+            Self::HandlerRollbackFailure { .. } => formatter.write_str(
+                "processing handler error followed by rollback and/or terminal persistence failure",
+            ),
             Self::TerminalPersistence { handler_error: Some(_), .. } => {
                 formatter.write_str("processing handler error; terminal session state persistence also failed")
             }
             Self::TerminalPersistence { handler_error: None, .. } => {
-                formatter.write_str("terminal session state persistence failed after successful handler")
+                formatter.write_str("terminal session state persistence failed")
             }
+            Self::DatabaseCommitAndPersistenceFailure { .. } => formatter.write_str(
+                "processing database commit failed and terminal session failure persistence also failed",
+            ),
+            Self::DatabaseCommittedSessionPersistenceFailed(_) => formatter.write_str(
+                "processing database commit succeeded but session success persistence failed",
+            ),
         }
     }
 }
@@ -542,11 +573,18 @@ impl fmt::Display for ProcessingRuntimeInvocationExecutionError {
 impl std::error::Error for ProcessingRuntimeInvocationExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Transport(e) => Some(e),
-            Self::Admission(e) => Some(e),
-            Self::Session(e) => Some(e),
-            Self::Handler(e) => Some(e),
+            Self::Transport(error) => Some(error),
+            Self::Admission(error) => Some(error),
+            Self::Session(error) => Some(error),
+            Self::TransactionDiscovery(error) => Some(error),
+            Self::ContextConstruction(error) => Some(error),
+            Self::DatabaseOpen(error) => Some(error),
+            Self::DatabaseTransaction(error) => Some(error),
+            Self::Handler(error) => Some(error),
+            Self::HandlerRollbackFailure { rollback_error, .. } => Some(rollback_error),
             Self::TerminalPersistence { session_error, .. } => Some(session_error),
+            Self::DatabaseCommitAndPersistenceFailure { commit_error, .. } => Some(commit_error),
+            Self::DatabaseCommittedSessionPersistenceFailed(error) => Some(error),
         }
     }
 }
@@ -611,8 +649,82 @@ pub fn run_processing_runtime_invocation(
     })?;
 
     let data_paths = SessionDataPaths::from_context_paths(&context_document.paths);
-    let mut context =
-        ProcessingContext::from_session_data_paths(data_paths, envelope.session().clone());
+    let mut running = Some(running);
+
+    let discovered_transactions = match super::transactions::discover_http_transactions_for_processing(
+        &context_document.project,
+        &context_document.runtime,
+        context_document.paths.protocol_root(),
+        context_document.paths.raw_data_directory(),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            if let Some(session_error) = persist_runtime_failure(&mut running) {
+                return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
+                    handler_error: None,
+                    session_error,
+                });
+            }
+            return Err(ProcessingRuntimeInvocationExecutionError::TransactionDiscovery(error));
+        }
+    };
+
+    let database_path = match derive_processing_database_path(
+        context_document.paths.protocol_root(),
+        context_document.paths.processed_data_directory(),
+        &context_document.runtime,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            if let Some(session_error) = persist_runtime_failure(&mut running) {
+                return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
+                    handler_error: None,
+                    session_error,
+                });
+            }
+            return Err(ProcessingRuntimeInvocationExecutionError::DatabaseOpen(
+                crate::processing::ProcessingDatabaseOpenError::Path(error),
+            ));
+        }
+    };
+
+    let database = match open_processing_database(
+        context_document.paths.protocol_root(),
+        context_document.paths.processed_data_directory(),
+        &database_path,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            if let Some(session_error) = persist_runtime_failure(&mut running) {
+                return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
+                    handler_error: None,
+                    session_error,
+                });
+            }
+            return Err(ProcessingRuntimeInvocationExecutionError::DatabaseOpen(error));
+        }
+    };
+
+    let mut context = match ProcessingContext::new(
+        data_paths,
+        context_document.project.clone(),
+        context_document.runtime.clone(),
+        envelope.session().clone(),
+        discovered_transactions,
+        database_path.clone(),
+        database,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            if let Some(session_error) = persist_runtime_failure(&mut running) {
+                return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
+                    handler_error: None,
+                    session_error,
+                });
+            }
+            return Err(ProcessingRuntimeInvocationExecutionError::ContextConstruction(error));
+        }
+    };
 
     // Invoke the selected handler.
     let handler_result = match handler {
@@ -621,24 +733,170 @@ pub fn run_processing_runtime_invocation(
 
     match handler_result {
         Ok(()) => {
-            running.complete().map_err(|e| {
-                ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
-                    handler_error: None,
-                    session_error: e,
+            context.commit_database().map_err(|error| {
+                let persistence_error = running
+                    .take()
+                    .expect("running lifecycle must exist")
+                    .fail_runtime(
+                        crate::session::SessionFailureCode::RuntimeInitializationFailed,
+                        Some("processing database commit failed".to_string()),
+                    );
+                if let Err(persistence_error) = persistence_error {
+                    ProcessingRuntimeInvocationExecutionError::DatabaseCommitAndPersistenceFailure {
+                        commit_error: error,
+                        persistence_error,
+                    }
+                } else {
+                    ProcessingRuntimeInvocationExecutionError::DatabaseTransaction(error)
                 }
+            })?;
+
+            let persisted_running = running.take().expect("running lifecycle must exist");
+            persisted_running.complete().map_err(|session_error| {
+                ProcessingRuntimeInvocationExecutionError::DatabaseCommittedSessionPersistenceFailed(
+                    crate::processing::ProcessingDatabasePartialCommit::new(
+                        context.project().clone(),
+                        context.runtime().clone(),
+                        context.session_identity().clone(),
+                        context.database_path().to_path_buf(),
+                        session_error,
+                    ),
+                )
             })?;
             Ok(())
         }
         Err(processing_error) => {
-            if let Err(persist_error) = running.fail_source() {
+            if let Err(rollback_error) = context.rollback_database() {
+                let persistence_error = running
+                    .take()
+                    .expect("running lifecycle must exist")
+                    .fail_source()
+                    .err();
+                return Err(ProcessingRuntimeInvocationExecutionError::HandlerRollbackFailure {
+                    handler_error: processing_error,
+                    rollback_error,
+                    terminal_persistence_error: persistence_error,
+                });
+            }
+
+            if let Err(persist_error) = running
+                .take()
+                .expect("running lifecycle must exist")
+                .fail_source()
+            {
                 return Err(ProcessingRuntimeInvocationExecutionError::TerminalPersistence {
                     handler_error: Some(processing_error),
                     session_error: persist_error,
                 });
             }
+
             Err(ProcessingRuntimeInvocationExecutionError::Handler(processing_error))
         }
     }
+}
+
+fn persist_runtime_failure(
+    running: &mut Option<crate::session::RunningRuntimeSession<'_>>,
+) -> Option<crate::session::SessionStoreError> {
+    if let Some(lifecycle) = running.take() {
+        return lifecycle
+            .fail_runtime(
+            crate::session::SessionFailureCode::RuntimeInitializationFailed,
+            Some("processing runtime setup failed".to_string()),
+        )
+            .err();
+    }
+    None
+}
+
+fn derive_processing_database_path(
+    protocol_root: &std::path::Path,
+    processed_root: &std::path::Path,
+    runtime: &crate::runtime::OwnedRuntimeIdentity,
+) -> Result<std::path::PathBuf, crate::processing::ProcessingDatabasePathError> {
+    use crate::protocols::http::transaction::error::{
+        HttpManagedPathValidationMode, validate_managed_path,
+    };
+
+    let expected_processed_root = protocol_root.join("data").join("processed");
+    if processed_root != expected_processed_root {
+        return Err(crate::processing::ProcessingDatabasePathError::ManagedPath(
+            crate::protocols::http::transaction::error::HttpManagedPathError::PathOutsideTrustedRoot {
+                trusted_root: expected_processed_root,
+                target_path: processed_root.to_path_buf(),
+            },
+        ));
+    }
+
+    validate_managed_path(
+        protocol_root,
+        protocol_root,
+        HttpManagedPathValidationMode::ExistingDirectory,
+    )
+    .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)?;
+    validate_managed_path(
+        protocol_root,
+        processed_root,
+        HttpManagedPathValidationMode::ExistingDirectory,
+    )
+    .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)?;
+
+    let database_path = processed_root.join(format!("{}.sqlite3", runtime.source_name()));
+    let mode = if database_path.exists() {
+        HttpManagedPathValidationMode::ExistingRegularFile
+    } else {
+        HttpManagedPathValidationMode::CreatableRegularFile
+    };
+    validate_managed_path(protocol_root, &database_path, mode)
+        .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)?;
+
+    Ok(database_path)
+}
+
+fn open_processing_database(
+    protocol_root: &std::path::Path,
+    processed_root: &std::path::Path,
+    database_path: &std::path::Path,
+) -> Result<rusqlite::Connection, crate::processing::ProcessingDatabaseOpenError> {
+    use crate::protocols::http::transaction::error::{
+        HttpManagedPathValidationMode, validate_managed_path,
+    };
+
+    validate_managed_path(
+        protocol_root,
+        processed_root,
+        HttpManagedPathValidationMode::ExistingDirectory,
+    )
+    .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)
+    .map_err(crate::processing::ProcessingDatabaseOpenError::Path)?;
+
+    let mode = if database_path.exists() {
+        HttpManagedPathValidationMode::ExistingRegularFile
+    } else {
+        HttpManagedPathValidationMode::CreatableRegularFile
+    };
+    validate_managed_path(protocol_root, database_path, mode)
+        .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)
+        .map_err(crate::processing::ProcessingDatabaseOpenError::Path)?;
+
+    let connection = rusqlite::Connection::open(database_path)
+        .map_err(crate::processing::ProcessingDatabaseOpenError::ConnectionOpen)?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(crate::processing::ProcessingDatabaseOpenError::BusyTimeoutConfiguration)?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE; BEGIN IMMEDIATE;")
+        .map_err(crate::processing::ProcessingDatabaseOpenError::BaselineConfiguration)?;
+
+    validate_managed_path(
+        protocol_root,
+        database_path,
+        HttpManagedPathValidationMode::ExistingRegularFile,
+    )
+    .map_err(crate::processing::ProcessingDatabasePathError::ManagedPath)
+    .map_err(crate::processing::ProcessingDatabaseOpenError::Path)?;
+
+    Ok(connection)
 }
 
 #[cfg(test)]
@@ -697,7 +955,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert!(CALLED.with(|c| *c.borrow()));
@@ -719,7 +976,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert_eq!(COUNT.with(|c| *c.borrow()), 1);
@@ -741,7 +997,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert!(REACHED.with(|c| *c.borrow()));
@@ -765,7 +1020,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert!(CALLED.with(|c| *c.borrow()));
@@ -795,7 +1049,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert!(CALLED.with(|c| *c.borrow()));
@@ -825,7 +1078,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert!(CALLED.with(|c| *c.borrow()));
@@ -855,7 +1107,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert!(CALLED.with(|c| *c.borrow()));
@@ -885,7 +1136,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert!(CALLED.with(|c| *c.borrow()));
@@ -912,7 +1162,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
@@ -939,7 +1188,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
@@ -966,7 +1214,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
@@ -989,7 +1236,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
@@ -1012,7 +1258,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
@@ -1036,7 +1281,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
@@ -1059,7 +1303,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
@@ -1088,7 +1331,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap();
         assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
@@ -1105,7 +1347,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         );
         assert!(result.is_ok());
     }
@@ -1121,7 +1362,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1145,7 +1385,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         );
         assert_eq!(COUNT.with(|c| *c.borrow()), 1);
     }
@@ -1158,7 +1397,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(|_: &mut ProcessingContext, _: &[OsString]| Ok(())),
-            &mut ProcessingContext::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1176,7 +1414,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(|_: &mut ProcessingContext, _: &[OsString]| Ok(())),
-            &mut ProcessingContext::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1196,7 +1433,6 @@ mod execution_tests {
             &args,
             RuntimeIdentity::http_processing("different-source", 1),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1221,7 +1457,6 @@ mod execution_tests {
                 1,
             ),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1251,7 +1486,6 @@ mod execution_tests {
             &args,
             identity_v2,
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1288,7 +1522,6 @@ mod execution_tests {
             &args,
             example_identity(),
             &ProcessingSourceContractV1::new(process_must_not_be_called),
-            &mut ProcessingContext::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1311,7 +1544,6 @@ mod execution_tests {
             &args,
             RuntimeIdentity::http_processing("wrong-source", 1),
             &ProcessingSourceContractV1::new(process_must_not_be_called),
-            &mut ProcessingContext::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1335,7 +1567,6 @@ mod execution_tests {
             &args,
             RuntimeIdentity::http_processing("wrong-source", 1),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap_err();
         let msg = format!("{err}");
@@ -1360,7 +1591,6 @@ mod execution_tests {
             &args,
             RuntimeIdentity::http_processing("wrong-source", 1),
             &ProcessingSourceContractV1::new(process),
-            &mut ProcessingContext::default(),
         )
         .unwrap_err();
         let msg = format!("{err}");
