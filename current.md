@@ -1,86 +1,83 @@
-Implementation report: background execution, phase 2 — test coverage for the operator-host handoff
+Current milestone: validation checkpoint — compile and test the accumulated unverified work
 
-Milestone status
+Objective
 
-Complete, with one scope adjustment: this milestone required constructing a real, on-disk, correctly-hashed `AdmittedBundle` fixture (there is no lightweight/mock constructor by design — admission always goes through the same file-based validation path production code uses). Building that fixture correctly required deep, previously-unresearched knowledge of three additional JSON schemas (`RuntimeManifestV1`, `RuntimeInformationV1`, and the project/layout directory contract). This is now built and documented below.
+Three consecutive milestones have been implemented back-to-back with zero compilation checks:
 
-Files changed
+1. Processing correctness, durability, and error-preservation closure.
+2. Background execution phase 1 (operator-host re-execution and session handoff).
+3. Background execution phase 2 (test coverage for the handoff).
 
-* `lexicon-framework/src/data/test_support.rs` (new) — shared `#[cfg(test)]` fixture: fake on-disk project, real admissible HTTP bundle, `SessionCoordinator`/`SessionStore` construction, and cwd-mutex-guarded test helpers.
-* `lexicon-framework/src/data/mod.rs` — registered `test_support` as `pub(crate)` (crate-wide test visibility) under `#[cfg(test)]`.
-* `lexicon-framework/src/session/coordinator.rs` — added tests for `resume_prepared_launch`, `release_for_handoff`, and the documented race-window limitation.
-* `lexicon-framework/src/data/session.rs` — added tests for supervision-mode threading through `select_and_prepare_session`, plus a live-session-rejection regression test.
-* `lexicon-framework/src/data/background.rs` — added the injectable ownership-handoff timing seam and tests for successful handoff, exited-before-ownership, timeout, spawn failure, and operator-host resume rejection.
-* `lexicon-framework/src/supervision/mod.rs` — added rejection tests for unknown fields, invalid JSON syntax, and an invalid session identity.
-* `lexicon-cli/src/cli/data.rs` — added `__operator-host` parsing and hidden-from-help tests.
+Per this workflow's standing rule, the agent does not run compile, test, or build commands; the user runs them. This milestone is a mandatory checkpoint: it requires the user to run the containerized build/test cycle and, if needed, direct the agent to fix whatever compile or test failures surface, before any further feature milestone is planned or implemented.
 
-Injectable timeout/poll-interval seam
+This is not a contract- or spec-derived feature gap. It exists because continuing to layer additional unverified source changes on top of three already-unverified layers would compound risk rather than close it, and because the required corrective action (running Cargo) is one the agent is structurally unable to perform itself in this workflow.
 
-```rust
-pub(crate) fn execute_background_data_with_re_executor_and_timing(
-    request: ForegroundDataRequest,
-    re_executor: &dyn OperatorHostReExecutor,
-    ownership_handoff_timeout: Duration,
-    ownership_poll_interval: Duration,
-) -> Result<BackgroundHandoffOutcome, ForegroundDataExecutionError>
+Why this is necessary now
+
+* `lexicon-core`'s processing module was substantially rewritten (new error hierarchy, new discovery/provenance logic, new context invariants, new runner sequencing) without ever compiling.
+* `lexicon-framework` gained a new `supervision` module, a new `data::background` module, new `SessionCoordinator` methods, and threaded a new parameter through `select_and_prepare_session` and `build_invocation_envelope` — all unverified.
+* This milestone's own test fixture (`lexicon-framework/src/data/test_support.rs`) required hand-constructing JSON matching `RuntimeManifestV1` and `RuntimeInformationV1`'s schemas from source-code inspection alone, with no ability to confirm the fixture actually admits successfully.
+* Tests were added that spawn real OS processes and take real file-based locks — exactly the kind of code most likely to contain a subtle, non-obvious bug that only a real test run will reveal.
+
+Required action (user)
+
+Using `instructions.md`'s containerized Cargo workflow:
+
+```bash
+podman build -f containerization/test-container/Containerfile -t lexicon-local-test-image .
+podman run -d --name lexicon-local-test -v "$PWD":/lexicon --workdir /lexicon lexicon-local-test-image
+podman exec lexicon-local-test bash -lc 'cd /lexicon && cargo check --workspace'
+podman exec lexicon-local-test bash -lc 'cd /lexicon && cargo test --workspace --quiet'
 ```
 
-`execute_background_data_with_re_executor` (used by `execute_background_data`, in turn used by production `--bg` handling) now simply forwards to this with the unchanged fixed constants `OWNERSHIP_HANDOFF_TIMEOUT = 10s` and `OWNERSHIP_POLL_INTERVAL = 20ms`. Neither public-facing function's signature or default behavior changed; only tests call the `_and_timing` variant directly, using a 300ms timeout / 10ms poll interval.
+(Substitute `podman start lexicon-local-test` instead of `podman run` if the container already exists.)
 
-Test summary by module
+Then either:
 
-`session/coordinator.rs`:
-* `resume_prepared_launch_succeeds_for_prepared_session` — resuming an unowned `Prepared` session returns a launch whose record equals the original.
-* `resume_prepared_launch_acquires_the_lease` — the lease reports `Owned` after resume and `Available` again after the resumed launch drops.
-* `resume_prepared_launch_rejects_non_prepared_session` — resuming a session already advanced to `Abandoned` returns `HandoffSessionNotPrepared`.
-* `release_for_handoff_releases_lease_and_preserves_prepared_state` — releasing drops the lease to `Available` while a fresh `store.load` still reports `Prepared`.
-* `concurrent_prepare_run_during_handoff_window_reconciles_prepared_session_to_failed` — pins the documented race-window limitation: an unrelated `prepare_run` call issued after `release_for_handoff` but before resume observes the unowned `Prepared` record as stale and reconciles it to `Failed`. The test asserts this is what happens today; it is not corrected here.
+* if both commands succeed, replace this file with a short `current.md` confirming a clean `cargo check` and `cargo test --workspace` pass, so the next loop iteration can resume deriving feature milestones from the contract and specs with confidence in the baseline; or
+* if either command fails, paste (or otherwise make available) the exact failing output, and direct the agent to fix the reported errors as a source-only corrective pass against this exact `current.md`, re-stating the failing output inside it so the agent has the precise compiler/test diagnostics to work from. The agent cannot guess at compiler errors it has not seen.
 
-`data/session.rs`:
-* `records_background_supervision_mode_when_requested` / `records_foreground_supervision_mode_when_requested` — `select_and_prepare_session`'s `supervision` parameter is faithfully recorded on the resulting session record for both modes.
-* `processing_operation_records_requested_supervision_mode` — the processing branch (which never inspects `admitted_bundle`) still threads supervision correctly.
-* `rejects_selection_when_a_live_session_is_already_active` — a second selection attempt while the first launch's lease is still held is rejected with `SessionSelection(LiveSessionAlreadyActive)`, preserving this pre-existing scenario now that the function takes an added parameter.
+Required corrections (agent, once failures are known)
 
-`data/background.rs`:
-* `successful_handoff_returns_outcome_once_lease_is_owned` — a fake re-executor resumes the just-prepared session (simulating the operator host) and holds the resumed launch for the test's duration; the real function's polling loop observes `Owned` and returns `BackgroundHandoffOutcome` with the correct source/operation.
-* `operator_host_exiting_before_ownership_is_a_typed_error` — a fake re-executor whose process exits immediately, before acquiring the lease, yields `OperatorHostExitedBeforeOwnership`.
-* `ownership_timeout_is_a_typed_error` — a fake re-executor whose process never acquires the lease and never exits yields `OperatorHostOwnershipTimeout` once the shortened timeout elapses.
-* `re_exec_spawn_failure_is_a_typed_error` — a fake re-executor that fails to spawn anything yields `OperatorHostReExec`.
-* `operator_host_rejects_a_session_that_is_no_longer_prepared` — `execute_operator_host_with_launcher` given a reference to a session already resumed-and-failed returns `SessionPreparation(HandoffSessionNotPrepared)`.
+If invoked to fix compile or test failures:
 
-`supervision/mod.rs`: added `rejects_unknown_field` (deny_unknown_fields), `rejects_syntactically_invalid_json` (JsonSyntax), and `rejects_invalid_session_identity` (empty session id), alongside the three pre-existing round-trip/schema-version/operation tests, all left unchanged.
+* Fix only what the reported diagnostics require. Do not use this pass to add new features, refactor unrelated code, or expand scope.
+* Preserve every behavioral guarantee documented in the three prior milestones' completion reports (now folded into this repository's git history) unless a diagnostic proves one of them was never actually achievable as described, in which case document the discrepancy explicitly in the new completion report rather than silently changing the claim.
+* Do not weaken, delete, or skip a failing test to make the suite pass; fix the code or, if the test itself is wrong, fix the test's logic while preserving its intent.
+* If a test fails due to a genuine environmental limitation of the container (for example, a missing `sh`/`cmd` shell assumed by `lexicon-framework/src/data/background.rs`'s test helpers), adapt the test's process-spawning approach rather than deleting coverage.
 
-`lexicon-cli`: added `parses_operator_host_command_with_reference_and_passthrough` and `operator_host_command_is_hidden_from_help_output` (asserts the rendered `--help` text does not contain `__operator-host`), alongside the two pre-existing `DataCommand` tests, left unchanged.
+Preserve existing behavior
 
-Fixture design (`test_support.rs`)
+Do not change:
 
-Building a real `AdmittedBundle` requires: a `lexicon.toml`, the full `sources/<name>/http/{data/raw,data/processed,get-raw-data,process-data}` directory tree, and inside `get-raw-data/runtime/` a real executable file plus a `runtime.json` whose `artifact.size`/`artifact.sha256` match that file exactly (computed via the same `hash_runtime_executable` production admission uses) and whose nested `runtime_information` satisfies `RuntimeInformationV1`'s compatibility checks (matching source/protocol/operation/contract-version, and `descriptor.contract_version == identity.source_contract_version`, with empty required/available capability lists so the trivial subset check passes). The fixture always builds the HTTP/acquisition flavor; `select_and_prepare_processing` never inspects the admitted bundle, so the same fixture value can stand in for `DataOperation::Processing` test scenarios where only the coordinator's own operation matters.
+* any public API surface introduced by the prior three milestones, unless a compiler error proves it cannot work as written;
+* the background-execution handoff protocol or `OperatorHostInvocationV1` schema;
+* the processing runner sequence, error hierarchy, or durability guarantees;
+* CLI syntax for any existing subcommand.
 
-Because `resolve_project_layout` always reads `std::env::current_dir()` with no override seam, the fixture also provides `with_test_cwd`, guarded by a dedicated `TEST_CWD_LOCK` mutex (mirroring the pre-existing `with_test_cwd` pattern already used in `lexicon-cli/src/cli/mod.rs`'s tests), so tests that need a real layout do not race each other over the process-global working directory.
+Explicit exclusions
 
-Race-window test: exact assertion
+Do not implement in this milestone:
 
-`concurrent_prepare_run_during_handoff_window_reconciles_prepared_session_to_failed` prepares a session, calls `release_for_handoff`, then calls `prepare_run` again on the same coordinator (simulating an unrelated concurrent invocation). It asserts the new call succeeds with a *different* session id, and that the originally handed-off session's durable state is now `Failed` (via `SessionStore::reconcile_stale_current_session`'s stale-ownership path, triggered because the lease is unowned). This is the current, undesirable-but-real behavior described in the prior milestone's report; the test exists to pin it, not to endorse it.
+* any new feature work (cancellation, signal forwarding, daemonization, further processing corrections, or new contract/spec-derived milestones);
+* lexicon build, automatic build-before-run, or MZA/installer changes;
+* a fix for the previously documented handoff race-window limitation, unless it is the direct cause of a reported test failure.
 
-Existing tests
+Command-execution constraint
 
-No existing test was weakened, deleted, or had its assertions changed. All additions are new test functions in new or existing `#[cfg(test)]` modules.
+This milestone is the explicit exception to the usual "source-only, no Cargo" pattern used by prior milestones, but only for the user. The agent still does not run `cargo`, `rustc`, or any lexicon CLI/runtime command itself, per the standing rule for this workflow. The agent's role in this milestone is limited to:
 
-Excluded items confirmed not added
+* waiting for the user to report compile/test results;
+* if given failing diagnostics, making the minimal source corrections they require;
+* if given a clean pass, writing the completion report and resuming the normal contract/spec-derived loop next iteration.
 
-* No fix for the race-window limitation.
-* No cancellation, signal forwarding, or true OS-level daemonization/detachment.
-* No lexicon build, automatic build-before-run, or MZA/installer changes.
-* No new HTTP capabilities, client certificates, or protocol changes.
-* No changes to acquisition/processing correctness, durability, or error-preservation behavior.
-* No attempt at exhaustive coverage of every scenario in contract.md section 17 / specs.md section 18 beyond the background-execution-relevant items enumerated in the milestone brief.
+Completion report
 
-Command-execution confirmation
+Once `cargo check --workspace` and `cargo test --workspace` both pass (confirmed by the user), replace current.md with a report containing:
 
-No `cargo test`, `cargo check`, `cargo build`, `cargo fmt`, `cargo clippy`, `cargo metadata`, or `rustc` invocation was run by the agent. No lexicon CLI command, generated runner, processing or acquisition runtime, SQLite tool, HTTP server, real or test HTTP request, or workspace/bundle/install automation was executed. The new tests do spawn trivial, short-lived OS helper processes (`sh -c`/`cmd /C` with `exit`/`sleep`/`ping`) as fakes standing in for a real operator-host process, exactly as unit tests for process-supervision code must; no lexicon binary, generated runner, or real runtime was invoked.
+* confirmation that both commands were run by the user (not the agent) and passed;
+* a list of any source corrections the agent made to reach a passing state, with a one-line rationale per correction tied to the specific diagnostic it fixed;
+* confirmation that no new feature scope was added during this corrective pass;
+* confirmation that no existing test was weakened or deleted to reach a passing state.
 
-Accumulated validation risk — recommendation
-
-This is the third consecutive milestone (processing correctness closure, background execution phase 1, and this phase 2) implemented without a single successful compile check, per the standing rule that the agent does not run build/test/compile commands. This milestone's own fixture work required deep schema knowledge (`RuntimeManifestV1`, `RuntimeInformationV1`) that was not previously exercised or verified, and its tests spawn real OS processes and hold real file locks — a category of code that is unusually easy to get subtly wrong without a compiler and test runner.
-
-Before further feature milestones are attempted, running the accumulated changes through the `lexicon-local-test` container (`cargo check` first, then `cargo test --workspace`) would be a high-value checkpoint, since three layers of untested assumptions are now stacked on top of each other. The next `current.md` reflects this.
+Then stop, and resume deriving the next feature milestone from workspace/specs/contract.md and workspace/specs/specs.md on the following loop iteration.
