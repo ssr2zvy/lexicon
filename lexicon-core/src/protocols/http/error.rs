@@ -16,6 +16,7 @@ pub enum AcquisitionError {
     ResponseStatus(HttpResponseStatusError),
     CheckpointCommit(crate::protocols::http::checkpoint::error::HttpCheckpointCommitError),
     CheckpointLookup(crate::protocols::http::checkpoint::error::HttpCheckpointLookupError),
+    HistoricalLookup(crate::protocols::http::checkpoint::error::HttpHistoricalLookupError),
     TransactionAdmission(crate::protocols::http::transaction::metadata::HttpTransactionAdmissionError),
 }
 
@@ -54,6 +55,12 @@ impl AcquisitionError {
         Self::CheckpointLookup(error)
     }
 
+    pub(crate) fn historical_lookup(
+        error: crate::protocols::http::checkpoint::error::HttpHistoricalLookupError,
+    ) -> Self {
+        Self::HistoricalLookup(error)
+    }
+
     pub fn message(&self) -> &str {
         match self {
             Self::Source { message } => message,
@@ -62,6 +69,7 @@ impl AcquisitionError {
             Self::ResponseStatus(_) => "response status error",
             Self::CheckpointCommit(_) => "checkpoint commit error",
             Self::CheckpointLookup(_) => "checkpoint lookup error",
+            Self::HistoricalLookup(_) => "historical lookup error",
             Self::TransactionAdmission(_) => "transaction admission error",
         }
     }
@@ -76,6 +84,7 @@ impl fmt::Display for AcquisitionError {
             Self::ResponseStatus(error) => write!(formatter, "{error}"),
             Self::CheckpointCommit(error) => write!(formatter, "{error}"),
             Self::CheckpointLookup(error) => write!(formatter, "{error}"),
+            Self::HistoricalLookup(error) => write!(formatter, "{error}"),
             Self::TransactionAdmission(error) => write!(formatter, "{error}"),
         }
     }
@@ -89,6 +98,7 @@ impl std::error::Error for AcquisitionError {
             Self::ResponseStatus(error) => Some(error),
             Self::CheckpointCommit(error) => Some(error),
             Self::CheckpointLookup(error) => Some(error),
+            Self::HistoricalLookup(error) => Some(error),
             Self::TransactionAdmission(error) => Some(error),
             Self::Source { .. } => None,
         }

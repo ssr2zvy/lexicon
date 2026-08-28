@@ -32,6 +32,7 @@ pub struct StoredHeader {
 pub enum StoredHeaderValue {
     Utf8(String),
     Base64(String),
+    Redacted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -627,20 +628,12 @@ pub(crate) fn admit_transaction_from_disk(
         return Err(HttpTransactionAdmissionError::RequestTimestampInvariant);
     }
 
-    if request_metadata.physical_attempt_index == 0 {
-        return Err(HttpTransactionAdmissionError::AttemptInvariant);
-    }
-    if request_metadata.redirect_index > request_metadata.physical_attempt_index - 1
-        || request_metadata.retry_index > request_metadata.physical_attempt_index - 1
-    {
-        return Err(HttpTransactionAdmissionError::AttemptInvariant);
-    }
-
     let attempt_identity = HttpAttemptIdentity::new(
         request_metadata.physical_attempt_index,
         request_metadata.redirect_index,
         request_metadata.retry_index,
-    );
+    )
+    .map_err(|_| HttpTransactionAdmissionError::AttemptInvariant)?;
     let parent_transaction_id = request_metadata
         .parent_transaction_id
         .clone()
@@ -690,6 +683,7 @@ pub(crate) fn admit_transaction_from_disk(
                 response_body_path,
                 body_length,
                 Some(body_sha256),
+                completed_at_unix_nanos,
                 HttpRecordedOutcome::Response,
             )
         }
@@ -714,6 +708,7 @@ pub(crate) fn admit_transaction_from_disk(
                 response_body_path,
                 0,
                 None,
+                failed_at_unix_nanos,
                 HttpRecordedOutcome::TransportFailure(RecordedTransportFailure::new(failure)),
             )
         }
@@ -748,11 +743,16 @@ pub(crate) fn admit_transaction_from_disk(
         RecordedHttpRequest::new(None, 0, None)
     };
 
+    let session = crate::session::SessionIdentity::new(&request_metadata.session_id)
+        .map_err(|_| HttpTransactionAdmissionError::InvalidSessionId)?;
+
     Ok(RecordedTransaction::new(
         identity,
         attempt_identity,
         parent_transaction_id,
         logical_request_key,
+        session,
+        request_metadata.created_at_unix_nanos,
         PathBuf::from(directory),
         request,
         response,
@@ -908,14 +908,10 @@ fn admit_headers(
 
             let value = match &header.value {
                 StoredHeaderValue::Utf8(text) => {
-                    if must_be_redacted && text != "<redacted>" {
+                    if must_be_redacted {
                         return Err(HttpTransactionAdmissionError::SensitiveHeaderRedactionInvalid);
                     }
-                    if must_be_redacted || text != "<redacted>" {
-                        RecordedHeaderValue::Utf8(text.clone())
-                    } else {
-                        return Err(HttpTransactionAdmissionError::SensitiveHeaderRedactionInvalid);
-                    }
+                    RecordedHeaderValue::Utf8(text.clone())
                 }
                 StoredHeaderValue::Base64(encoded) => {
                     if must_be_redacted {
@@ -925,6 +921,12 @@ fn admit_headers(
                         .decode(encoded)
                         .map_err(|_| HttpTransactionAdmissionError::HeaderValueEncodingInvalid)?;
                     RecordedHeaderValue::Base64(encoded.clone())
+                }
+                StoredHeaderValue::Redacted => {
+                    if !must_be_redacted {
+                        return Err(HttpTransactionAdmissionError::SensitiveHeaderRedactionInvalid);
+                    }
+                    RecordedHeaderValue::Redacted
                 }
             };
 
