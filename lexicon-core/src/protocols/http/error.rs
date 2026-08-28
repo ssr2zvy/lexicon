@@ -2,7 +2,7 @@ use std::fmt;
 
 use super::request::HttpRequestError;
 use super::transaction::HttpResponseStatusError;
-use super::transport::HttpTransportFailure;
+use super::transport::{HttpTransportConfigurationError, HttpTransportFailure};
 use super::{ProgressPersistenceError, SessionValidationError};
 use crate::protocols::http::transaction::error::HttpRecorderError;
 
@@ -37,8 +37,8 @@ impl AcquisitionError {
         Self::ResponseStatus(error)
     }
 
-    pub fn execution_message(message: &str) -> Self {
-        Self::Execution(HttpExecutionError::Message(message.to_string()))
+    pub fn transport_failure(failure: HttpTransportFailure) -> Self {
+        Self::Execution(HttpExecutionError::Transport(failure))
     }
 
     pub fn message(&self) -> &str {
@@ -54,7 +54,7 @@ impl AcquisitionError {
 impl fmt::Display for AcquisitionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Source { message } => formatter.write_str(message),
+            Self::Source { .. } => formatter.write_str("source handler returned an error"),
             Self::Request(error) => write!(formatter, "{error}"),
             Self::Execution(error) => write!(formatter, "{error}"),
             Self::ResponseStatus(error) => write!(formatter, "{error}"),
@@ -75,8 +75,8 @@ impl std::error::Error for AcquisitionError {
 
 #[derive(Debug)]
 pub enum HttpExecutionError {
-    Message(String),
     UnmanagedContext,
+    TransportConfiguration(HttpTransportConfigurationError),
     SessionValidation(SessionValidationError),
     Recorder(HttpRecorderError),
     Transport(HttpTransportFailure),
@@ -84,14 +84,15 @@ pub enum HttpExecutionError {
     RedirectLoop,
     InvalidRedirectTarget,
     RetryExhausted,
+    CounterOverflow,
     Progress(ProgressPersistenceError),
 }
 
 impl fmt::Display for HttpExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Message(message) => formatter.write_str(message),
             Self::UnmanagedContext => formatter.write_str("HTTP execute is unavailable in unmanaged context"),
+            Self::TransportConfiguration(_) => formatter.write_str("HTTP transport configuration failed"),
             Self::SessionValidation(_) => formatter.write_str("HTTP execution session validation failed"),
             Self::Recorder(_) => formatter.write_str("HTTP transaction recording failed"),
             Self::Transport(_) => formatter.write_str("HTTP transport exchange failed"),
@@ -99,6 +100,7 @@ impl fmt::Display for HttpExecutionError {
             Self::RedirectLoop => formatter.write_str("HTTP redirect loop detected"),
             Self::InvalidRedirectTarget => formatter.write_str("HTTP redirect target is invalid or unsupported"),
             Self::RetryExhausted => formatter.write_str("HTTP retry policy exhausted"),
+            Self::CounterOverflow => formatter.write_str("HTTP execution counter overflow"),
             Self::Progress(_) => formatter.write_str("HTTP acquisition progress persistence failed"),
         }
     }
@@ -107,16 +109,17 @@ impl fmt::Display for HttpExecutionError {
 impl std::error::Error for HttpExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::TransportConfiguration(error) => Some(error),
             Self::SessionValidation(error) => Some(error),
             Self::Recorder(error) => Some(error),
             Self::Transport(error) => Some(error),
             Self::Progress(error) => Some(error),
-            Self::Message(_)
-            | Self::UnmanagedContext
+            Self::UnmanagedContext
             | Self::RedirectExhausted
             | Self::RedirectLoop
             | Self::InvalidRedirectTarget
-            | Self::RetryExhausted => None,
+            | Self::RetryExhausted
+            | Self::CounterOverflow => None,
         }
     }
 }
