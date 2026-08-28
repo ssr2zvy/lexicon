@@ -221,6 +221,7 @@ impl RecordedTransaction {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct FinalizedRecordedAttempt {
     pub(crate) transaction: RecordedTransaction,
     pub(crate) attempt_identity: HttpAttemptIdentity,

@@ -248,7 +248,11 @@ impl HttpAcquisitionContext {
                             HttpRecordedOutcome::TransportFailure(failure) => failure,
                             HttpRecordedOutcome::Response => unreachable!(),
                         };
-                        if failure.retryable()
+                        // Extract the values we need from `failure` now: it borrows from
+                        // `transaction`, which is moved into the error variants below.
+                        let failure_retryable = failure.retryable();
+                        let failure_value = failure.failure();
+                        if failure_retryable
                             && request.retry_policy.retryable_transport_failures()
                             && retry_index
                                 .checked_add(1)
@@ -262,7 +266,7 @@ impl HttpAcquisitionContext {
                             continue;
                         }
 
-                        if failure.retryable()
+                        if failure_retryable
                             && request.retry_policy.retryable_transport_failures()
                             && max_attempts > 1
                         {
@@ -270,7 +274,7 @@ impl HttpAcquisitionContext {
                                 HttpExecutionError::RetryExhausted(HttpRetryExhaustionError::new(
                                     transaction,
                                     physical_attempt_index,
-                                    HttpRetryFinalOutcome::TransportFailure(failure.failure()),
+                                    HttpRetryFinalOutcome::TransportFailure(failure_value),
                                 )),
                             ));
                         }
@@ -279,7 +283,7 @@ impl HttpAcquisitionContext {
                             HttpExecutionError::RecordedTransportFailure(
                                 RecordedHttpTransportFailure::new(
                                     transaction,
-                                    failure.failure(),
+                                    failure_value,
                                 ),
                             ),
                         ));
