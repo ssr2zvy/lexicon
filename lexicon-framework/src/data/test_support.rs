@@ -137,11 +137,14 @@ fn write_fake_http_bundle(bundle_dir: &Path, source_name: &str) {
         "runtime_information": runtime_information,
     });
 
-    fs::write(
-        bundle_dir.join("runtime.json"),
-        serde_json::to_vec(&manifest).expect("serialize manifest"),
-    )
-    .expect("write runtime.json");
+    // The real admission path's manifest-boundary validation
+    // (`validate_manifest_text` in `runtime_bundle_admission.rs`) requires exactly one
+    // trailing `\n`, no `\r`, and no leading/trailing whitespace inside the payload.
+    // `serde_json::to_vec` alone produces no trailing newline at all, which
+    // `validate_manifest_text` rejects as `InvalidBoundary`.
+    let mut manifest_bytes = serde_json::to_vec(&manifest).expect("serialize manifest");
+    manifest_bytes.push(b'\n');
+    fs::write(bundle_dir.join("runtime.json"), manifest_bytes).expect("write runtime.json");
 }
 
 /// Admit the fixture's acquisition bundle, matching production `admit_bundle`.
