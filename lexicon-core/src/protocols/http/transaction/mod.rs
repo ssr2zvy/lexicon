@@ -317,6 +317,21 @@ pub enum HttpRecordedOutcome {
     TransportFailure(RecordedTransportFailure),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpRecordedOutcomeKind {
+    Response,
+    TransportFailure,
+}
+
+impl HttpRecordedOutcome {
+    pub fn kind(&self) -> HttpRecordedOutcomeKind {
+        match self {
+            Self::Response => HttpRecordedOutcomeKind::Response,
+            Self::TransportFailure(_) => HttpRecordedOutcomeKind::TransportFailure,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordedTransportFailure {
     failure: HttpTransportFailure,

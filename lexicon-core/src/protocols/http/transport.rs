@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io::Read;
+use std::sync::Arc;
 
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::Policy;
@@ -23,7 +24,7 @@ impl ReqwestHttpTransport {
         let client = Client::builder()
             .redirect(Policy::none())
             .build()
-            .map_err(|e| HttpTransportConfigurationError(e.to_string()))?;
+            .map_err(HttpTransportConfigurationError::new)?;
 
         Ok(Self { client })
     }
@@ -62,8 +63,6 @@ fn classify_send_error(error: reqwest::Error) -> HttpTransportFailure {
         HttpTransportFailure::BodyWrite
     } else if error.is_request() || error.is_builder() {
         HttpTransportFailure::RequestBuild
-    } else if error.is_connect() && error.to_string().to_ascii_lowercase().contains("tls") {
-        HttpTransportFailure::Tls
     } else if error.is_connect() {
         HttpTransportFailure::Connect
     } else {
@@ -82,7 +81,7 @@ pub(crate) struct HttpTransportResponse {
 impl HttpTransportResponse {
     fn from_response(response: Response) -> Self {
         let status = response.status().as_u16();
-        let version = Some(StoredHttpVersion::from(response.version()));
+        let version = StoredHttpVersion::from_reqwest(response.version());
 
         let mut headers = Vec::new();
         let mut location_header = HttpLocationHeader::Missing;
@@ -122,24 +121,33 @@ pub enum StoredHttpVersion {
     Http11,
     Http2,
     Http3,
-    Unknown,
 }
 
-impl From<reqwest::Version> for StoredHttpVersion {
-    fn from(version: reqwest::Version) -> Self {
+impl StoredHttpVersion {
+    fn from_reqwest(version: reqwest::Version) -> Option<Self> {
         match version {
-            reqwest::Version::HTTP_09 => Self::Http09,
-            reqwest::Version::HTTP_10 => Self::Http10,
-            reqwest::Version::HTTP_11 => Self::Http11,
-            reqwest::Version::HTTP_2 => Self::Http2,
-            reqwest::Version::HTTP_3 => Self::Http3,
-            _ => Self::Unknown,
+            reqwest::Version::HTTP_09 => Some(Self::Http09),
+            reqwest::Version::HTTP_10 => Some(Self::Http10),
+            reqwest::Version::HTTP_11 => Some(Self::Http11),
+            reqwest::Version::HTTP_2 => Some(Self::Http2),
+            reqwest::Version::HTTP_3 => Some(Self::Http3),
+            _ => None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct HttpTransportConfigurationError(pub(crate) String);
+pub struct HttpTransportConfigurationError {
+    source: Arc<reqwest::Error>,
+}
+
+impl HttpTransportConfigurationError {
+    fn new(source: reqwest::Error) -> Self {
+        Self {
+            source: Arc::new(source),
+        }
+    }
+}
 
 impl fmt::Display for HttpTransportConfigurationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -147,7 +155,11 @@ impl fmt::Display for HttpTransportConfigurationError {
     }
 }
 
-impl std::error::Error for HttpTransportConfigurationError {}
+impl std::error::Error for HttpTransportConfigurationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpTransportFailure {
@@ -157,7 +169,6 @@ pub enum HttpTransportFailure {
     Timeout,
     BodyWrite,
     ExchangeIo,
-    Tls,
 }
 
 impl HttpTransportFailure {
@@ -173,7 +184,6 @@ impl HttpTransportFailure {
             Self::Timeout => "timeout",
             Self::BodyWrite => "body_write",
             Self::ExchangeIo => "exchange_io",
-            Self::Tls => "tls",
         }
     }
 }
@@ -187,7 +197,6 @@ impl fmt::Display for HttpTransportFailure {
             Self::Timeout => formatter.write_str("HTTP transport timed out"),
             Self::BodyWrite => formatter.write_str("HTTP transport body write failed"),
             Self::ExchangeIo => formatter.write_str("HTTP transport exchange failed"),
-            Self::Tls => formatter.write_str("HTTP transport TLS error"),
         }
     }
 }

@@ -10,7 +10,7 @@ pub(crate) mod transport;
 pub mod transaction;
 
 pub use context::{
-    AcquisitionProgressError, HttpAcquisitionContext, ProgressPersistenceError,
+    AcquisitionProgressError, HttpAcquisitionContext, HttpProgressPartialCommit,
     SessionValidationError,
 };
 pub use crate::runtime::{
@@ -37,13 +37,16 @@ pub use runner::{
 };
 pub use transaction::{
     HttpAttemptIdentity, HttpLogicalRequestKey, HttpLogicalRequestKeyError, HttpRecordedOutcome,
-    HttpResponseStatusError, HttpTransactionIdentity, HttpTransactionIdentityError,
+    HttpRecordedOutcomeKind, HttpResponseStatusError, HttpTransactionIdentity,
+    HttpTransactionIdentityError,
     RecordedHeader, RecordedHeaderCollection, RecordedHeaderValue, RecordedHttpRequest,
     RecordedHttpResponse, RecordedTransaction, RecordedTransportFailure,
 };
 pub use transaction::error::{
-    HttpBodyStreamingError, HttpClockError, HttpRecorderError,
-    HttpTransactionIdentityAllocationError, HttpTransactionPublicationError,
+    HttpBodyStreamingError, HttpClockError, HttpIncompleteMarkerError, HttpManagedPathError,
+    HttpManagedPathTargetType, HttpManagedPathValidationMode, HttpMetadataPersistenceError,
+    HttpRecorderError, HttpTransactionIdentityAllocationError, HttpTransactionPublicationError,
+    IncompleteHttpResponseFailure,
 };
 pub use transaction::metadata::{
     AcquisitionProgressAdvanceError, HttpTransactionAdmissionError,

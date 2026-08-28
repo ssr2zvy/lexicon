@@ -56,6 +56,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{AcquisitionResult, HttpCapability, HttpCapabilitySet, HttpSourceContractV1};
+    use crate::runtime::SessionInvocationIdentity;
+    use crate::session::SessionDataPaths;
     use crate::HttpAcquisitionContext;
     use crate::protocols::http::error::AcquisitionError;
 
@@ -63,7 +65,7 @@ mod tests {
         context: &mut HttpAcquisitionContext,
         args: &[OsString],
     ) -> AcquisitionResult<()> {
-        assert_eq!(context.source_directory, PathBuf::from("/tmp/source"));
+        assert_eq!(context.source_directory(), PathBuf::from("/tmp/source"));
         assert_eq!(args, &[OsString::from("alpha"), OsString::from("beta")]);
         Ok(())
     }
@@ -72,9 +74,23 @@ mod tests {
         context: &mut HttpAcquisitionContext,
         args: &[OsString],
     ) -> AcquisitionResult<()> {
-        assert_eq!(context.source_directory, PathBuf::from("/tmp/source"));
+        assert_eq!(context.source_directory(), PathBuf::from("/tmp/source"));
         assert_eq!(args, &[OsString::from("alpha"), OsString::from("beta")]);
         Ok(())
+    }
+
+    fn test_context() -> HttpAcquisitionContext {
+        let paths = SessionDataPaths::from_legacy_parts(
+            PathBuf::from("/tmp/source"),
+            PathBuf::from("/tmp/source/get-raw-data"),
+            PathBuf::from("/tmp/source/get-raw-data/sessions/session-1"),
+            PathBuf::from("/tmp/source/data/raw"),
+            PathBuf::from("/tmp/source/data/processed"),
+        );
+        HttpAcquisitionContext::from_session_data_paths(
+            paths,
+            SessionInvocationIdentity::new("session-1").unwrap(),
+        )
     }
 
     const SOURCE: HttpSourceContractV1 = HttpSourceContractV1::new(acquire_handler);
@@ -125,10 +141,7 @@ mod tests {
 
     #[test]
     fn retained_resume_handler_receives_same_context_and_args() {
-        let mut context = HttpAcquisitionContext {
-            source_directory: PathBuf::from("/tmp/source"),
-            raw_data_directory: PathBuf::from("/tmp/source/data/raw"),
-        };
+        let mut context = test_context();
         let args = [OsString::from("alpha"), OsString::from("beta")];
 
         let outcome = HttpSourceContractV1::new(acquire_handler)
@@ -147,10 +160,7 @@ mod tests {
 
         assert_eq!(contract_ptr, handler_ptr);
 
-        let mut context = HttpAcquisitionContext {
-            source_directory: PathBuf::from("/tmp/source"),
-            raw_data_directory: PathBuf::from("/tmp/source/data/raw"),
-        };
+        let mut context = test_context();
         let args = [OsString::from("alpha"), OsString::from("beta")];
 
         assert!(contract.acquire()(&mut context, &args).is_ok());
@@ -176,7 +186,7 @@ mod tests {
             context: &mut HttpAcquisitionContext,
             args: &[OsString],
         ) -> AcquisitionResult<()> {
-            assert_eq!(context.source_directory, PathBuf::from("/tmp/source"));
+            assert_eq!(context.source_directory(), PathBuf::from("/tmp/source"));
             assert_eq!(args, &[OsString::from("alpha"), OsString::from("beta")]);
             Ok(())
         }
@@ -222,10 +232,7 @@ mod tests {
 
         assert_eq!(contract_ptr, handler_ptr);
 
-        let mut context = HttpAcquisitionContext {
-            source_directory: PathBuf::from("/tmp/source"),
-            raw_data_directory: PathBuf::from("/tmp/source/data/raw"),
-        };
+        let mut context = test_context();
         let args = [OsString::from("alpha"), OsString::from("beta")];
 
         let outcome = contract.acquire()(&mut context, &args);
@@ -249,10 +256,7 @@ mod tests {
 
     #[test]
     fn retained_handler_receives_same_context_and_args() {
-        let mut context = HttpAcquisitionContext {
-            source_directory: PathBuf::from("/tmp/source"),
-            raw_data_directory: PathBuf::from("/tmp/source/data/raw"),
-        };
+        let mut context = test_context();
         let args = [OsString::from("alpha"), OsString::from("beta")];
 
         let outcome = SOURCE.acquire()(&mut context, &args);
