@@ -1,193 +1,122 @@
+Lexicon Architecture Contract
 
-Lexicon Unified Operator Host Framework
+Status: Normative
+Contract version: 1
+Source-manifest schema: 2
 
-Status
+1. Authority
 
-This document defines the selected architecture for Lexicon acquisition, processing, builds, and runtime supervision. The architecture is named the Lexicon Unified Operator Host Framework.
+This document defines Lexicon’s supported architecture and guarantees.
 
-It combines one installed control executable, a reusable framework library, a narrow Core library, Lexicon-managed native source runners, ordinary sequential Rust for source-specific behavior, in-process foreground orchestration, and same-binary operator-host supervision for background work.
+Normative terms such as must, must not, should, and may are used deliberately.
 
-The governing division is:
+specs.md defines the detailed behavior required to satisfy this contract. Implementation-status documents may report temporary gaps, but they do not weaken this contract.
 
-> Lexicon controls the supported entrypoint, build, runtime admission, HTTP-and-recording effect, and session supervision. Source implementations control arbitrary trusted Rust computation around that effect.
+When source code, tests, documentation, and this contract disagree, the disagreement must be resolved explicitly. Tests must not be silently deleted, weakened, or skipped merely to conceal a conformance failure.
 
-This is one architecture. Individual sources do not choose among alternate execution models.
+2. Purpose
 
-1. Goals
+Lexicon is a framework for building, installing, and operating trusted native data-source implementations.
 
-Lexicon must:
+A source implementation may:
 
-• provide one dependable intended path for acquisition and processing;
-• prevent accidental replacement of startup orchestration;
-• validate source contracts at compile time;
-• validate source workspaces and artifacts during the supported build;
-• validate runtime identity, compatibility, and capabilities before execution;
-• centralize HTTP transport, transaction recording, raw-byte preservation, metadata redaction, and session integration;
-• preserve ordinary sequential Rust for arbitrary response-dependent source logic;
-• retain native Cargo builds and standalone native execution;
-• preserve transactional publication of acquisition and processing runtimes;
-• state honestly what trusted native Rust can bypass.
+* perform arbitrary source-specific Rust computation;
+* parse source-specific arguments;
+* branch, iterate, paginate, and poll;
+* authenticate according to source-specific rules;
+* submit HTTP operations through Lexicon Core;
+* preserve source-specific durable state;
+* resume partially completed work;
+* transform recorded raw transactions into processed data.
 
-Lexicon does not attempt to capability-confine trusted source developers. A managed entrypoint, Rust interface, Cargo dependency, or process boundary does not prevent linked native code from using sockets, files, subprocesses, or FFI.
+Lexicon controls the supported execution boundary:
 
-2. Package boundaries
+* project and source discovery;
+* source-contract validation;
+* managed runtime entrypoints;
+* native runtime construction;
+* artifact selection and publication;
+* runtime admission;
+* Core-mediated HTTP;
+* raw transaction recording;
+* checkpoints;
+* session lifecycle;
+* foreground and background supervision;
+* complete-product release construction through MZA.
 
-The repository has three principal packages:
+3. Trust model
 
-```text
-lexicon-cli/
-├── Cargo.toml
-└── src/
-    ├── main.rs
-    ├── frontend.rs
-    └── operator_host.rs
+Source implementations are trusted native code.
 
-lexicon-framework/
-├── Cargo.toml
-└── src/
-    ├── lib.rs
-    ├── commands/
-    ├── scaffold/
-    ├── build/
-    ├── publication/
-    ├── acquisition/
-    ├── processing/
-    └── supervision/
+Lexicon does not claim that a Rust source library is sandboxed. A source may use the standard library, native dependencies, filesystem APIs, sockets, subprocesses, or FFI unless the operating system independently prevents it.
 
-lexicon-core/
-├── Cargo.toml
-└── src/
-    ├── lib.rs
-    ├── contracts/
-    ├── protocols/
-    │   └── http/
-    ├── build/
-    ├── runtime/
-    ├── sessions/
-    ├── raw/
-    └── processing/
-```
+The precise HTTP guarantee is:
 
-Only lexicon-cli produces an installed control executable. Its executable name is lexicon.
+Every physical HTTP attempt submitted through Lexicon Core is durably recorded before its result is returned to source code.
 
-lexicon-framework is a reusable Rust library. It owns command semantics and operational policy.
+Lexicon does not guarantee that trusted native source code is incapable of opening an independent socket or producing an unrecorded external effect.
 
-lexicon-core is a reusable Rust library. It owns invariant-sensitive contracts and mechanics shared by the framework and managed source runtimes.
+A hostile-source security boundary would require operating-system confinement and is outside this contract.
 
-The dependency graph is:
+4. Installed and linked components
 
-```text
-installed lexicon executable
-└── lexicon-framework library
-    └── lexicon-core library
+The supported architecture contains:
 
-generated acquisition runner
-├── lexicon-core library
-└── source implementation library
-    ├── lexicon-core library
-    └── source-specific dependencies
+* one installed control executable named lexicon;
+* one reusable lexicon-framework library;
+* one narrow reusable lexicon-core library;
+* one release-construction package that integrates MZA Protocol 1;
+* one managed acquisition runtime per source and protocol;
+* one managed processing runtime per source and protocol.
 
-generated processing runner
-├── lexicon-core library
-└── processing implementation library
-```
+There is no separately installed framework executable.
 
-The framework library is not linked into source runtimes. Core is. There is no independently installed lexicon-framework executable.
+Foreground framework operations run in process:
 
-3. Command routing and process model
+lexicon
+→ lexicon-framework
+→ lexicon-core
 
-The lexicon executable owns command-line presentation. The framework library owns project semantics and filesystem mutations.
+Source operations run through supervised native child runtimes:
 
-```text
-lexicon --version             → CLI presentation
-lexicon init                  → framework library
-lexicon source create         → framework library
-lexicon source build          → framework library
-lexicon build                 → framework library
-lexicon data --get            → framework library
-lexicon data --process        → framework library
-```
+lexicon supervisor
+→ published managed runtime
+→ linked lexicon-core runner
+→ source-authored library
 
-The CLI parses arguments and renders typed results. It does not duplicate scaffold rules, build mechanics, runtime validation, publication behavior, or session policy.
+Background execution re-executes the installed lexicon binary in a reserved operator-host mode. It does not install or invoke a second framework program.
 
-Foreground execution
+5. Command boundary
 
-Foreground commands execute framework logic in the original lexicon process:
+The public command surface includes:
 
-```text
-user
-→ lexicon frontend and supervisor process
-→ lexicon-framework library
-→ lexicon-core library
-→ managed source runtime child
-```
+lexicon init <parent-path> <project-name>
+lexicon source create <source> --protocol http
+lexicon source build <source> --protocol http
+lexicon build
+lexicon data --get <source> --protocol http [framework-options] -- [source-arguments...]
+lexicon data --process <source> --protocol http [framework-options] -- [source-arguments...]
 
-The lexicon process remains alive while acquisition or processing runs and supervises the child runtime.
+The separator has architectural meaning:
 
-Background execution
+* arguments before -- belong to Lexicon;
+* arguments after -- are preserved as operating-system strings and belong to the source.
 
-For --bg, lexicon creates a durable invocation record and re-executes its exact binary in a reserved internal role:
+For example:
 
-```text
-initial lexicon frontend
-→ lexicon __operator-host <invocation-reference>
-→ lexicon-framework library
-→ lexicon-core library
-→ managed source runtime child
-```
+lexicon data --get video-source --protocol http -- \
+    --phase discover \
+    --topic history
 
-The initiating process exits only after the operator host confirms durable session ownership. The operator host owns the session lock, child lifecycle, cancellation, exit observation, and terminal reconciliation.
+--phase, --topic, and their meanings are source-owned. Lexicon forwards them without interpreting them.
 
-The operator-host invocation is versioned because a detached process may outlive an installation upgrade. It is an internal protocol, not a public framework API.
+The protocol selector is explicit at the public CLI boundary, even while HTTP is the only supported protocol.
 
-This provides an independently living supervisor only when lifetime independence is required, without installing or versioning a second framework executable.
+6. Source structure
 
-4. Source acquisition contract
+A protocol-scoped source has this conceptual structure:
 
-Every HTTP source exports one capability-aware, versioned Rust descriptor from its implementation library.
-
-```rust
-use std::ffi::OsString;
-
-use lexicon_core::http::{
-    AcquisitionResult,
-    HttpAcquisitionContext,
-    HttpCapability,
-    HttpSourceContractV1,
-};
-
-pub const SOURCE: HttpSourceContractV1 =
-    HttpSourceContractV1::new(acquire)
-        .with_resume(resume)
-        .requires(HttpCapability::ClientCertificateV1);
-
-pub fn acquire(
-    context: &mut HttpAcquisitionContext,
-    args: &[OsString],
-) -> AcquisitionResult<()> {
-    // Ordinary sequential source-specific Rust.
-    Ok(())
-}
-```
-
-Only acquire is mandatory. Optional handlers and required capabilities are registered through the typed descriptor.
-
-The compiler verifies:
-
-• the descriptor type;
-• the mandatory acquisition function signature;
-• registered optional-handler signatures;
-• typed capability and extension declarations;
-• compatibility between source descriptor and managed runner code.
-
-The compiler does not verify the semantic honesty of the implementation or prove that all native effects use Core.
-
-5. Source workspace and managed runner
-
-Each HTTP acquisition operation uses a checked-in Cargo workspace:
-
-```text
-sources/example-source/http/
+sources/<source>/http/
 ├── source.toml
 ├── discovery.md
 ├── data/
@@ -196,887 +125,534 @@ sources/example-source/http/
 ├── get-raw-data/
 │   ├── Cargo.toml
 │   ├── Cargo.lock
-│   ├── sessions/
-│   ├── session_status.json
 │   ├── get-raw-data-impl/
 │   │   ├── Cargo.toml
-│   │   └── src/
-│   │       └── lib.rs
+│   │   └── src/lib.rs
 │   ├── lexicon-runner/
 │   │   ├── Cargo.toml
-│   │   └── src/
-│   │       └── main.rs
-│   └── runtime/
+│   │   └── src/main.rs
+│   ├── runtime/
+│   ├── state/
+│   ├── sessions/
+│   └── session_status.json
 └── process-data/
-    ├── sessions/
-    ├── session_status.json
-    ├── process-data-impl/
-    └── runtime/
-```
-
-The source author edits:
-
-• source-editable fields in source.toml;
-• discovery.md;
-• get-raw-data-impl/Cargo.toml for source-specific dependencies;
-• get-raw-data-impl/src/lib.rs;
-• additional modules under get-raw-data-impl/src/.
-
-Lexicon generates and contractually controls:
-
-• the acquisition workspace contract;
-• lexicon-runner/Cargo.toml;
-• lexicon-runner/src/main.rs;
-• runner identity;
-• runner template version;
-• the binary selected by the supported build.
-
-Cargo.lock is Cargo-managed and committed.
-
-A representative managed runner is:
-
-```rust
-use std::process::ExitCode;
-
-use lexicon_core::http::{
-    runner,
-    HttpSourceContractV1,
-    RuntimeIdentity,
-};
-
-const IDENTITY: RuntimeIdentity =
-    RuntimeIdentity::http_acquisition("example-source", 1);
-
-const SOURCE: HttpSourceContractV1 =
-    source_implementation::SOURCE;
-
-fn main() -> ExitCode {
-    runner::run(IDENTITY, &SOURCE)
-}
-```
-
-The source does not provide the supported acquisition main.
-
-“Lexicon-managed” means Lexicon generates, validates, and selects the runner through the supported build. It does not mean filesystem permissions prevent the project developer from editing it. A mismatched runner is rejected rather than silently overwritten.
-
-The published runtime is one native executable statically linked with Core, the source implementation library, and their Rust dependencies. Lexicon exposes no dynamic Rust plugin ABI.
-
-6. Capability and extension model
-
-The base source contract remains small. New protocol functionality is introduced through versioned Core capabilities.
-
-A capability may be:
-
-• optional: a source may use the Core facility or use ordinary source-specific Rust when the effect is not required to pass through Core;
-• required by a source: the descriptor declares that the source cannot run unless the selected Core/runtime supplies the capability;
-• mandatory for an effect: Lexicon exposes the feature only through a Core operation, and Core’s guarantees apply to uses of that operation.
-
-Compile time verifies descriptor and handler types. Build time verifies that the selected Core and runner provide every declared capability. Runtime admission verifies that the parent, child, descriptor, and invocation agree on the capability set before source code runs.
-
-Capabilities are added in response to demonstrated protocol requirements. They do not form a general plugin ABI, workflow language, or policy engine.
-
-7. Build contract
-
-Core exposes opaque validated build states:
-
-```text
-SourceLocation
-→ DiscoveredSource
-→ ValidatedSource
-→ ValidatedOperationWorkspace
-→ ReproducibleBuildPlan
-→ StagedArtifact
-→ VerifiedRuntime
-→ PublishedRuntime
-```
-
-Invariant-sensitive build APIs accept validated state values rather than arbitrary paths.
-
-The framework owns command policy, diagnostics, cancellation, source selection, and paired acquisition/processing publication. Core owns invariant-sensitive mechanics.
-
-For acquisition, the supported build:
-
-1. Discovers the containing project.
-2. Resolves the configured source directory.
-3. Validates source identity, protocol, metadata, and contract version.
-4. Validates the operation workspace and committed lockfile.
-5. Validates the managed runner and template version.
-6. Validates the source implementation library target.
-7. Validates the exact compatible Core dependency.
-8. Runs Cargo metadata in locked mode.
-9. Constructs an exact native release build plan.
-10. Builds the managed runner for the current machine.
-11. Uses an isolated temporary Cargo target directory.
-12. Reads Cargo JSON artifact messages.
-13. Selects exactly the expected executable artifact.
-14. Hashes the executable.
-15. Runs a bounded runtime-information probe.
-16. Validates identity, operation, protocol, Core contract, and capabilities.
-17. Stages the runtime bundle.
-
-Processing follows its corresponding contract.
-
-Builds remain native release builds using --locked, isolated target directories, explicit package and binary targets, Cargo JSON artifact selection, staged runtime bundles, transactional publication, and rollback.
-
-Acquisition and processing are published as one paired transaction. If either build, verification, staging, or publication fails, both previous runtime bundles survive.
-
-Ordinary acquisition and processing never invoke Cargo. Rust and Cargo are build requirements, not runtime requirements.
-
-8. Runtime admission
-
-Runtime validation occurs on both sides of the source-process boundary.
-
-Before launch, the parent validates:
-
-• runtime.json schema;
-• executable hash;
-• runtime protocol version;
-• source, protocol, and operation identity;
-• Core contract version;
-• compiled capability list;
-• compatibility with the requested command.
-
-Inside the child, linked Core validates:
-
-• invocation-envelope version;
-• project, source, protocol, and operation identity;
-• session identity;
-• execution mode;
-• compiled source descriptor;
-• required capability availability.
-
-Only then does Core call acquire.
-
-The contract connects across phases:
-
-```text
-compile time
-    source descriptor and functions have the required Rust types
-
-build time
-    runner, source descriptor, Cargo graph, Core version,
-    artifact identity, and capabilities agree
-
-runtime
-    parent and child agree on identity, invocation version,
-    contract version, capabilities, operation, and session
-```
-
-A runtime that does not match the intended pattern is rejected by the supported build or runtime admission path.
-
-9. Source-specific arguments
-
-For:
-
-```text
-lexicon data --get example-source --protocol http -- <source-args>
-```
-
-the CLI preserves every value after -- as OsString. Neither the CLI nor framework interprets source-specific semantics.
-
-The runner receives a reserved internal invocation envelope, followed by -- and the untouched source arguments. The source receives &[OsString] and may use Clap or another parser.
-
-Lexicon validates its own arguments. The source validates source-specific arguments.
-
-Raw source argument values are not persisted by default because Lexicon cannot know whether they contain credentials, signed URLs, personal data, or harmless configuration. A source may explicitly record a safe redacted summary through Core.
-
-10. HTTP execution and raw-data contract
-
-The supported HTTP effect API is:
-
-```rust
-let transaction = context.execute(request)?;
-```
-
-For each physical HTTP attempt submitted through Core, Core must:
-
-1. Allocate a unique transaction identity and staging directory.
-2. Finalize the effective request.
-3. Persist redacted request metadata.
-4. Persist the exact request-body bytes supplied to transport, when present.
-5. Perform one physical HTTP exchange.
-6. Persist response metadata or a transport-failure record.
-7. Stream undecoded HTTP entity-body bytes to raw storage.
-8. Hash while streaming.
-9. Atomically finalize the transaction or leave a recognizable partial record after interruption.
-10. Update session progress.
-11. Return a RecordedTransaction only after durable recording completes.
-
-The raw transaction shape is:
-
-```text
-data/raw/<timestamp>-<id>/
-├── request/
-│   ├── metadata.json
-│   └── body
-└── response/
-    ├── metadata.json
-    └── body
-```
-
-“Exact response body” means HTTP entity-body bytes after transfer framing and before content decoding. It does not mean TLS records, TCP packets, or HTTP/2 frames.
-
-Core must not transparently replace stored data with decoded gzip, Brotli, or other content. A decoded reader may be offered separately.
-
-Every physical retry attempt receives its own transaction. Every redirect exchange receives its own transaction. Neither may be invisibly collapsed below the recorder.
-
-Source code receives a recorded transaction rather than a live unrecorded response, then performs parsing, decoding, validation, and source-specific interpretation using ordinary Rust.
-
-11. Secret handling
-
-Core redacts managed metadata before persistence. Mandatory sensitive metadata includes at least:
-
-• Authorization;
-• Proxy-Authorization;
-• Cookie;
-• Set-Cookie;
-• explicitly marked sensitive headers;
-• explicitly marked sensitive query parameters.
-
-Exact arbitrary body preservation and universal body-secret removal are incompatible when credentials are themselves present in a request or response body. Core therefore does not claim generic semantic redaction of exact raw bodies.
-
-Any future encryption, exclusion, or protected-body policy must be explicit and must not silently weaken raw-data fidelity. Source-authored files and logs remain outside Core’s redaction guarantee.
-
-12. Sessions and supervision
-
-In foreground mode, the original lexicon process supervises the source runtime. In background mode, the re-executed operator host supervises it.
-
-```text
-supervising lexicon process
-├── select, create, or resume a session
-├── acquire session locks
-├── apply --abandon-past-fail
-├── launch the source runtime
-├── observe process exit and signals
-└── reconcile abnormal termination
-
-linked Core inside the source runtime
-├── validate the invocation
-├── enter running state
-├── record transaction progress
-├── commit checkpoints
-├── record ordinary source failure
-└── record normal completion
-
-source implementation
-└── decide source-specific continuation and checkpoint meaning
-```
-
-The root session_status.json is the current summary. Detailed durable history belongs under sessions/<session-id>/. Updates use atomic replacement or an equivalent transactional mechanism.
-
-An ordinary source error is recorded by Core. A panic, abort, forced exit, or crash is observed and reconciled by the parent supervisor while completed transactions remain intact.
-
-After machine or supervisor loss, the next invocation detects stale ownership and reconciles durable state. Core provides durable transaction and checkpoint primitives, but the source decides what resumption means for its own logic.
-
-13. Processing
-
-Processing remains separate from acquisition. It has its own implementation, managed runner, runtime, sessions, and status.
-
-Processing reads protocol-scoped raw transactions and creates the source-specific SQLite database. It does not alter the acquisition raw-data contract.
-
-The framework and Core apply corresponding build validation, runtime admission, supervision, staging, and publication guarantees to processing. Acquisition and processing runtime updates remain paired during publication.
-
-14. Enforcement model
-
-Compiler-enforced
-
-• The source descriptor has the required Rust type.
-• The mandatory acquisition function has the required signature.
-• Registered optional handlers have the required signatures.
-• Managed runner code can reference the source contract.
-• Core is linked into a conforming managed runtime.
-
-Build-tool-enforced
-
-• The supported target uses the Lexicon-managed runner.
-• A source-owned main cannot replace the selected entrypoint through the supported build.
-• Runner template and workspace shape match declared versions.
-• Cargo metadata and the lockfile satisfy the build contract.
-• The intended executable artifact is selected and validated.
-• Failed builds preserve existing runtimes.
-• Acquisition and processing are published transactionally.
-
-Runtime-enforced
-
-• Parent and child validate invocation and runtime identity.
-• Required Core capabilities exist before acquisition begins.
-• Source arguments reach source code as native strings.
-• Sessions are created, transitioned, and reconciled through the supported path.
-• Every Core-mediated HTTP attempt receives a raw transaction.
-• Core-mediated responses are recorded before source code receives them.
-• Core-managed raw bytes and metadata obey the defined capture and redaction rules.
-
-Operating-system-enforced only
-
-Lexicon adds no sandbox beyond operating-system permissions. Source code may therefore read and write files, open raw sockets, spawn processes, use FFI, and invoke other native code when the OS permits it.
-
-Conventional or not globally enforced
-
-• Every HTTP request in the process uses Core.
-• Every response produced by arbitrary native source code is recorded.
-• Source-authored files and logs redact secrets.
-• Source code avoids deliberate pre-main effects or manually substituted binaries.
-
-These are accepted trusted-code limitations.
-
-15. Trust and security model
-
-Source authors are trusted project developers, not hostile third-party plugin authors.
-
-The architecture makes the correct path obvious, structurally central, testable, and difficult to bypass accidentally. It does not execute adversarial native code safely.
-
-A separate HTTP broker without an operating-system sandbox would add IPC and lifecycle complexity but would not prevent a source worker from opening another socket.
-
-If hostile or independently distributed sources become a requirement, Lexicon must reopen the architecture and design genuine per-platform confinement, including network denial, constrained filesystem access, process restrictions, controlled credentials, constrained IPC, and platform-specific Linux and Windows policy. A partial sandbox is not part of this contract.
-
-16. Versioning
-
-The following versions remain distinct:
-
-• project schema version;
-• source manifest schema version;
-• source contract version;
-• runner template version;
-• Core crate version;
-• runtime invocation protocol version;
-• raw-data schema version;
-• session schema version;
-• individual capability contract versions.
-
-One number must not represent every compatibility surface.
-
-Source implementation and runner compile together. Breaking Rust API changes are handled through explicit rebuilds and compiler diagnostics. There is no stable Rust plugin ABI.
-
-The framework-to-runtime invocation is a small versioned compatibility surface. Unsupported runtimes are rejected with a rebuild or migration diagnostic. Already-built compatible native runtimes execute without Rust or Cargo.
-
-17. Testing requirements
-
-The architecture requires tests for at least:
-
-• valid and invalid source descriptor compilation;
-• optional-handler signature validation;
-• capability declaration and availability checks;
-• one GET producing one complete transaction;
-• POST request-body preservation;
-• compressed response preservation before content decoding;
-• separate redirect and retry transactions;
-• metadata redaction and explicitly sensitive fields;
-• connection failure and truncated response state;
-• source errors, panics, and abnormal exits;
-• failure after thousands of transactions;
-• checkpoint and resume behavior;
-• stale-session reconciliation;
-• non-UTF-8 Unix and Windows Unicode argument forwarding;
-• parent/child identity disagreement;
-• runtime hash mismatch;
-• acquisition or processing build failure preserving both old runtimes;
-• publication rollback;
-• foreground supervision;
-• background operator-host handoff.
-
-Core should expose a test harness or transport seam that exercises the same recorder and redactor used in production. Source helpers remain ordinary Rust and use ordinary Rust tests, debuggers, stack traces, logs, and profilers.
-
-18. Explicit non-goals
-
-This contract does not introduce:
-
-• WebAssembly;
-• browser, JavaScript, Node.js, JVM, or Python runtimes;
-• browser automation;
-• a custom acquisition language;
-• a stable serialized acquisition IR;
-• a dynamic Rust plugin ABI;
-• a universal source-argument schema;
-• a general public framework IPC service;
-• an internal HTTP broker;
-• hostile-code sandboxing;
-• automatic durable resumption of arbitrary source logic;
-• a second independently installed framework executable;
-• Cargo invocation during ordinary acquisition or processing.
-
-A fixed-request TOML frontend, builder, macro, new protocol, broker, sandbox, or workflow representation may be considered only after a concrete requirement justifies its permanent cost. Any convenience frontend must adapt into the same primary contract instead of creating a second execution model.
-
-19. Final commitments
-
-Lexicon will ship:
-
-1. One installed lexicon executable.
-2. A reusable lexicon-framework library for command semantics and operational policy.
-3. A narrow lexicon-core library for contracts and invariant-sensitive mechanics.
-4. In-process framework calls for foreground commands.
-5. Same-binary operator-host re-execution for background supervision.
-6. One managed native acquisition runner per source.
-7. One source-authored Rust implementation library per source operation.
-8. A versioned capability-aware descriptor with one mandatory acquisition function.
-9. Ordinary sequential Rust for source-specific decision logic.
-10. Core-mediated HTTP that records each physical exchange before returning it.
-11. Compile-time, build-time, and parent-and-child runtime validation.
-12. Locked, isolated native release builds with Cargo JSON artifact selection.
-13. Paired, staged, transactional publication of acquisition and processing runtimes.
-14. No development toolchain requirement for already-built execution.
-15. Honest acceptance that trusted native source code can bypass Core through unrestricted native effects.
-
-The selected architecture becomes concrete as follows.
-
-A source author writes acquisition logic in:
-
-sources/example-source/http/get-raw-data/
-└── get-raw-data-impl/
     ├── Cargo.toml
-    └── src/
-        └── lib.rs
+    ├── Cargo.lock
+    ├── process-data-impl/
+    │   ├── Cargo.toml
+    │   └── src/lib.rs
+    ├── lexicon-runner/
+    │   ├── Cargo.toml
+    │   └── src/main.rs
+    ├── runtime/
+    ├── sessions/
+    └── session_status.json
 
-The source does not provide the supported acquisition main.rs. Instead, it exports a typed source descriptor and an acquisition function:
+The source implementation is a library. The supported executable entrypoint is generated and managed by Lexicon.
 
-use std::ffi::OsString;
-use lexicon_core::http::{
-    AcquisitionResult,
-    HttpAcquisitionContext,
-    HttpSourceContractV1,
-};
+7. Source contract
+
+An HTTP acquisition source exposes a versioned descriptor:
+
 pub const SOURCE: HttpSourceContractV1 =
     HttpSourceContractV1::new(acquire);
+
+Its mandatory operation has this shape:
+
 pub fn acquire(
     context: &mut HttpAcquisitionContext,
     args: &[OsString],
-) -> AcquisitionResult<()> {
-    context.arguments().require_empty(args)?;
-    let transaction = context.execute(
-        HttpRequest::get("https://example.com/data.zip")?
-            .header("Accept", "application/zip")?
-            .logical_key("main-dataset"),
+) -> AcquisitionResult<()>;
+
+A source may register an optional resume function with the same input boundary.
+
+The descriptor is the source’s compiled declaration of:
+
+* its mandatory acquisition function;
+* its optional resume function;
+* the capabilities it requires.
+
+The managed runner cannot compile against an incorrectly typed descriptor or handler.
+
+Lexicon owns no universal source argument schema. A source may use clap, another parser, or direct OsString inspection.
+
+8. Ordinary Rust, not a workflow language
+
+Source-specific behavior remains ordinary Rust.
+
+Lexicon does not require a source author to express acquisition as:
+
+* a workflow DSL;
+* TOML control flow;
+* a serialized acquisition IR;
+* registered job-handler callbacks;
+* a universal pagination abstraction;
+* a DAG;
+* a distributed task graph.
+
+For example, discovering video identifiers and later downloading videos may remain one source implementation:
+
+discover identifiers
+→ durably register intended downloads
+→ download outstanding videos
+→ checkpoint verified completions
+
+A source may expose --phase discover|download|all, but those phases remain source-specific arguments unless a future contract explicitly promotes phases into a framework concept.
+
+9. Durable source state and work ledgers
+
+Lexicon reserves:
+
+get-raw-data/state/
+
+as the supported durable state boundary for an acquisition source.
+
+Core must expose this location through a validated context API. Source code must not reconstruct it from arbitrary parent-directory traversal.
+
+State under this directory is:
+
+* scoped to one project, source, protocol, and operation;
+* durable across acquisition sessions;
+* distinct from raw transaction evidence;
+* distinct from session history;
+* managed semantically by the source;
+* available to both acquisition and resume handlers.
+
+The initial contract deliberately does not impose a universal Core-owned job schema. A fan-out source may own a SQLite work ledger under this directory.
+
+Lexicon owns the validated location. The source owns:
+
+* table definitions;
+* work kinds;
+* stable work keys;
+* payload schemas;
+* deduplication policy;
+* readiness and completion rules;
+* source-specific recovery rules;
+* schema migrations.
+
+A work ledger must not be confused with a background scheduler. In the initial contract:
+
+* one supervised acquisition runtime advances the source’s work;
+* Lexicon does not run a cross-source daemon;
+* Lexicon does not distribute work between machines;
+* Lexicon does not dispatch registered job handlers;
+* Lexicon does not promise exactly-once external effects.
+
+A future DurableWorkV1 Core capability may be introduced only after multiple real sources demonstrate a stable common lifecycle.
+
+10. Four distinct durable concepts
+
+Lexicon distinguishes:
+
+Concept	Meaning
+Raw transaction	Evidence of one physical Core-mediated HTTP attempt
+Checkpoint	Transaction-backed evidence that a source-defined logical operation completed
+Source state or work item	Durable source-owned intended work and continuation data
+Session	One supervised attempt to advance an acquisition or processing operation
+
+These concepts must not be collapsed into one file or one status field.
+
+Raw transactions establish provenance. Checkpoints establish logical completion. Source state represents intended work. Sessions describe execution attempts.
+
+11. Checkpoints
+
+A checkpoint is not arbitrary key-value storage.
+
+A committed acquisition checkpoint must refer to a durable Core-recorded transaction associated with the same logical key.
+
+The supported pattern is:
+
+if context.has_checkpoint(&logical_key)? {
+    return Ok(());
+}
+let transaction =
+    context.execute(
+        request.logical_key(
+            logical_key.clone(),
+        ),
     )?;
-    // The request and response have already been recorded.
-    transaction.response().require_success()?;
-    Ok(())
-}
-
-The exact type of SOURCE forces the source to expose the required function with the required input and output types. A missing function, private function, asynchronous function, wrong argument type, wrong mutability, or wrong return type prevents compilation.
-
-For example, this fails:
-
-pub fn acquire(
-    context: HttpAcquisitionContext,
-) -> bool {
-    true
-}
-
-It fails because it does not match the function type required by HttpSourceContractV1::new.
-
-Lexicon generates a separate managed runner:
-
-sources/example-source/http/get-raw-data/
-└── lexicon-runner/
-    ├── Cargo.toml
-    └── src/
-        └── main.rs
-
-Its entrypoint is approximately:
-
-use std::process::ExitCode;
-use lexicon_core::http::{
-    runner,
-    HttpSourceContractV1,
-    RuntimeIdentity,
-};
-const IDENTITY: RuntimeIdentity =
-    RuntimeIdentity::http_acquisition(
-        "example-source",
-        1,
-    );
-const SOURCE: HttpSourceContractV1 =
-    source_implementation::SOURCE;
-fn main() -> ExitCode {
-    runner::run(IDENTITY, &SOURCE)
-}
-
-This means the supported executable always enters Core first:
-
-operating system
-→ lexicon-runner/src/main.rs
-→ lexicon_core::http::runner::run(...)
-→ runtime validation
-→ session initialization
-→ source_implementation::acquire(...)
-
-The source author cannot replace this entrypoint through the supported lexicon source build command. They can edit files because they own the project, but Lexicon validates the managed runner and rejects a changed or incompatible runner.
-
-The acquisition workspace is:
-
-get-raw-data/
-├── Cargo.toml
-├── Cargo.lock
-├── get-raw-data-impl/
-│   ├── Cargo.toml
-│   └── src/
-│       └── lib.rs
-├── lexicon-runner/
-│   ├── Cargo.toml
-│   └── src/
-│       └── main.rs
-├── sessions/
-├── session_status.json
-└── runtime/
-
-The workspace manifest is approximately:
-
-[workspace]
-resolver = "2"
-members = [
-    "get-raw-data-impl",
-    "lexicon-runner",
-]
-[workspace.dependencies]
-lexicon-core = "=0.1.0"
-
-The source implementation manifest is:
-
-[package]
-name = "example-source-get-raw-data-impl"
-version = "0.1.0"
-edition = "2024"
-[lib]
-name = "example_source_get_raw_data_impl"
-path = "src/lib.rs"
-[dependencies]
-lexicon-core = { workspace = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-clap = { version = "4", features = ["derive"] }
-sha2 = "0.10"
-
-The managed runner manifest is:
-
-[package]
-name = "example-source-get-raw-data-runner"
-version = "0.1.0"
-edition = "2024"
-[[bin]]
-name = "example-source-get-raw-data"
-path = "src/main.rs"
-[dependencies]
-lexicon-core = { workspace = true }
-source-implementation = {
-    package = "example-source-get-raw-data-impl",
-    path = "../get-raw-data-impl",
-}
-
-Cargo statically links the runner, Core, the source implementation, and the source’s dependencies into:
-
-get-raw-data/runtime/example-source-get-raw-data
-
-No .rlib or dynamically loaded Rust plugin is published.
-
-A nontrivial source still uses ordinary sequential Rust:
-
-use std::{
-    ffi::OsString,
-    fs::File,
-};
-use clap::Parser;
-use serde::Deserialize;
-use lexicon_core::http::{
-    AcquisitionError,
-    AcquisitionResult,
-    HttpAcquisitionContext,
-    HttpRequest,
-    HttpSourceContractV1,
-    RetryPolicy,
-};
-pub const SOURCE: HttpSourceContractV1 =
-    HttpSourceContractV1::new(acquire);
-#[derive(Parser)]
-struct Args {
-    #[arg(long)]
-    since: Option<String>,
-    #[arg(long, default_value_t = 4)]
-    max_attempts: u32,
-}
-#[derive(Deserialize)]
-struct Manifest {
-    continuation: Option<String>,
-    items: Vec<Item>,
-}
-#[derive(Deserialize)]
-struct Item {
-    id: String,
-    url: String,
-    sha256: String,
-}
-pub fn acquire(
-    context: &mut HttpAcquisitionContext,
-    raw_args: &[OsString],
-) -> AcquisitionResult<()> {
-    let args = Args::try_parse_from(
-        std::iter::once(OsString::from("example-source"))
-            .chain(raw_args.iter().cloned()),
-    )
-    .map_err(AcquisitionError::arguments_from)?;
-    let mut continuation = None;
-    loop {
-        let query = QueryBody {
-            since: args.since.clone(),
-            continuation: continuation.clone(),
-        };
-        let manifest_transaction = context.execute(
-            HttpRequest::post(
-                "https://example.com/api/manifest",
-            )?
-            .json(&query)?
-            .header("Accept", "application/json")?
-            .sensitive_header_from_env(
-                "Authorization",
-                "EXAMPLE_API_TOKEN",
-            )?
-            .logical_key("manifest")
-            .retry(
-                RetryPolicy::transient()
-                    .max_attempts(args.max_attempts),
-            ),
-        )?;
-        manifest_transaction
-            .response()
-            .require_success()?;
-        // Parsing reads the body Core has already preserved.
-        let reader = File::open(
-            manifest_transaction.response().body_path(),
-        )
-        .map_err(|error| {
-            AcquisitionError::source(
-                "open recorded manifest",
-                error,
-            )
-        })?;
-        let manifest: Manifest =
-            serde_json::from_reader(reader)
-                .map_err(|error| {
-                    AcquisitionError::source(
-                        "parse recorded manifest",
-                        error,
-                    )
-                })?;
-        for item in manifest.items {
-            let checkpoint = format!("item/{}", item.id);
-            if context.has_checkpoint(&checkpoint)? {
-                continue;
-            }
-            let mut request =
-                HttpRequest::get(&item.url)?
-                    .logical_key(&checkpoint)
-                    .retry(
-                        RetryPolicy::transient_get()
-                            .max_attempts(args.max_attempts),
-                    );
-            if let Some(etag) =
-                context.latest_response_header(
-                    &checkpoint,
-                    "ETag",
-                )?
-            {
-                request = request.header(
-                    "If-None-Match",
-                    etag,
-                )?;
-            }
-            let transaction = context.execute(request)?;
-            match transaction.response().status().as_u16() {
-                200 => {
-                    verify_sha256(
-                        transaction.response().body_path(),
-                        &item.sha256,
-                    )?;
-                }
-                304 => {
-                    // A previously recorded representation
-                    // remains current.
-                }
-                status => {
-                    return Err(
-                        AcquisitionError::source_message(
-                            format!(
-                                "{} returned HTTP {}",
-                                item.id,
-                                status,
-                            ),
-                        ),
-                    );
-                }
-            }
-            // Commit only after recording and verification.
-            context.commit_checkpoint(&checkpoint)?;
-        }
-        match manifest.continuation {
-            Some(token) => continuation = Some(token),
-            None => break,
-        }
-    }
-    Ok(())
-}
-
-This remains normal Rust:
-
-authenticate
-→ POST manifest query
-→ record transaction
-→ parse recorded JSON
-→ follow continuation token
-→ iterate discovered items
-→ issue conditional GETs
-→ record every attempt
-→ verify checksums
-→ commit source checkpoints
-→ continue or finish
-
-The source does not have to encode this as start, on_response, and NextAction callbacks. Local variables, loops, early returns, helper functions, parsing libraries, and debugger breakpoints work normally.
-
-For every call to:
-
-context.execute(request)
-
-Core performs this sequence:
-
-allocate transaction ID
-→ create transaction staging directory
-→ finalize the effective request
-→ persist redacted request metadata
-→ persist request body bytes
-→ perform one physical HTTP attempt
-→ persist response metadata or failure state
-→ stream undecoded response body to storage
-→ calculate hashes
-→ finalize the transaction
-→ update session progress
-→ return RecordedTransaction
-
-Only after that sequence may source code inspect the response.
-
-Consequently:
-
-let transaction = context.execute(request)?;
-parse(transaction.response().body_path())?;
-
-means parse cannot observe a Core response before its raw transaction has been recorded.
-
-If parsing fails or panics, the response remains preserved.
-
-If the server returns 404, the response is recorded before require_success() reports an error.
-
-If Core retries four times, it creates four transaction directories.
-
-If the server redirects twice before the final response, each HTTP exchange receives its own transaction directory. Redirects and retries cannot be invisibly collapsed by the underlying HTTP client.
-
-The runtime tree might contain:
-
-data/raw/
-├── 2026-08-24T18-30-02Z-000001/
-│   ├── request/
-│   │   ├── metadata.json
-│   │   └── body
-│   └── response/
-│       ├── metadata.json
-│       └── body
-├── 2026-08-24T18-30-03Z-000002/
-└── 2026-08-24T18-30-06Z-000003/
-
-The stored response body contains HTTP entity bytes before content decoding. If the response declares Content-Encoding: gzip, the raw file contains the compressed bytes. Core may provide a separate decoded reader, but it does not replace the preserved body.
-
-The build command follows a fixed route:
-
-lexicon source build example-source --protocol http
-→ lexicon-cli/src/main.rs
-→ lexicon_framework::commands::source_build(...)
-→ lexicon_core::build validation
-→ cargo metadata --locked
-→ cargo build --release --locked
-→ Cargo JSON artifact selection
-→ runtime identity probe
-→ staged acquisition runtime
-→ staged processing runtime
-→ paired transactional publication
-
-A representative Cargo invocation is:
-
-cargo build
-  --manifest-path <get-raw-data/Cargo.toml>
-  --package example-source-get-raw-data-runner
-  --bin example-source-get-raw-data
-  --release
-  --locked
-  --message-format=json-render-diagnostics
-  --target-dir <temporary-acquisition-target>
-
-Lexicon selects the executable artifact for that exact package and binary target. It does not find an executable by guessing a path.
-
-If acquisition builds but processing fails, neither existing runtime is replaced. If publishing the second runtime fails after publishing the first, Lexicon restores both previous runtime bundles.
-
-Foreground acquisition executes as:
-
-user
-→ installed lexicon process
-→ linked lexicon-framework
-→ linked lexicon-core
-→ published acquisition runtime child
-→ child’s linked lexicon-core runner
-→ source descriptor
-→ source acquire function
-
-Background acquisition executes as:
-
-user
-→ initial lexicon process
-→ same lexicon executable re-executed as __operator-host
-→ linked lexicon-framework
-→ linked lexicon-core
-→ published acquisition runtime child
-
-There is still only one installed control executable. The background operator host is another process running the same lexicon binary, not a separately installed framework product.
-
-Runtime validation happens twice.
-
-The parent validates:
-
-runtime.json
-executable hash
-runtime protocol
-source identity
-protocol identity
-operation identity
-Core contract version
-compiled capabilities
-
-The child’s linked Core validates:
-
-invocation-envelope version
-project identity
-source identity
-protocol identity
-operation identity
-session identity
-execution mode
-source descriptor
-required capabilities
-
-Only after those checks does Core call:
-
-source_implementation::acquire(
-    &mut context,
-    source_arguments,
-)
-
-This is runtime enforcement of the supported invocation contract. It is not global effect confinement.
-
-The source library can still deliberately write:
-
-std::net::TcpStream::connect("example.com:443")?;
-std::fs::write("/some/path", bytes)?;
-std::process::Command::new("another-program").spawn()?;
-
-Those operations are technically possible because the source is trusted native Rust linked into the runtime. A trait, function pointer, managed main, or Cargo dependency cannot prohibit them.
-
-The precise guarantee is:
-
-Every HTTP request submitted through Core is recorded.
-Lexicon does not guarantee that unrestricted native source code
-is incapable of performing another request outside Core.
-
-That limitation is accepted because source authors are trusted project developers. If Lexicon later executes hostile third-party sources, it will require a different security architecture involving a broker and genuine operating-system restrictions—not merely another Rust interface or subprocess.
+verify(
+    transaction.response().body_path(),
+)?;
+context.commit_checkpoint(
+    &logical_key,
+)?;
+
+Checkpoint persistence is session-specific, but checkpoint discovery may span compatible prior sessions.
+
+If the process terminates after the transaction is recorded but before the checkpoint is committed, the source may repeat the logical request. Lexicon therefore provides at-least-once recovery around this boundary, not exactly-once HTTP execution.
+
+12. Work-ledger recovery
+
+A source-owned work ledger and Core checkpoints compose as follows:
+
+work item pending
+→ execute keyed HTTP operation
+→ verify recorded response
+→ commit Core checkpoint
+→ mark work item complete
+
+If termination occurs after checkpoint commit but before the work database is updated, a later run must be able to reconcile the work item from the checkpoint.
+
+If discovery repeats after interruption, stable source-owned work keys and idempotent insertion should prevent duplicate intended work.
+
+The contract does not claim automatic resumption of arbitrary program counters or local variables. Durable continuation must be represented explicitly through:
+
+* checkpoints;
+* source state;
+* recorded raw transactions;
+* source-defined reconstruction logic.
+
+13. Managed runners
+
+Lexicon owns the supported runtime main().
+
+The managed runner:
+
+* parses the reserved invocation envelope;
+* handles runtime-information mode before source initialization;
+* validates compiled source identity;
+* validates protocol and operation identity;
+* validates contract and runtime protocol versions;
+* validates required capabilities;
+* attaches to the selected session;
+* validates session ownership;
+* constructs the Core context;
+* invokes the source descriptor;
+* records normal completion or ordinary source failure;
+* returns a meaningful process exit status.
+
+A source may not replace the supported runner entrypoint.
+
+Managed runner sources and manifests are validated before build. A modified managed runner is rejected rather than silently overwritten.
+
+14. Native builds
+
+Source runtimes are native release executables for the current machine.
+
+A supported build must use:
+
+* a committed Cargo workspace;
+* a committed Cargo lockfile;
+* cargo build --release --locked;
+* isolated temporary target directories;
+* Cargo JSON artifact selection;
+* exact package and binary target identities;
+* staged runtime bundles;
+* runtime identity probing;
+* executable hashing;
+* paired acquisition and processing publication;
+* rollback on publication failure.
+
+Lexicon must not guess an executable path or publish an .rlib.
+
+A failed build must leave existing published runtimes intact.
+
+The Lexicon executable must embed the Core source identity or revision needed when generating source workspaces. An installed Lexicon binary must not depend on its original compilation checkout or invoke git there at runtime.
+
+lexicon source build does not invoke MZA.
+
+15. Runtime admission
+
+Before launching a source runtime, the parent must validate:
+
+* project and source identity;
+* requested protocol and operation;
+* source manifest;
+* runtime metadata;
+* executable hash;
+* runtime-information response;
+* runtime protocol;
+* Core contract;
+* runner-template version;
+* required capabilities.
+
+The child validates the invocation independently.
+
+Parent and child validation protect against accidental mismatch. They do not create a security boundary against a trusted user manually replacing files outside supported commands.
+
+16. Core-mediated HTTP
+
+The supported HTTP effect is:
+
+let transaction =
+    context.execute(request)?;
+
+For every physical HTTP attempt, Core must:
+
+1. allocate a unique transaction identity;
+2. allocate transaction staging storage;
+3. finalize the effective request;
+4. persist redacted request metadata;
+5. persist exact request-body bytes supplied to transport, when present;
+6. dispatch exactly one physical exchange;
+7. persist response metadata or a transport-failure record;
+8. stream the undecoded HTTP entity body to raw storage;
+9. hash the stored body while streaming;
+10. flush required durable files;
+11. atomically finalize the transaction or leave recognizable partial state;
+12. update session transaction progress;
+13. return only after required recording is durable.
+
+Parsing and validation performed after execute() do not erase the transaction if they fail.
+
+17. Raw-byte meaning
+
+“Exact response bytes” means:
+
+HTTP entity-body octets after transfer framing and before content decoding.
+
+It does not mean TCP packets, TLS records, HTTP/2 frames, HTTP/3 frames, or transfer-chunk framing.
+
+If a response has Content-Encoding: gzip, the compressed entity bytes are stored.
+
+Any decoded-body convenience API is secondary. It does not replace raw storage.
+
+18. Redirects and retries
+
+Every physical exchange receives a distinct transaction record.
+
+A redirect sequence:
+
+request → 301 → 302 → 200
+
+produces three transactions.
+
+A retry sequence:
+
+connection reset → 429 → 503 → 200
+
+produces four transactions.
+
+The underlying HTTP library must not invisibly follow redirects or dispatch retries below Core’s recording layer.
+
+Retries for non-idempotent operations must not be silently enabled.
+
+19. Metadata redaction and secrets
+
+Core redacts managed sensitive metadata before persistence.
+
+Mandatory sensitive fields include at least:
+
+Authorization
+Proxy-Authorization
+Cookie
+Set-Cookie
+
+Core also supports explicitly sensitive headers, query parameters, metadata fields, and secret references.
+
+Raw request and response bodies remain byte-preserved. Core cannot both preserve arbitrary body bytes exactly and generically remove secrets embedded in those bytes.
+
+Source-authored files, databases, logs, and state are outside Core’s generic redaction guarantee. Sources must not persist credentials in their state ledger unless an explicit protected-secret design permits it.
+
+Secrets should be supplied through environment variables, protected files, or future Core secret references. Secrets should not be placed in process arguments.
+
+20. Sessions
+
+Acquisition and processing have separate session histories.
+
+The supervising lexicon process owns:
+
+* new-versus-resume selection;
+* prior-failure policy;
+* --abandon-past-fail;
+* initial session creation;
+* session lease acquisition;
+* runtime launch;
+* foreground cancellation supervision;
+* background operator-host handoff;
+* abnormal termination reconciliation;
+* stale ownership reconciliation.
+
+Core inside the child runtime owns:
+
+* invocation validation;
+* attachment to the selected session;
+* transition to running;
+* transaction progress;
+* ordinary source errors;
+* checkpoint persistence;
+* normal completion.
+
+Source code owns:
+
+* source-specific progress;
+* checkpoint selection;
+* source-state mutation;
+* work-ledger reconciliation;
+* pagination and continuation semantics.
+
+The source must not directly edit Lexicon session documents.
+
+A machine power loss cannot be atomically converted into a clean terminal status at the moment it occurs. A later invocation must detect and reconcile stale durable ownership.
+
+21. Processing
+
+Processing is separate from acquisition.
+
+A processing implementation:
+
+* is a source-authored library;
+* runs through a separate managed runner;
+* has separate sessions and runtime publication;
+* reads protocol-scoped raw transactions;
+* semantically interprets recorded data;
+* stages source-specific processed output;
+* publishes processed output transactionally.
+
+Processing does not alter raw acquisition evidence.
+
+Acquisition source state is operational continuation state, not a substitute for raw provenance and not an implicit processing input.
+
+22. Versioning
+
+The following compatibility surfaces are distinct:
+
+* project schema;
+* source-manifest schema;
+* acquisition source contract;
+* processing source contract;
+* managed runner template;
+* Core crate version;
+* Core contract;
+* runtime invocation protocol;
+* runtime metadata;
+* raw-data schema;
+* session schema;
+* checkpoint schema;
+* individual capabilities;
+* MZA bundling protocol;
+* MZA library version.
+
+One number must not represent every surface.
+
+The source library and managed runner compile together. Lexicon does not promise a stable Rust ABI between them.
+
+23. MZA Protocol 1
+
+MZA owns construction and installation of the complete Lexicon product.
+
+MZA is used for:
+
+* target-specific application bundling;
+* installer construction;
+* application placement;
+* command registration;
+* bundle metadata;
+* installation and uninstall behavior.
+
+Lexicon supplies MZA Protocol 1 inputs through the outer release-construction package.
+
+MZA must not be linked into:
+
+* lexicon-core;
+* generated acquisition runtimes;
+* generated processing runtimes;
+* ordinary source-development builds.
+
+The installed Lexicon executable must not retain installer authority merely because an MZA-produced installer installed it.
+
+24. Enforcement
+
+Property	Enforcement
+Correct source descriptor and function signatures	Compiler
+Core linked into managed runtime	Compiler
+Managed runner is selected and unmodified	Build validation
+Workspace, lockfile, target, and dependency compatibility	Build validation
+Correct executable artifact selected	Build validation
+Published runtime identity and hash	Parent and child runtime admission
+Every Core-mediated physical HTTP attempt is recorded	Runtime
+Core-managed metadata is redacted	Runtime
+Checkpoint references a durable keyed transaction	Runtime
+Source state stays within its validated supported root	API and implementation discipline
+Existing runtimes survive failed builds	Staging and transactional publication
+Arbitrary native network or filesystem effects are prevented	Not enforced
+Exactly-once external HTTP effects	Not guaranteed
+Hostile source confinement	Not provided
+
+25. Required verification
+
+The project must maintain meaningful tests for:
+
+* compile-pass and compile-fail source contracts;
+* managed-runner integrity;
+* source and processing workspace validation;
+* one-request acquisition;
+* request-body preservation;
+* compressed-response preservation;
+* redirect and retry recording;
+* metadata redaction;
+* connection and truncation failures;
+* checkpoints and resume;
+* source errors and panics;
+* abnormal child exit;
+* stale session recovery;
+* argument preservation;
+* runtime identity and hash mismatch;
+* isolated locked builds;
+* paired publication rollback;
+* foreground supervision;
+* background operator-host handoff;
+* durable source-state access;
+* fan-out ledger deduplication;
+* recovery between checkpoint commit and work-ledger completion;
+* installed execution without the original source checkout.
+
+Environmental limitations may be reported as explicit unsupported test environments, but an environmental race must not be converted into an unconditional successful test result.
+
+26. Explicit non-goals
+
+This contract does not initially standardize:
+
+* a universal job queue;
+* a distributed scheduler;
+* cross-source work stealing;
+* a workflow language;
+* a durable program counter;
+* a stable acquisition IR;
+* a dynamic plugin ABI;
+* hostile-source sandboxing;
+* a universal pagination model;
+* a universal polling model;
+* a broad retry-policy language;
+* framework-owned source phases;
+* a broker protocol;
+* exactly-once HTTP effects.
+
+27. Final resolution
+
+Lexicon’s selected boundary is:
+
+Lexicon controls:
+    supported entrypoints
+    contract validation
+    managed runners
+    locked native builds
+    artifact selection
+    runtime admission
+    Core-mediated HTTP
+    raw transaction recording
+    checkpoints
+    validated durable-state locations
+    sessions
+    supervision
+    runtime publication
+Source implementations control:
+    trusted Rust computation
+    source arguments
+    parsing
+    branching and iteration
+    authentication decisions
+    pagination and continuation
+    durable work schema and semantics
+    source-specific recovery
+    checksum and semantic validation
+MZA controls:
+    complete release bundling
+    installation artifacts
+    application placement
+    command registration
+    installer behavior
+
+This boundary must remain honest: Lexicon provides strong guarantees for effects submitted through its supported APIs without claiming to sandbox unrestricted trusted native code.
