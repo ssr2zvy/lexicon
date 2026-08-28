@@ -1023,7 +1023,9 @@ fn enumerate_transaction_entries(
         let name = name.to_str().ok_or(HttpHistoricalLookupError::ManagedEntryCorrupt(
             HttpCheckpointTransactionLookupError::EntryNameInvalid,
         ))?;
-        if name.starts_with(".partial-") {
+        if name.starts_with(
+            crate::protocols::http::transaction::recorder::PARTIAL_TRANSACTION_DIRECTORY_PREFIX,
+        ) {
             continue;
         }
         if parse_transaction_directory_name(name).is_err() {
@@ -1037,19 +1039,11 @@ fn enumerate_transaction_entries(
     Ok(paths)
 }
 
+/// Delegates to the authoritative finalized transaction directory-name parser so the
+/// grammar is defined in exactly one place.
 fn parse_transaction_directory_name(name: &str) -> Result<(u64, &str), ()> {
-    let (timestamp, transaction_id) = name.split_once('-').ok_or(())?;
-    if timestamp.is_empty()
-        || !timestamp.bytes().all(|byte| byte.is_ascii_digit())
-        || transaction_id.is_empty()
-    {
-        return Err(());
-    }
-    let parsed = timestamp.parse::<u64>().map_err(|_| ())?;
-    if parsed == 0 {
-        return Err(());
-    }
-    Ok((parsed, transaction_id))
+    crate::protocols::http::transaction::metadata::parse_transaction_directory_name(name)
+        .map_err(|_| ())
 }
 
 fn is_newer_transaction(candidate: &RecordedTransaction, current: &RecordedTransaction) -> bool {

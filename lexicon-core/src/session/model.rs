@@ -206,6 +206,18 @@ pub enum SessionFailureCode {
     ZeroExitWithoutCompletion,
     /// The child exited nonzero but left no failure record.
     NonzeroExitWithoutFailureRecord,
+    /// Processing could not enumerate or admit protocol-scoped raw transactions.
+    ProcessingTransactionDiscoveryFailed,
+    /// A raw transaction failed provenance validation against its acquisition session.
+    ProcessingTransactionProvenanceFailed,
+    /// The processing database path failed managed-path admission.
+    ProcessingDatabasePathInvalid,
+    /// The processing database could not be opened, configured, or verified.
+    ProcessingDatabaseOpenFailed,
+    /// A processing database transaction operation failed.
+    ProcessingDatabaseTransactionFailed,
+    /// The bound processing context could not prove its required invariants.
+    ProcessingContextConstructionFailed,
 }
 
 impl SessionFailureCode {
@@ -226,6 +238,16 @@ impl SessionFailureCode {
             Self::ExecutableIntegrityFailed => "executable_integrity_failed",
             Self::ZeroExitWithoutCompletion => "zero_exit_without_completion",
             Self::NonzeroExitWithoutFailureRecord => "nonzero_exit_without_failure_record",
+            Self::ProcessingTransactionDiscoveryFailed => {
+                "processing_transaction_discovery_failed"
+            }
+            Self::ProcessingTransactionProvenanceFailed => {
+                "processing_transaction_provenance_failed"
+            }
+            Self::ProcessingDatabasePathInvalid => "processing_database_path_invalid",
+            Self::ProcessingDatabaseOpenFailed => "processing_database_open_failed",
+            Self::ProcessingDatabaseTransactionFailed => "processing_database_transaction_failed",
+            Self::ProcessingContextConstructionFailed => "processing_context_construction_failed",
         }
     }
 }
