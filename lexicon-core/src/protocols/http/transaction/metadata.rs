@@ -34,7 +34,8 @@ pub struct RequestMetadataDocument {
     pub has_body: bool,
     pub body_length: u64,
     pub body_sha256: Option<String>,
-    pub created_at: String,
+    /// Nanoseconds since the Unix epoch (u64; valid for dates through roughly year 2554).
+    pub created_at_unix_nanos: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,12 +47,18 @@ pub enum ResponseOutcomeDocument {
         headers: Vec<StoredHeader>,
         body_length: u64,
         body_sha256: String,
-        completed_at: String,
+        /// Nanoseconds since the Unix epoch.
+        completed_at_unix_nanos: u64,
     },
     TransportFailure {
         failure_class: String,
         retryable: bool,
-        failed_at: String,
+        /// Nanoseconds since the Unix epoch.
+        failed_at_unix_nanos: u64,
+    },
+    IncompleteResponse {
+        /// Nanoseconds since the Unix epoch.
+        failed_at_unix_nanos: u64,
     },
 }
 
@@ -64,6 +71,8 @@ pub struct ResponseMetadataDocument {
     pub outcome: ResponseOutcomeDocument,
 }
 
+/// Acquisition progress document. Opaque outside this module; construct through
+/// `AcquisitionProgressDocument::new_initial` and `AcquisitionProgressDocument::advance`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcquisitionProgressDocument {
@@ -75,6 +84,89 @@ pub struct AcquisitionProgressDocument {
     pub retry_count: u64,
     pub last_transaction_id: Option<String>,
     pub last_logical_request_key: Option<String>,
-    pub updated_at: String,
+    /// Nanoseconds since the Unix epoch.
+    pub updated_at_unix_nanos: u64,
     pub revision: u64,
+}
+
+/// Errors that can arise when validating a deserialized progress document.
+#[derive(Debug)]
+pub enum AcquisitionProgressValidationError {
+    UnknownSchemaVersion { found: u32 },
+    EmptySessionId,
+    SessionMismatch,
+    RevisionNotMonotonic { expected: u64, found: u64 },
+    LastTransactionIdInconsistent,
+    CounterOverflow,
+}
+
+impl std::fmt::Display for AcquisitionProgressValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownSchemaVersion { found } => {
+                write!(f, "unknown acquisition progress schema version: {found}")
+            }
+            Self::EmptySessionId => f.write_str("acquisition progress session_id is empty"),
+            Self::SessionMismatch => f.write_str("acquisition progress session_id does not match"),
+            Self::RevisionNotMonotonic { expected, found } => {
+                write!(f, "acquisition progress revision not monotonic: expected {expected}, found {found}")
+            }
+            Self::LastTransactionIdInconsistent => {
+                f.write_str("acquisition progress last_transaction_id inconsistent with completed_transaction_count")
+            }
+            Self::CounterOverflow => f.write_str("acquisition progress counter would overflow"),
+        }
+    }
+}
+
+impl std::error::Error for AcquisitionProgressValidationError {}
+
+impl AcquisitionProgressDocument {
+    pub fn new_initial(session_id: String, now_nanos: u64) -> Self {
+        Self {
+            schema_version: HTTP_ACQUISITION_PROGRESS_SCHEMA_VERSION,
+            session_id,
+            completed_transaction_count: 0,
+            transport_failure_count: 0,
+            redirect_count: 0,
+            retry_count: 0,
+            last_transaction_id: None,
+            last_logical_request_key: None,
+            updated_at_unix_nanos: now_nanos,
+            revision: 0,
+        }
+    }
+
+    /// Validate invariants of an existing document loaded from disk.
+    pub fn validate_existing(
+        doc: &AcquisitionProgressDocument,
+        session_id: &str,
+        expected_revision_min: u64,
+    ) -> Result<(), AcquisitionProgressValidationError> {
+        if doc.schema_version != HTTP_ACQUISITION_PROGRESS_SCHEMA_VERSION {
+            return Err(AcquisitionProgressValidationError::UnknownSchemaVersion {
+                found: doc.schema_version,
+            });
+        }
+        if doc.session_id.is_empty() {
+            return Err(AcquisitionProgressValidationError::EmptySessionId);
+        }
+        if doc.session_id != session_id {
+            return Err(AcquisitionProgressValidationError::SessionMismatch);
+        }
+        if doc.revision < expected_revision_min {
+            return Err(AcquisitionProgressValidationError::RevisionNotMonotonic {
+                expected: expected_revision_min,
+                found: doc.revision,
+            });
+        }
+        // last_transaction_id must be Some when there have been completed transactions.
+        if doc.completed_transaction_count > 0 && doc.last_transaction_id.is_none() {
+            return Err(AcquisitionProgressValidationError::LastTransactionIdInconsistent);
+        }
+        if doc.completed_transaction_count == 0 && doc.last_transaction_id.is_some() {
+            return Err(AcquisitionProgressValidationError::LastTransactionIdInconsistent);
+        }
+        Ok(())
+    }
 }

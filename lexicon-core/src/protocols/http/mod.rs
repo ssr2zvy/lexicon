@@ -9,7 +9,10 @@ pub mod runner;
 pub(crate) mod transport;
 pub mod transaction;
 
-pub use context::{HttpAcquisitionContext, ProgressPersistenceError, SessionValidationError};
+pub use context::{
+    AcquisitionProgressError, HttpAcquisitionContext, ProgressPersistenceError,
+    SessionValidationError,
+};
 pub use crate::runtime::{
     MissingHttpCapabilities, ParsedRuntimeInvocation, RuntimeCompatibilityError, RuntimeIdentity,
     RuntimeInformationV1, RuntimeOperation, RuntimeProtocol,

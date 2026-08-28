@@ -15,15 +15,11 @@ pub(crate) struct ReqwestHttpTransport {
 }
 
 impl ReqwestHttpTransport {
-    pub(crate) fn new() -> Result<Self, HttpTransportFailure> {
+    pub(crate) fn new() -> Result<Self, HttpTransportConfigurationError> {
         let client = Client::builder()
             .redirect(Policy::none())
-            .gzip(false)
-            .brotli(false)
-            .deflate(false)
-            .zstd(false)
             .build()
-            .map_err(|_| HttpTransportFailure::Configuration)?;
+            .map_err(|e| HttpTransportConfigurationError(e.to_string()))?;
 
         Ok(Self { client })
     }
@@ -47,8 +43,20 @@ impl HttpTransport for ReqwestHttpTransport {
             builder = builder.body(body.clone());
         }
 
-        let response = builder.send().map_err(|_| HttpTransportFailure::Io)?;
+        let response = builder.send().map_err(classify_send_error)?;
         Ok(HttpTransportResponse::from_response(response))
+    }
+}
+
+fn classify_send_error(error: reqwest::Error) -> HttpTransportFailure {
+    if error.is_timeout() {
+        HttpTransportFailure::Timeout
+    } else if error.is_connect() {
+        HttpTransportFailure::Connect
+    } else if error.is_request() || error.is_builder() {
+        HttpTransportFailure::RequestBuild
+    } else {
+        HttpTransportFailure::ExchangeIo
     }
 }
 
@@ -57,6 +65,8 @@ pub(crate) struct HttpTransportResponse {
     pub(crate) version: Option<String>,
     pub(crate) headers: Vec<(String, Vec<u8>)>,
     pub(crate) body: Box<dyn Read + Send>,
+    /// Raw Location header value from the actual transport response, for redirect control.
+    pub(crate) location_header: Option<String>,
 }
 
 impl HttpTransportResponse {
@@ -65,7 +75,15 @@ impl HttpTransportResponse {
         let version = Some(format!("{:?}", response.version()));
 
         let mut headers = Vec::new();
+        let mut location_header: Option<String> = None;
+
         for (name, value) in response.headers() {
+            let name_lower = name.as_str().to_ascii_lowercase();
+            if name_lower == "location" && location_header.is_none() {
+                if let Ok(text) = std::str::from_utf8(value.as_bytes()) {
+                    location_header = Some(text.to_string());
+                }
+            }
             headers.push((name.to_string(), value.as_bytes().to_vec()));
         }
 
@@ -74,15 +92,61 @@ impl HttpTransportResponse {
             version,
             headers,
             body: Box::new(response),
+            location_header,
         }
     }
 }
 
+/// Opaque transport configuration error. Does not expose internal details.
+#[derive(Debug, Clone)]
+pub struct HttpTransportConfigurationError(pub(crate) String);
+
+impl fmt::Display for HttpTransportConfigurationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HTTP transport configuration failed")
+    }
+}
+
+impl std::error::Error for HttpTransportConfigurationError {}
+
+/// Stable typed transport failure classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpTransportFailure {
+    /// Client configuration prevented the request from being built.
     Configuration,
+    /// Request construction failed (invalid method, header, or body conversion).
     RequestBuild,
-    Io,
+    /// Connection to the server could not be established.
+    Connect,
+    /// The request or connection timed out.
+    Timeout,
+    /// An I/O error occurred while writing the request body.
+    BodyWrite,
+    /// An I/O error occurred during the HTTP exchange.
+    ExchangeIo,
+    /// A TLS/SSL error occurred during the exchange.
+    Tls,
+}
+
+impl HttpTransportFailure {
+    /// Returns true only for explicitly classified transient exchange failures.
+    /// Unknown or non-transient failures are not retryable.
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::Connect | Self::Timeout | Self::ExchangeIo)
+    }
+
+    /// Returns a stable string label for persistence in transaction metadata.
+    pub fn stable_class(self) -> &'static str {
+        match self {
+            Self::Configuration => "configuration",
+            Self::RequestBuild => "request_build",
+            Self::Connect => "connect",
+            Self::Timeout => "timeout",
+            Self::BodyWrite => "body_write",
+            Self::ExchangeIo => "exchange_io",
+            Self::Tls => "tls",
+        }
+    }
 }
 
 impl fmt::Display for HttpTransportFailure {
@@ -90,7 +154,11 @@ impl fmt::Display for HttpTransportFailure {
         match self {
             Self::Configuration => formatter.write_str("HTTP transport configuration failed"),
             Self::RequestBuild => formatter.write_str("HTTP transport request construction failed"),
-            Self::Io => formatter.write_str("HTTP transport exchange failed"),
+            Self::Connect => formatter.write_str("HTTP transport connection failed"),
+            Self::Timeout => formatter.write_str("HTTP transport timed out"),
+            Self::BodyWrite => formatter.write_str("HTTP transport body write failed"),
+            Self::ExchangeIo => formatter.write_str("HTTP transport exchange failed"),
+            Self::Tls => formatter.write_str("HTTP transport TLS error"),
         }
     }
 }

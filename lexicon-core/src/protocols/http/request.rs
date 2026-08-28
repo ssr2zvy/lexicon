@@ -17,6 +17,8 @@ pub struct HttpRequest {
     logical_key: Option<String>,
     retry_policy: HttpRetryPolicy,
     redirect_policy: HttpRedirectPolicy,
+    /// Names marked via `sensitive_query_name()`, matched ASCII case-insensitively.
+    explicit_sensitive_query_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +101,7 @@ impl HttpRequest {
             logical_key: None,
             retry_policy: HttpRetryPolicy::none(),
             redirect_policy: HttpRedirectPolicy::none(),
+            explicit_sensitive_query_names: Vec::new(),
         })
     }
 
@@ -126,9 +129,33 @@ impl HttpRequest {
         environment_variable: impl AsRef<str>,
     ) -> Result<Self, HttpRequestError> {
         let variable_name = environment_variable.as_ref();
-        let value = std::env::var(variable_name)
-            .map_err(|_| HttpRequestError::EnvironmentVariableMissing(variable_name.to_string()))?;
-        self.push_header(name.as_ref(), &value, true)?;
+        match std::env::var_os(variable_name) {
+            None => return Err(HttpRequestError::EnvironmentVariableUnavailable),
+            Some(os_value) => {
+                let value = os_value
+                    .into_string()
+                    .map_err(|_| HttpRequestError::EnvironmentVariableNotUtf8)?;
+                self.push_header(name.as_ref(), &value, true)?;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Marks every existing or appended query field with `name` as sensitive
+    /// for persisted metadata. ASCII case-insensitive matching.
+    pub fn sensitive_query_name(mut self, name: impl AsRef<str>) -> Result<Self, HttpRequestError> {
+        let key = name.as_ref().trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return Err(HttpRequestError::InvalidQueryParameter);
+        }
+        // Mark any already-accumulated query parameters with this name as sensitive.
+        for param in &mut self.query {
+            if param.name.to_ascii_lowercase() == key {
+                param.sensitive = true;
+            }
+        }
+        // Record the name so finalize() will also mark future/URL-embedded params.
+        self.explicit_sensitive_query_names.push(key);
         Ok(self)
     }
 
@@ -211,6 +238,10 @@ impl HttpRequest {
             if query.sensitive {
                 sensitive_query_names.insert(query.name.to_ascii_lowercase());
             }
+        }
+        // Include names marked via sensitive_query_name().
+        for name in &self.explicit_sensitive_query_names {
+            sensitive_query_names.insert(name.clone());
         }
 
         let redacted_url = redact_url(&url, &sensitive_query_names);
@@ -306,7 +337,10 @@ pub enum HttpRequestError {
     UnsupportedScheme,
     InvalidHeaderName,
     InvalidHeaderValue,
-    EnvironmentVariableMissing(String),
+    /// The requested environment variable is not set.
+    EnvironmentVariableUnavailable,
+    /// The requested environment variable is set but not valid UTF-8.
+    EnvironmentVariableNotUtf8,
     JsonSerialization(serde_json::Error),
     InvalidLogicalKey,
     InvalidQueryParameter,
@@ -321,8 +355,11 @@ impl fmt::Display for HttpRequestError {
             Self::UnsupportedScheme => formatter.write_str("unsupported HTTP URL scheme"),
             Self::InvalidHeaderName => formatter.write_str("invalid HTTP header name"),
             Self::InvalidHeaderValue => formatter.write_str("invalid HTTP header value"),
-            Self::EnvironmentVariableMissing(name) => {
-                write!(formatter, "missing environment variable for sensitive header: {name}")
+            Self::EnvironmentVariableUnavailable => {
+                formatter.write_str("environment variable for sensitive header is not set")
+            }
+            Self::EnvironmentVariableNotUtf8 => {
+                formatter.write_str("environment variable for sensitive header is not valid UTF-8")
             }
             Self::JsonSerialization(_) => formatter.write_str("failed to serialize JSON request body"),
             Self::InvalidLogicalKey => formatter.write_str("invalid logical request key"),
