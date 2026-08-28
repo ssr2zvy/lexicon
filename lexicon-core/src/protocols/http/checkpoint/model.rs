@@ -144,13 +144,13 @@ impl CommittedHttpCheckpoint {
     }
 }
 
-pub fn key_sha256_hex(key: &HttpLogicalRequestKey) -> String {
+pub(crate) fn key_sha256_hex(key: &HttpLogicalRequestKey) -> String {
     let mut hasher = Sha256::new();
     hasher.update(key.as_str().as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-pub fn checkpoint_filename(key: &HttpLogicalRequestKey) -> String {
+pub(crate) fn checkpoint_filename(key: &HttpLogicalRequestKey) -> String {
     format!("{}.json", key_sha256_hex(key))
 }
 
@@ -228,7 +228,7 @@ fn decode_checkpoint_document(
     })
 }
 
-pub fn admit_http_checkpoint_from_disk(
+pub(crate) fn admit_http_checkpoint_from_disk(
     trusted_operation_root: &Path,
     trusted_raw_root: &Path,
     checkpoint_path: &Path,
@@ -403,7 +403,9 @@ fn find_transaction_by_identity(
             ));
         }
         if !metadata.is_dir() {
-            continue;
+            return Err(HttpCheckpointAdmissionError::TransactionLookup(
+                HttpCheckpointTransactionLookupError::UnexpectedManagedEntry,
+            ));
         }
 
         let name = entry.file_name();

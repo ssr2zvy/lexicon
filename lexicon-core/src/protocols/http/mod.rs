@@ -23,7 +23,7 @@ pub use checkpoint::{
     CommittedHttpCheckpoint, HTTP_CHECKPOINT_SCHEMA_VERSION, MAX_HTTP_CHECKPOINT_DOCUMENT_BYTES,
     HttpCheckpointAdmissionError, HttpCheckpointCommitError, HttpCheckpointDecodingError,
     HttpCheckpointEncodingError, HttpCheckpointKeyError, HttpCheckpointLookupError,
-    HttpCheckpointPartialCommit, HttpHistoricalLookupError, admit_http_checkpoint_from_disk,
+    HttpCheckpointPartialCommit, HttpHistoricalLookupError,
 };
 pub use contract::{HttpAcquireFn, HttpResumeFn, HttpSourceContractV1};
 pub use error::{
