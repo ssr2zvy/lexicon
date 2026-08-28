@@ -1847,8 +1847,15 @@ fn format_processing_implementation_library(source_name: &str) -> String {
     out.push_str("    context: &mut ProcessingContext,\n");
     out.push_str("    arguments: &[OsString],\n");
     out.push_str(") -> ProcessingResult<()> {\n");
-    out.push_str("    let _ = (context, arguments);\n");
-    out.push_str("    todo!(\"implement processing\")\n");
+    out.push_str("    let _ = arguments;\n");
+    out.push_str("    for transaction in context.transactions().iter() {\n");
+    out.push_str("        let _ = transaction.transaction();\n");
+    out.push_str("        // Inspect admitted metadata and recorded body paths.\n");
+    out.push_str("    }\n");
+    out.push_str("    let database = context.database();\n");
+    out.push_str("    let _ = database;\n");
+    out.push_str("    // Source owns schema and SQL.\n");
+    out.push_str("    Ok(())\n");
     out.push_str("}\n");
     out
 }
