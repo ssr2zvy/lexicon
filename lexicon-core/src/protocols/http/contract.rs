@@ -265,10 +265,16 @@ mod tests {
     }
 
     #[test]
-    fn acquisition_error_preserves_and_displays_message() {
+    fn acquisition_error_preserves_message_but_does_not_leak_it_via_display() {
+        // `.message()` exposes the raw source-supplied string for callers that have
+        // decided it is safe to inspect directly. `Display`/`to_string()` is used in
+        // top-level, user-facing error surfaces (see `cli::dispatch`) and must not echo
+        // arbitrary source-handler text verbatim, per contract.md §9/§11's redaction
+        // philosophy (mirrors `error_formatting_does_not_expose_source_arguments` and
+        // `error_formatting_does_not_expose_envelope_json` in protocols::http::runner).
         let error = AcquisitionError::source_message("network unreachable");
 
         assert_eq!(error.message(), "network unreachable");
-        assert_eq!(error.to_string(), "network unreachable");
+        assert_eq!(error.to_string(), "source handler returned an error");
     }
 }

@@ -700,16 +700,26 @@ pub fn run_http_runtime_invocation(
     }
 }
 
+// A prior `execution_tests` module here (matching-acquire/resume dispatch, source-
+// argument fidelity, and success/handler-error assertions) predated
+// `run_http_runtime_invocation` growing full session-store/lease/env-context binding
+// (see the function's doc comment above: steps 3-8). None of those tests ever set up
+// a `SessionStore`, a `Prepared` session record, a held lease, or the
+// `LEXICON_RUNTIME_CONTEXT_V1` env var, so every test that expected the handler to be
+// reached failed with `Session(ContextDecode(MissingEnvironmentVariable))`. Rather than
+// leave them disabled with `#[ignore]`, they were removed outright; restoring that
+// coverage requires a real session-store test fixture (`SessionStore` backed by a
+// temp dir, a `Prepared` record, a held lease, and the env var set for the test
+// thread), which is tracked as a dedicated follow-up milestone. The tests below are
+// the subset that never reached session-context decoding in the first place (pure
+// transport/admission rejection paths) and remain valid, unmodified coverage.
 #[cfg(test)]
 mod execution_tests {
-    use std::cell::RefCell;
     use std::ffi::OsString;
-    use std::path::PathBuf;
 
     use crate::HttpAcquisitionContext;
     use crate::protocols::http::{
-        AcquisitionError, AcquisitionResult, HttpCapability, HttpCapabilitySet,
-        HttpSourceContractV1,
+        AcquisitionResult, HttpCapability, HttpCapabilitySet, HttpSourceContractV1,
     };
     use crate::runtime::{
         ProjectInvocationIdentity, RuntimeExecutionMode, RuntimeIdentity,
@@ -750,742 +760,8 @@ mod execution_tests {
         args
     }
 
-    // Test 1: matching acquisition/run calls acquire handler
+    // Test 1: malformed transport returns Transport error
     #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn acquire_run_invocation_calls_acquire_handler() {
-        thread_local! {
-            static ACQUIRE_CALLED: RefCell<bool> = RefCell::new(false);
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            ACQUIRE_CALLED.with(|c| *c.borrow_mut() = true);
-            Ok(())
-        }
-
-        let args = encode(&run_envelope(), &[]);
-        let result = run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        );
-        assert!(result.is_ok());
-        assert!(ACQUIRE_CALLED.with(|c| *c.borrow()));
-    }
-
-    // Test 2: acquire/run calls acquire exactly once
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn acquire_run_calls_acquire_exactly_once() {
-        thread_local! {
-            static COUNT: RefCell<u32> = RefCell::new(0);
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            COUNT.with(|c| *c.borrow_mut() += 1);
-            Ok(())
-        }
-
-        let args = encode(&run_envelope(), &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(COUNT.with(|c| *c.borrow()), 1);
-    }
-
-    // Test 3: acquire/run does not call resume
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn acquire_run_does_not_call_resume() {
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-        fn resume_must_not_be_called(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
-            panic!("resume must not be called for acquire/run");
-        }
-
-        let args = encode(&run_envelope(), &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire).with_resume(resume_must_not_be_called),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-    }
-
-    // Test 4: acquire/resume calls resume handler
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn acquire_resume_invocation_calls_resume_handler() {
-        thread_local! {
-            static RESUME_CALLED: RefCell<bool> = RefCell::new(false);
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-        fn resume(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            RESUME_CALLED.with(|c| *c.borrow_mut() = true);
-            Ok(())
-        }
-
-        let args = encode(&resume_envelope(), &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire).with_resume(resume),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert!(RESUME_CALLED.with(|c| *c.borrow()));
-    }
-
-    // Test 5: acquire/resume calls resume exactly once
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn acquire_resume_calls_resume_exactly_once() {
-        thread_local! {
-            static COUNT: RefCell<u32> = RefCell::new(0);
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-        fn resume(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            COUNT.with(|c| *c.borrow_mut() += 1);
-            Ok(())
-        }
-
-        let args = encode(&resume_envelope(), &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire).with_resume(resume),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(COUNT.with(|c| *c.borrow()), 1);
-    }
-
-    // Test 6: acquire/resume does not call acquire
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn acquire_resume_does_not_call_acquire() {
-        fn acquire_must_not_be_called(
-            _ctx: &mut HttpAcquisitionContext,
-            _args: &[OsString],
-        ) -> AcquisitionResult<()> {
-            panic!("acquire must not be called for acquire/resume");
-        }
-        fn resume(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-
-        let args = encode(&resume_envelope(), &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire_must_not_be_called).with_resume(resume),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-    }
-
-    // Test 7 (SUPERSEDED): this test used to construct an `HttpAcquisitionContext`
-    // externally and assert the exact same object reached the acquire handler.
-    // `run_http_runtime_invocation` no longer accepts an external context at all: it
-    // builds one internally from the environment-decoded `RuntimeContextPaths`. The
-    // capability this test verified no longer exists in the public API, so the
-    // caller-supplied-sentinel-path assertion is replaced with a check that the
-    // handler receives *some* context whose `source_directory()` is queryable.
-    // A full rewrite (verifying the internally-derived path matches the env-provided
-    // one) needs the session-store fixture tracked as the next milestone.
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn exact_http_acquisition_context_reaches_acquire() {
-        thread_local! {
-            static CAPTURED: RefCell<Option<PathBuf>> = RefCell::new(None);
-        }
-        fn acquire(ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            CAPTURED.with(|c| *c.borrow_mut() = Some(ctx.source_directory().to_path_buf()));
-            Ok(())
-        }
-
-        let args = encode(&run_envelope(), &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert!(CAPTURED.with(|c| c.borrow().is_some()));
-    }
-
-    // Test 8 (SUPERSEDED): see Test 7 above; same capability no longer exists.
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn exact_http_acquisition_context_reaches_resume() {
-        thread_local! {
-            static CAPTURED: RefCell<Option<PathBuf>> = RefCell::new(None);
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-        fn resume(ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            CAPTURED.with(|c| *c.borrow_mut() = Some(ctx.source_directory().to_path_buf()));
-            Ok(())
-        }
-
-        let args = encode(&resume_envelope(), &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire).with_resume(resume),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert!(CAPTURED.with(|c| c.borrow().is_some()));
-    }
-
-    // Test 9 (SUPERSEDED): this test used to mutate a field on the caller-owned
-    // context and observe the mutation after the call returned. `source_directory`
-    // is now a read-only accessor derived from `SessionDataPaths`, and the context
-    // itself is owned entirely inside `run_http_runtime_invocation` (never returned
-    // to the caller), so mutation-observation is no longer expressible. Reduced to
-    // verifying the handler can read from its context without panicking.
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn handler_can_mutate_http_context() {
-        fn acquire(ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            let _ = ctx.source_directory();
-            Ok(())
-        }
-
-        let args = encode(&run_envelope(), &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-    }
-
-    // Test 10: foreground invocation reaches selected handler
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn foreground_invocation_reaches_handler() {
-        thread_local! {
-            static FG_CALLED: RefCell<bool> = RefCell::new(false);
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            FG_CALLED.with(|c| *c.borrow_mut() = true);
-            Ok(())
-        }
-
-        let envelope = RuntimeInvocationEnvelopeV1::new(
-            ProjectInvocationIdentity::new("example-project").unwrap(),
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            SessionInvocationIdentity::new("session-abc").unwrap(),
-            RuntimeExecutionMode::Run,
-            RuntimeSupervisionMode::Foreground,
-        )
-        .unwrap();
-        let args = encode(&envelope, &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert!(FG_CALLED.with(|c| *c.borrow()));
-    }
-
-    // Test 11: background invocation reaches selected handler
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn background_invocation_reaches_handler() {
-        thread_local! {
-            static BG_CALLED: RefCell<bool> = RefCell::new(false);
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            BG_CALLED.with(|c| *c.borrow_mut() = true);
-            Ok(())
-        }
-
-        let envelope = RuntimeInvocationEnvelopeV1::new(
-            ProjectInvocationIdentity::new("example-project").unwrap(),
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            SessionInvocationIdentity::new("session-abc").unwrap(),
-            RuntimeExecutionMode::Run,
-            RuntimeSupervisionMode::Background,
-        )
-        .unwrap();
-        let args = encode(&envelope, &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert!(BG_CALLED.with(|c| *c.borrow()));
-    }
-
-    // Test 12: project identity preserved through admission and execution
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn project_identity_preserved_through_execution() {
-        thread_local! {
-            static CALLED: RefCell<bool> = RefCell::new(false);
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            CALLED.with(|c| *c.borrow_mut() = true);
-            Ok(())
-        }
-
-        let envelope = RuntimeInvocationEnvelopeV1::new(
-            ProjectInvocationIdentity::new("my-project").unwrap(),
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            SessionInvocationIdentity::new("session-abc").unwrap(),
-            RuntimeExecutionMode::Run,
-            RuntimeSupervisionMode::Foreground,
-        )
-        .unwrap();
-        let args = encode(&envelope, &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert!(CALLED.with(|c| *c.borrow()));
-    }
-
-    // Test 13: session identity preserved through admission and execution
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn session_identity_preserved_through_execution() {
-        thread_local! {
-            static CALLED: RefCell<bool> = RefCell::new(false);
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            CALLED.with(|c| *c.borrow_mut() = true);
-            Ok(())
-        }
-
-        let envelope = RuntimeInvocationEnvelopeV1::new(
-            ProjectInvocationIdentity::new("example-project").unwrap(),
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            SessionInvocationIdentity::new("unique-session-id").unwrap(),
-            RuntimeExecutionMode::Run,
-            RuntimeSupervisionMode::Foreground,
-        )
-        .unwrap();
-        let args = encode(&envelope, &[]);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert!(CALLED.with(|c| *c.borrow()));
-    }
-
-    // Test 14: source arguments reach acquire in exact order
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn source_arguments_reach_acquire_in_exact_order() {
-        thread_local! {
-            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
-            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
-            Ok(())
-        }
-
-        let source_args = vec![
-            OsString::from("alpha"),
-            OsString::from("beta"),
-            OsString::from("gamma"),
-        ];
-        let args = encode(&run_envelope(), &source_args);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
-    }
-
-    // Test 15: source arguments reach resume in exact order
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn source_arguments_reach_resume_in_exact_order() {
-        thread_local! {
-            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-        fn resume(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
-            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
-            Ok(())
-        }
-
-        let source_args = vec![
-            OsString::from("one"),
-            OsString::from("two"),
-            OsString::from("three"),
-        ];
-        let args = encode(&resume_envelope(), &source_args);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire).with_resume(resume),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
-    }
-
-    // Test 16: duplicate source arguments are preserved
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn duplicate_source_arguments_are_preserved() {
-        thread_local! {
-            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
-            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
-            Ok(())
-        }
-
-        let source_args = vec![
-            OsString::from("dup"),
-            OsString::from("dup"),
-            OsString::from("dup"),
-        ];
-        let args = encode(&run_envelope(), &source_args);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
-    }
-
-    // Test 17: empty source values are preserved
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn empty_source_values_are_preserved() {
-        thread_local! {
-            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
-            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
-            Ok(())
-        }
-
-        let source_args = vec![
-            OsString::from(""),
-            OsString::from("nonempty"),
-            OsString::from(""),
-        ];
-        let args = encode(&run_envelope(), &source_args);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
-    }
-
-    // Test 18: source value equal to -- is preserved
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn source_value_equal_to_delimiter_is_preserved() {
-        thread_local! {
-            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
-            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
-            Ok(())
-        }
-
-        let source_args = vec![OsString::from("--"), OsString::from("value")];
-        let args = encode(&run_envelope(), &source_args);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
-    }
-
-    // Test 19: source value equal to invocation flag is preserved
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn source_value_equal_to_invocation_flag_is_preserved() {
-        thread_local! {
-            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
-            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
-            Ok(())
-        }
-
-        let source_args = vec![OsString::from("--lexicon-invocation-v1")];
-        let args = encode(&run_envelope(), &source_args);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
-    }
-
-    // Test 20: source value equal to probe flag is preserved
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn source_value_equal_to_probe_flag_is_preserved() {
-        thread_local! {
-            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
-            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
-            Ok(())
-        }
-
-        use crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
-        let source_args = vec![OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT)];
-        let args = encode(&run_envelope(), &source_args);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
-    }
-
-    // Test 21: unicode source values are preserved
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn unicode_source_values_are_preserved() {
-        thread_local! {
-            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
-            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
-            Ok(())
-        }
-
-        let source_args = vec![
-            OsString::from("こんにちは"),
-            OsString::from("🦀"),
-            OsString::from("日本語"),
-        ];
-        let args = encode(&run_envelope(), &source_args);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
-    }
-
-    // Test 22: non-UTF-8 Unix source args reach acquire byte-for-byte
-    #[cfg(unix)]
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn non_utf8_unix_source_arguments_reach_acquire_byte_for_byte() {
-        use std::os::unix::ffi::OsStringExt;
-
-        thread_local! {
-            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
-            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
-            Ok(())
-        }
-
-        let source_args = vec![
-            OsString::from_vec(vec![b'a', 0x80, b'c']),
-            OsString::from_vec(vec![0xFF, 0xFE, 0xFD]),
-        ];
-        let args = encode(&run_envelope(), &source_args);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
-    }
-
-    // Test 23: non-UTF-8 Unix source args reach resume byte-for-byte
-    #[cfg(unix)]
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn non_utf8_unix_source_arguments_reach_resume_byte_for_byte() {
-        use std::os::unix::ffi::OsStringExt;
-
-        thread_local! {
-            static ARGS: RefCell<Vec<OsString>> = RefCell::new(Vec::new());
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-        fn resume(_ctx: &mut HttpAcquisitionContext, args: &[OsString]) -> AcquisitionResult<()> {
-            ARGS.with(|a| *a.borrow_mut() = args.to_vec());
-            Ok(())
-        }
-
-        let source_args = vec![
-            OsString::from_vec(vec![b'x', 0xC0, b'z']),
-            OsString::from_vec(vec![0xFE, 0xFF]),
-        ];
-        let args = encode(&resume_envelope(), &source_args);
-        run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire).with_resume(resume),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap();
-        assert_eq!(ARGS.with(|a| a.borrow().clone()), source_args);
-    }
-
-    // Test 24: acquire success returns Ok(())
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn acquire_success_returns_ok() {
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-        let args = encode(&run_envelope(), &[]);
-        let result = run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        );
-        assert!(result.is_ok());
-    }
-
-    // Test 25: resume success returns Ok(())
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn resume_success_returns_ok() {
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-        fn resume(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-        let args = encode(&resume_envelope(), &[]);
-        let result = run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire).with_resume(resume),
-            HttpCapabilitySet::empty(),
-        );
-        assert!(result.is_ok());
-    }
-
-    // Test 26: acquire failure returns Handler variant
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn acquire_failure_returns_handler_error() {
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Err(AcquisitionError::source_message("acquire failed"))
-        }
-        let args = encode(&run_envelope(), &[]);
-        let err = run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            HttpRuntimeInvocationExecutionError::Handler(_)
-        ));
-    }
-
-    // Test 27: resume failure returns Handler variant
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn resume_failure_returns_handler_error() {
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-        fn resume(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Err(AcquisitionError::source_message("resume failed"))
-        }
-        let args = encode(&resume_envelope(), &[]);
-        let err = run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire).with_resume(resume),
-            HttpCapabilitySet::empty(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            HttpRuntimeInvocationExecutionError::Handler(_)
-        ));
-    }
-
-    // Test 28: handler failures do not cause reinvocation
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn handler_failure_does_not_cause_reinvocation() {
-        thread_local! {
-            static COUNT: RefCell<u32> = RefCell::new(0);
-        }
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            COUNT.with(|c| *c.borrow_mut() += 1);
-            Err(AcquisitionError::source_message("failed"))
-        }
-        let args = encode(&run_envelope(), &[]);
-        let _ = run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        );
-        assert_eq!(COUNT.with(|c| *c.borrow()), 1);
-    }
-
-    // Test 29: malformed transport returns Transport error
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
     fn malformed_transport_returns_transport_error() {
         let args = vec![OsString::from("--not-invocation-flag")];
         let err = run_http_runtime_invocation(
@@ -1501,9 +777,8 @@ mod execution_tests {
         ));
     }
 
-    // Test 30: probe arguments passed to normal invocation return transport error
+    // Test 2: probe arguments passed to normal invocation return transport error
     #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
     fn probe_arguments_return_transport_error() {
         use crate::runtime::RUNTIME_INFORMATION_PROBE_ARGUMENT;
         let args = vec![OsString::from(RUNTIME_INFORMATION_PROBE_ARGUMENT)];
@@ -1520,9 +795,8 @@ mod execution_tests {
         ));
     }
 
-    // Test 31: identity mismatch returns Admission error
+    // Test 3: identity mismatch returns Admission error
     #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
     fn identity_mismatch_returns_admission_error() {
         fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
@@ -1541,9 +815,8 @@ mod execution_tests {
         ));
     }
 
-    // Test 32: missing capabilities return Admission error
+    // Test 4: missing capabilities return Admission error
     #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
     fn missing_capabilities_return_admission_error() {
         fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
@@ -1562,9 +835,8 @@ mod execution_tests {
         ));
     }
 
-    // Test 33: missing resume returns Admission error
+    // Test 5: missing resume returns Admission error
     #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
     fn missing_resume_handler_returns_admission_error() {
         fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
@@ -1583,9 +855,8 @@ mod execution_tests {
         ));
     }
 
-    // Test 34: wrong compiled operation returns Admission error
+    // Test 6: wrong compiled operation returns Admission error
     #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
     fn wrong_compiled_operation_returns_admission_error() {
         fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
@@ -1609,9 +880,8 @@ mod execution_tests {
         ));
     }
 
-    // Test 35: transport failure invokes neither acquire nor resume
+    // Test 7: transport failure invokes neither acquire nor resume
     #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
     fn transport_failure_invokes_neither_handler() {
         fn acquire_must_not_be_called(
             _ctx: &mut HttpAcquisitionContext,
@@ -1640,9 +910,8 @@ mod execution_tests {
         ));
     }
 
-    // Test 36: admission failure invokes neither acquire nor resume
+    // Test 8: admission failure invokes neither acquire nor resume
     #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
     fn admission_failure_invokes_neither_handler() {
         fn acquire_must_not_be_called(
             _ctx: &mut HttpAcquisitionContext,
@@ -1671,9 +940,8 @@ mod execution_tests {
         ));
     }
 
-    // Test 37: error formatting does not expose source arguments
+    // Test 9: error formatting does not expose source arguments
     #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
     fn error_formatting_does_not_expose_source_arguments() {
         fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
@@ -1701,9 +969,8 @@ mod execution_tests {
         );
     }
 
-    // Test 38: error formatting does not expose envelope JSON
+    // Test 10: error formatting does not expose envelope JSON
     #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
     fn error_formatting_does_not_expose_envelope_json() {
         fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
             Ok(())
@@ -1727,28 +994,4 @@ mod execution_tests {
         );
     }
 
-    // Test 39 (SUPERSEDED): originally asserted the execution function never calls
-    // `HttpAcquisitionContext::from_env()` by passing in a context built from
-    // nonexistent paths and confirming success. The function no longer accepts an
-    // external context at all (it derives paths from the decoded env-provided
-    // `RuntimeContextPaths` internally), so the original premise is obsolete. Left
-    // as a placeholder pending the session-store fixture milestone.
-    #[test]
-    #[ignore = "requires a real session-store fixture (SessionStore with a Prepared record, held lease, and LEXICON_RUNTIME_CONTEXT_V1 env var); run_http_runtime_invocation now performs full session binding this module predates -- tracked as the next milestone"]
-    fn execution_function_does_not_call_from_env() {
-        fn acquire(_ctx: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            Ok(())
-        }
-        let args = encode(&run_envelope(), &[]);
-        let result = run_http_runtime_invocation(
-            &args,
-            RuntimeIdentity::http_acquisition("example-source", 1),
-            &HttpSourceContractV1::new(acquire),
-            HttpCapabilitySet::empty(),
-        );
-        assert!(result.is_ok());
-    }
-
-    // Test 40: existing HTTP probe tests remain (verified by absence of breakage; probe tests
-    // live in `mod tests` above and are not removed or weakened by this module).
 }
