@@ -1,0 +1,7 @@
+# Scripts and container definitions are authored for Linux execution (bind-mounted or
+# COPY'd verbatim into Linux containers, invoked via shebang). Without this, a Windows
+# checkout with core.autocrlf enabled rewrites them to CRLF, and /usr/bin/env bash
+# then fails to resolve the interpreter (bash-CR: No such file or directory).
+*.sh text eol=lf
+Containerfile text eol=lf
+Dockerfile text eol=lf
