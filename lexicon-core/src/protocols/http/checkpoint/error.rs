@@ -170,6 +170,7 @@ pub enum HttpCheckpointTransactionLookupError {
     RawRootEnumeration(std::io::Error),
     EntryMetadata(std::io::Error),
     EntrySymlink,
+    UnexpectedManagedEntry,
     EntryNameInvalid,
     MissingTransaction,
     AmbiguousTransaction,
@@ -182,6 +183,9 @@ impl fmt::Display for HttpCheckpointTransactionLookupError {
             Self::RawRootEnumeration(_) => formatter.write_str("failed to enumerate raw transaction entries"),
             Self::EntryMetadata(_) => formatter.write_str("failed to inspect raw transaction entry"),
             Self::EntrySymlink => formatter.write_str("raw transaction entry cannot be a symlink"),
+            Self::UnexpectedManagedEntry => {
+                formatter.write_str("raw transaction entry has an invalid managed type")
+            }
             Self::EntryNameInvalid => formatter.write_str("raw transaction entry name is invalid"),
             Self::MissingTransaction => formatter.write_str("checkpoint transaction could not be resolved"),
             Self::AmbiguousTransaction => {
@@ -199,6 +203,7 @@ impl std::error::Error for HttpCheckpointTransactionLookupError {
             Self::EntryMetadata(error) => Some(error),
             Self::Admission(error) => Some(error),
             Self::EntrySymlink
+            | Self::UnexpectedManagedEntry
             | Self::EntryNameInvalid
             | Self::MissingTransaction
             | Self::AmbiguousTransaction => None,
@@ -367,6 +372,7 @@ impl std::error::Error for HttpCheckpointPostPublicationError {
 pub enum HttpCheckpointCommitError {
     UnmanagedContext,
     InvalidKey(HttpCheckpointKeyError),
+    CurrentSessionStore(SessionStoreError),
     SessionValidation(crate::protocols::http::context::SessionValidationError),
     NoTransactionForKey,
     TransactionAdmission(HttpTransactionAdmissionError),
@@ -393,6 +399,9 @@ impl fmt::Display for HttpCheckpointCommitError {
         match self {
             Self::UnmanagedContext => formatter.write_str("checkpoint commit is unavailable in unmanaged context"),
             Self::InvalidKey(_) => formatter.write_str("checkpoint logical key is invalid"),
+            Self::CurrentSessionStore(_) => {
+                formatter.write_str("failed to load current checkpoint session record")
+            }
             Self::SessionValidation(_) => formatter.write_str("checkpoint session validation failed"),
             Self::NoTransactionForKey => {
                 formatter.write_str("no progress-published transaction exists for the checkpoint key")
@@ -446,6 +455,7 @@ impl std::error::Error for HttpCheckpointCommitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidKey(error) => Some(error),
+            Self::CurrentSessionStore(error) => Some(error),
             Self::SessionValidation(error) => Some(error),
             Self::TransactionAdmission(error) => Some(error),
             Self::ManagedPath(error) => Some(error),
@@ -531,6 +541,9 @@ impl std::error::Error for HttpCheckpointPartialCommit {
 pub enum HttpCheckpointLookupError {
     UnmanagedContext,
     InvalidKey(HttpCheckpointKeyError),
+    OperationRoot(SessionStoreError),
+    SessionStoreOpen(SessionStoreError),
+    CurrentSessionLoad(SessionStoreError),
     SessionValidation(crate::protocols::http::context::SessionValidationError),
     SessionEnumeration(std::io::Error),
     SessionEntry(HttpCheckpointSessionEntryError),
@@ -545,6 +558,13 @@ impl fmt::Display for HttpCheckpointLookupError {
         match self {
             Self::UnmanagedContext => formatter.write_str("checkpoint lookup is unavailable in unmanaged context"),
             Self::InvalidKey(_) => formatter.write_str("checkpoint lookup key is invalid"),
+            Self::OperationRoot(_) => {
+                formatter.write_str("failed to construct the checkpoint session operation root")
+            }
+            Self::SessionStoreOpen(_) => formatter.write_str("failed to open the checkpoint session store"),
+            Self::CurrentSessionLoad(_) => {
+                formatter.write_str("failed to load the current checkpoint session record")
+            }
             Self::SessionValidation(_) => formatter.write_str("checkpoint lookup context validation failed"),
             Self::SessionEnumeration(_) => formatter.write_str("failed to enumerate session entries"),
             Self::SessionEntry(_) => formatter.write_str("checkpoint session entry is malformed"),
@@ -559,6 +579,9 @@ impl std::error::Error for HttpCheckpointLookupError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidKey(error) => Some(error),
+            Self::OperationRoot(error) => Some(error),
+            Self::SessionStoreOpen(error) => Some(error),
+            Self::CurrentSessionLoad(error) => Some(error),
             Self::SessionValidation(error) => Some(error),
             Self::SessionEnumeration(error) => Some(error),
             Self::SessionEntry(error) => Some(error),
@@ -577,6 +600,9 @@ pub enum HttpHistoricalLookupError {
     UnmanagedContext,
     InvalidKey(HttpCheckpointKeyError),
     InvalidHeaderName,
+    OperationRoot(SessionStoreError),
+    SessionStoreOpen(SessionStoreError),
+    CurrentSessionLoad(SessionStoreError),
     SessionValidation(crate::protocols::http::context::SessionValidationError),
     RawRootEnumeration(std::io::Error),
     ManagedEntryCorrupt(HttpCheckpointTransactionLookupError),
@@ -598,6 +624,13 @@ impl fmt::Display for HttpHistoricalLookupError {
             Self::UnmanagedContext => formatter.write_str("historical lookup is unavailable in unmanaged context"),
             Self::InvalidKey(_) => formatter.write_str("historical lookup key is invalid"),
             Self::InvalidHeaderName => formatter.write_str("historical lookup header name is invalid"),
+            Self::OperationRoot(_) => {
+                formatter.write_str("failed to construct the historical session operation root")
+            }
+            Self::SessionStoreOpen(_) => formatter.write_str("failed to open the historical session store"),
+            Self::CurrentSessionLoad(_) => {
+                formatter.write_str("failed to load the current historical session record")
+            }
             Self::SessionValidation(_) => {
                 formatter.write_str("historical lookup context validation failed")
             }
@@ -625,6 +658,9 @@ impl std::error::Error for HttpHistoricalLookupError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidKey(error) => Some(error),
+            Self::OperationRoot(error) => Some(error),
+            Self::SessionStoreOpen(error) => Some(error),
+            Self::CurrentSessionLoad(error) => Some(error),
             Self::SessionValidation(error) => Some(error),
             Self::RawRootEnumeration(error) => Some(error),
             Self::ManagedEntryCorrupt(error) => Some(error),

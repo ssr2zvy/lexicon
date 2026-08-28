@@ -491,19 +491,7 @@ impl HttpAcquisitionContext {
             })?;
         let managed = self
             .validated_managed_context()
-            .map_err(|error| {
-                AcquisitionError::checkpoint_commit(match error {
-                    crate::protocols::http::checkpoint::error::HttpCheckpointLookupError::UnmanagedContext => {
-                        HttpCheckpointCommitError::UnmanagedContext
-                    }
-                    crate::protocols::http::checkpoint::error::HttpCheckpointLookupError::SessionValidation(source) => {
-                        HttpCheckpointCommitError::SessionValidation(source)
-                    }
-                    _ => HttpCheckpointCommitError::SessionValidation(
-                        SessionValidationError::LeaseInspectionFailed,
-                    ),
-                })
-            })?;
+            .map_err(map_checkpoint_commit_validation_error)?;
         let registry_entry = self
             .transaction_registry
             .get(&logical_key)
@@ -647,19 +635,20 @@ impl HttpAcquisitionContext {
         };
         let bytes = encode_checkpoint_document(&doc)
             .map_err(|e| AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::Encoding(e)))?;
-        self.validated_managed_context().map_err(|error| {
-            AcquisitionError::checkpoint_commit(match error {
-                crate::protocols::http::checkpoint::error::HttpCheckpointLookupError::UnmanagedContext => {
-                    HttpCheckpointCommitError::UnmanagedContext
-                }
-                crate::protocols::http::checkpoint::error::HttpCheckpointLookupError::SessionValidation(source) => {
-                    HttpCheckpointCommitError::SessionValidation(source)
-                }
-                _ => HttpCheckpointCommitError::SessionValidation(
-                    SessionValidationError::LeaseInspectionFailed,
-                ),
-            })
-        })?;
+        self.validated_managed_context()
+            .map_err(map_checkpoint_commit_validation_error)?;
+        validate_managed_path(
+            managed.session_directory.as_path(),
+            &checkpoints_dir,
+            HttpManagedPathValidationMode::ExistingDirectory,
+        )
+        .map_err(|e| AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::ManagedPath(e)))?;
+        validate_managed_path(
+            managed.session_directory.as_path(),
+            &target_path,
+            HttpManagedPathValidationMode::CreatableRegularFile,
+        )
+        .map_err(|e| AcquisitionError::checkpoint_commit(HttpCheckpointCommitError::ManagedPath(e)))?;
         let checkpoint = CommittedHttpCheckpoint::new(
             managed.record.project().clone(),
             managed.record.runtime().clone(),
@@ -701,10 +690,10 @@ impl HttpAcquisitionContext {
             .map_err(AcquisitionError::historical_lookup)?;
         let store = SessionStore::open(
             crate::session::SessionOperationRoot::new(operation_root.clone()).map_err(|error| {
-                AcquisitionError::historical_lookup(HttpHistoricalLookupError::SessionStore(error))
+                AcquisitionError::historical_lookup(HttpHistoricalLookupError::OperationRoot(error))
             })?,
         )
-        .map_err(|error| AcquisitionError::historical_lookup(HttpHistoricalLookupError::SessionStore(error)))?;
+        .map_err(|error| AcquisitionError::historical_lookup(HttpHistoricalLookupError::SessionStoreOpen(error)))?;
 
         let mut seen_identities = std::collections::HashSet::new();
         let mut best: Option<RecordedTransaction> = None;
@@ -760,6 +749,7 @@ impl HttpAcquisitionContext {
         Ok(best)
     }
 
+    /// Returns the first matching persisted response header in recorded transport order.
     pub fn latest_response_header(
         &self,
         key: impl AsRef<str>,
@@ -861,15 +851,48 @@ impl HttpAcquisitionContext {
         .map_err(|error| {
             HttpCheckpointLookupError::SessionValidation(SessionValidationError::ManagedPath(error))
         })?;
-        validate_running_acquisition_session(self.operation_root(), &session_identity)
-            .map_err(HttpCheckpointLookupError::SessionValidation)?;
         let operation_root = crate::session::SessionOperationRoot::new(self.operation_root().to_path_buf())
-            .map_err(|_| HttpCheckpointLookupError::SessionValidation(SessionValidationError::StoreOpen))?;
+            .map_err(HttpCheckpointLookupError::OperationRoot)?;
         let store = SessionStore::open(operation_root)
-            .map_err(|_| HttpCheckpointLookupError::SessionValidation(SessionValidationError::StoreOpen))?;
+            .map_err(HttpCheckpointLookupError::SessionStoreOpen)?;
         let record = store
             .load(&session_identity)
-            .map_err(|error| HttpCheckpointLookupError::SessionValidation(map_session_load_error(error)))?;
+            .map_err(HttpCheckpointLookupError::CurrentSessionLoad)?;
+        if record.state() != SessionState::Running || record.started_at().is_none() {
+            return Err(HttpCheckpointLookupError::SessionValidation(
+                SessionValidationError::SessionNotRunning,
+            ));
+        }
+        if record.operation() != SessionOperation::Acquisition {
+            return Err(HttpCheckpointLookupError::SessionValidation(
+                SessionValidationError::OperationMismatch,
+            ));
+        }
+        if record.runtime().protocol() != RuntimeProtocol::Http
+            || record.runtime().operation() != RuntimeOperation::Acquisition
+        {
+            return Err(HttpCheckpointLookupError::SessionValidation(
+                SessionValidationError::RuntimeMismatch,
+            ));
+        }
+        if record.session() != &session_identity {
+            return Err(HttpCheckpointLookupError::SessionValidation(
+                SessionValidationError::SessionIdentityMismatch,
+            ));
+        }
+        match store.inspect_lease_state(&session_identity) {
+            Ok(SessionLeaseState::Owned) => {}
+            Ok(SessionLeaseState::Available) => {
+                return Err(HttpCheckpointLookupError::SessionValidation(
+                    SessionValidationError::LeaseUnavailable,
+                ));
+            }
+            Err(_) => {
+                return Err(HttpCheckpointLookupError::SessionValidation(
+                    SessionValidationError::LeaseInspectionFailed,
+                ));
+            }
+        }
         Ok(ValidatedManagedAcquisitionContext {
             operation_root: self.operation_root().to_path_buf(),
             raw_root: self.raw_data_directory().to_path_buf(),
@@ -992,7 +1015,9 @@ fn enumerate_transaction_entries(
             ));
         }
         if !file_type.is_dir() {
-            continue;
+            return Err(HttpHistoricalLookupError::ManagedEntryCorrupt(
+                HttpCheckpointTransactionLookupError::UnexpectedManagedEntry,
+            ));
         }
         let name = entry.file_name();
         let name = name.to_str().ok_or(HttpHistoricalLookupError::ManagedEntryCorrupt(
@@ -1054,6 +1079,15 @@ fn map_historical_validation_error(
         HttpCheckpointLookupError::UnmanagedContext => {
             AcquisitionError::historical_lookup(HttpHistoricalLookupError::UnmanagedContext)
         }
+        HttpCheckpointLookupError::OperationRoot(source) => {
+            AcquisitionError::historical_lookup(HttpHistoricalLookupError::OperationRoot(source))
+        }
+        HttpCheckpointLookupError::SessionStoreOpen(source) => {
+            AcquisitionError::historical_lookup(HttpHistoricalLookupError::SessionStoreOpen(source))
+        }
+        HttpCheckpointLookupError::CurrentSessionLoad(source) => {
+            AcquisitionError::historical_lookup(HttpHistoricalLookupError::CurrentSessionLoad(source))
+        }
         HttpCheckpointLookupError::SessionValidation(source) => {
             AcquisitionError::historical_lookup(HttpHistoricalLookupError::SessionValidation(source))
         }
@@ -1064,6 +1098,32 @@ fn map_historical_validation_error(
         | HttpCheckpointLookupError::InvalidKey(_)
         | HttpCheckpointLookupError::CandidateAdmission { .. } => unreachable!(),
     }
+}
+
+fn map_checkpoint_commit_validation_error(
+    error: crate::protocols::http::checkpoint::error::HttpCheckpointLookupError,
+) -> AcquisitionError {
+    use crate::protocols::http::checkpoint::error::{
+        HttpCheckpointCommitError, HttpCheckpointLookupError,
+    };
+
+    AcquisitionError::checkpoint_commit(match error {
+        HttpCheckpointLookupError::UnmanagedContext => HttpCheckpointCommitError::UnmanagedContext,
+        HttpCheckpointLookupError::OperationRoot(source)
+        | HttpCheckpointLookupError::SessionStoreOpen(source)
+        | HttpCheckpointLookupError::CurrentSessionLoad(source) => {
+            HttpCheckpointCommitError::CurrentSessionStore(source)
+        }
+        HttpCheckpointLookupError::SessionValidation(source) => {
+            HttpCheckpointCommitError::SessionValidation(source)
+        }
+        HttpCheckpointLookupError::SessionEnumeration(_)
+        | HttpCheckpointLookupError::SessionEntry(_)
+        | HttpCheckpointLookupError::InvalidKey(_)
+        | HttpCheckpointLookupError::CandidateAdmission { .. } => {
+            HttpCheckpointCommitError::SessionValidation(SessionValidationError::LeaseInspectionFailed)
+        }
+    })
 }
 
 fn redirect_request_from(
