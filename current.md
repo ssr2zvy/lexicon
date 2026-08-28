@@ -1,83 +1,225 @@
-Current milestone: validation checkpoint — compile and test the accumulated unverified work
+The next milestone should restore verification integrity before implementing the new durable-state architecture. The suite now compiles, but some essential runner tests were deleted and several ETXTBSY branches return successfully without executing their assertions—directly conflicting with the updated contract.
+
+Current milestone: restore trustworthy runtime-execution test coverage
 
 Objective
 
-Three consecutive milestones have been implemented back-to-back with zero compilation checks:
+Establish a clean, credible compilation and test baseline after the first real workspace build exposed accumulated failures.
 
-1. Processing correctness, durability, and error-preservation closure.
-2. Background execution phase 1 (operator-host re-execution and session handoff).
-3. Background execution phase 2 (test coverage for the handoff).
+The repository now compiles far enough for meaningful verification, but the corrective commits introduced two forms of verification debt:
 
-Per this workflow's standing rule, the agent does not run compile, test, or build commands; the user runs them. This milestone is a mandatory checkpoint: it requires the user to run the containerized build/test cycle and, if needed, direct the agent to fix whatever compile or test failures surface, before any further feature milestone is planned or implemented.
+1. HTTP and processing runner tests that exercised successful handler execution were deleted because they lacked the session-store, prepared-session, lease, and runtime-context fixtures now required by the production invocation path.
+2. Several runtime-probe and staging tests treat ETXTBSY by printing a message and returning from the test. Rust records those returns as successful test executions, even though the intended assertions never ran.
 
-This is not a contract- or spec-derived feature gap. It exists because continuing to layer additional unverified source changes on top of three already-unverified layers would compound risk rather than close it, and because the required corrective action (running Cargo) is one the agent is structurally unable to perform itself in this workflow.
+Before beginning the newly specified durable source-state and work-ledger implementation, restore this missing coverage and obtain a trustworthy passing workspace test result.
 
-Why this is necessary now
+This milestone is derived from:
 
-* `lexicon-core`'s processing module was substantially rewritten (new error hierarchy, new discovery/provenance logic, new context invariants, new runner sequencing) without ever compiling.
-* `lexicon-framework` gained a new `supervision` module, a new `data::background` module, new `SessionCoordinator` methods, and threaded a new parameter through `select_and_prepare_session` and `build_invocation_envelope` — all unverified.
-* This milestone's own test fixture (`lexicon-framework/src/data/test_support.rs`) required hand-constructing JSON matching `RuntimeManifestV1` and `RuntimeInformationV1`'s schemas from source-code inspection alone, with no ability to confirm the fixture actually admits successfully.
-* Tests were added that spawn real OS processes and take real file-based locks — exactly the kind of code most likely to contain a subtle, non-obvious bug that only a real test run will reveal.
+* workspace/specs/contract.md, especially the required-verification and test-integrity requirements;
+* workspace/specs/specs.md, especially the source-contract, session, supervision, environment-handling, and required-test sections;
+* commit 24399ef883baf7dceb219893fce9712d32885d7e, which removed obsolete runtime execution tests pending a real fixture;
+* commit dbc5ca83c974b596d6eedb2be6bcb9a0d3131abf, which added successful early returns for ETXTBSY;
+* the obsolete current.md, which prohibited deleting, weakening, or silently skipping tests to obtain a passing suite.
 
-Required action (user)
+The target baseline is repository commit:
 
-Using `instructions.md`'s containerized Cargo workflow:
+6ec9d485e03691fbf25cd3e1a47e3f306420d7e4
 
-```bash
-podman build -f containerization/test-container/Containerfile -t lexicon-local-test-image .
-podman run -d --name lexicon-local-test -v "$PWD":/lexicon --workdir /lexicon lexicon-local-test-image
-podman exec lexicon-local-test bash -lc 'cd /lexicon && cargo check --workspace'
-podman exec lexicon-local-test bash -lc 'cd /lexicon && cargo test --workspace --quiet'
-```
+or its direct descendant containing only work required by this milestone.
 
-(Substitute `podman start lexicon-local-test` instead of `podman run` if the container already exists.)
+Required implementation
 
-Then either:
+1. Build reusable runtime-invocation test fixtures
 
-* if both commands succeed, replace this file with a short `current.md` confirming a clean `cargo check` and `cargo test --workspace` pass, so the next loop iteration can resume deriving feature milestones from the contract and specs with confidence in the baseline; or
-* if either command fails, paste (or otherwise make available) the exact failing output, and direct the agent to fix the reported errors as a source-only corrective pass against this exact `current.md`, re-stating the failing output inside it so the agent has the precise compiler/test diagnostics to work from. The agent cannot guess at compiler errors it has not seen.
+Add proper test support for both:
 
-Required corrections (agent, once failures are known)
+lexicon-core HTTP runtime invocation
+lexicon-core processing runtime invocation
 
-If invoked to fix compile or test failures:
+Each fixture must create the real minimum execution environment expected by the production invocation path:
 
-* Fix only what the reported diagnostics require. Do not use this pass to add new features, refactor unrelated code, or expand scope.
-* Preserve every behavioral guarantee documented in the three prior milestones' completion reports (now folded into this repository's git history) unless a diagnostic proves one of them was never actually achievable as described, in which case document the discrepancy explicitly in the new completion report rather than silently changing the claim.
-* Do not weaken, delete, or skip a failing test to make the suite pass; fix the code or, if the test itself is wrong, fix the test's logic while preserving its intent.
-* If a test fails due to a genuine environmental limitation of the container (for example, a missing `sh`/`cmd` shell assumed by `lexicon-framework/src/data/background.rs`'s test helpers), adapt the test's process-spawning approach rather than deleting coverage.
+* a temporary project and operation directory;
+* a real SessionStore backed by the temporary directory;
+* a valid prepared session record;
+* a held session lease;
+* a matching runtime invocation envelope;
+* a valid LEXICON_RUNTIME_CONTEXT_V1 environment value;
+* matching compiled project, source, protocol, operation, and session identities;
+* validated runtime paths required to construct the real context.
 
-Preserve existing behavior
+Do not add a production backdoor that permits tests to inject a context through an API unavailable to real runtimes.
 
-Do not change:
+Prefer a shared test-support abstraction where HTTP and processing genuinely require the same setup. Keep operation-specific setup separate where their invariants differ.
 
-* any public API surface introduced by the prior three milestones, unless a compiler error proves it cannot work as written;
-* the background-execution handoff protocol or `OperatorHostInvocationV1` schema;
-* the processing runner sequence, error hierarchy, or durability guarantees;
-* CLI syntax for any existing subcommand.
+Because environment variables are process-global, tests that mutate LEXICON_RUNTIME_CONTEXT_V1 must be serialized or otherwise isolated. Every fixture must restore the prior environment state when it is dropped, including during panic unwinding.
 
-Explicit exclusions
+2. Restore HTTP handler-execution coverage
 
-Do not implement in this milestone:
+Restore behavior-level tests proving at least:
 
-* any new feature work (cancellation, signal forwarding, daemonization, further processing corrections, or new contract/spec-derived milestones);
-* lexicon build, automatic build-before-run, or MZA/installer changes;
-* a fix for the previously documented handoff race-window limitation, unless it is the direct cause of a reported test failure.
+* a valid matching invocation reaches the acquisition handler;
+* the handler is called exactly once;
+* the real mutable HttpAcquisitionContext reaches the handler;
+* foreground invocation reaches the handler;
+* background invocation reaches the handler;
+* source arguments arrive in exact order;
+* duplicate and empty argument values are preserved;
+* a source argument equal to -- is preserved;
+* reserved-looking source arguments are preserved after the invocation boundary;
+* Unicode arguments are preserved;
+* non-UTF-8 Unix arguments are preserved byte-for-byte;
+* successful acquisition returns success;
+* a source-authored acquisition error returns the correct handler-error category;
+* a handler error does not cause implicit reinvocation;
+* the session transitions through the expected prepared, running, and terminal states;
+* the lease and invocation session identities must agree.
 
-Command-execution constraint
+Do not blindly restore tests whose premise depended on the removed caller-supplied-context API. Rewrite those tests against the actual production construction path or omit only the obsolete premise while preserving the underlying invariant.
 
-This milestone is the explicit exception to the usual "source-only, no Cargo" pattern used by prior milestones, but only for the user. The agent still does not run `cargo`, `rustc`, or any lexicon CLI/runtime command itself, per the standing rule for this workflow. The agent's role in this milestone is limited to:
+3. Restore processing handler-execution coverage
 
-* waiting for the user to report compile/test results;
-* if given failing diagnostics, making the minimal source corrections they require;
-* if given a clean pass, writing the completion report and resuming the normal contract/spec-derived loop next iteration.
+Restore the corresponding processing tests proving at least:
+
+* a valid matching invocation reaches the processing handler;
+* the handler is called exactly once;
+* the real mutable ProcessingContext reaches the handler;
+* foreground and background invocation modes reach the handler;
+* source arguments retain their exact order and operating-system representation;
+* success produces the expected result and terminal session state;
+* a source-authored processing failure produces the correct handler-error category and failed terminal state;
+* a handler failure does not cause implicit reinvocation;
+* session, lease, project, source, protocol, and operation identities are validated before dispatch.
+
+Retain the existing pure transport and admission-rejection tests.
+
+4. Remove false-success ETXTBSY handling
+
+Remove test branches that handle ExecutableFileBusy by returning successfully before the assertion.
+
+Affected areas currently include:
+
+lexicon-framework/src/build/runtime_probe.rs
+lexicon-framework/src/build/runtime_staging.rs
+
+Replace the racy script-fixture mechanism with a deterministic approach.
+
+Acceptable approaches include:
+
+* creating fixture executables during test setup before the test process begins using them;
+* copying an already built helper executable into a unique temporary location;
+* using one dedicated helper binary with explicit probe-output modes;
+* restructuring fixture creation so no writable handle or overlay copy-up operation races with execution;
+* bounded retry around the fixture spawn only when retry is isolated to the test harness and an exhausted retry fails the test.
+
+A retry must:
+
+* be limited to ExecutableFileBusy;
+* have a small fixed attempt bound;
+* preserve the original error when exhausted;
+* never convert exhaustion into success;
+* never be added to production runtime admission merely to accommodate a test fixture.
+
+Printing “skipping” and returning from a Rust #[test] is not a valid skip because the test harness reports it as passed.
+
+If an environment genuinely cannot execute the required test, it must be reported distinctly by the surrounding test workflow and covered in a supported environment. It must not appear as a passing assertion.
+
+5. Preserve the corrected production behavior
+
+Do not revert valid corrections made during the compilation checkpoint, including:
+
+* the corrected hidden __operator-host command name;
+* byte-exact runtime-manifest boundary validation;
+* generic redacted Display output for source-authored errors;
+* borrow and ownership corrections in HTTP attempt execution;
+* current session-store, lease, and runtime-context admission requirements;
+* LF normalization rules for shell scripts and container definitions.
+
+Required verification
+
+The user must run the repository’s containerized verification workflow:
+
+podman build \
+    -f containerization/test-container/Containerfile \
+    -t lexicon-local-test-image \
+    .
+podman run \
+    -d \
+    --name lexicon-local-test \
+    -v "$PWD":/lexicon \
+    --workdir /lexicon \
+    lexicon-local-test-image
+podman exec lexicon-local-test \
+    bash -lc 'cd /lexicon && cargo check --workspace'
+podman exec lexicon-local-test \
+    bash -lc 'cd /lexicon && cargo test --workspace --quiet'
+
+If the container already exists, recreate it when its image or dependencies changed; otherwise it may be started and reused.
+
+The final test output must demonstrate that:
+
+* the workspace compiles;
+* the complete workspace test suite passes;
+* restored HTTP handler tests actually invoke their handler;
+* restored processing handler tests actually invoke their handler;
+* no affected test reports success through an early-return ETXTBSY branch;
+* no required test is marked ignored;
+* no material execution test was deleted merely to obtain a passing result.
+
+Scope constraints
+
+Do not implement during this milestone:
+
+* get-raw-data/state/;
+* source_state_directory();
+* a SQLite work ledger;
+* DurableWorkV1;
+* source-manifest schema 2;
+* the public data --protocol correction;
+* lexicon build;
+* the embedded Core revision correction;
+* foreground signal-forwarding changes;
+* background handoff race corrections;
+* new acquisition or processing features;
+* MZA changes;
+* unrelated refactoring.
+
+Those are contract-derived milestones, but they must be built on a trustworthy verified baseline.
+
+Completion criteria
+
+This milestone is complete only when:
+
+1. Real session-bound HTTP invocation fixtures exist.
+2. Real session-bound processing invocation fixtures exist.
+3. Successful handler-dispatch coverage has been restored for both operations.
+4. argument-fidelity, success, failure, and exactly-once-handler-invocation behavior are tested.
+5. ETXTBSY cannot cause an affected test to be reported as passed without executing its assertion.
+6. cargo check --workspace passes.
+7. cargo test --workspace --quiet passes.
+8. No production contract was weakened to make test setup easier.
+9. No new feature scope was added.
 
 Completion report
 
-Once `cargo check --workspace` and `cargo test --workspace` both pass (confirmed by the user), replace current.md with a report containing:
+When the milestone passes, replace this file with a concise report containing:
 
-* confirmation that both commands were run by the user (not the agent) and passed;
-* a list of any source corrections the agent made to reach a passing state, with a one-line rationale per correction tied to the specific diagnostic it fixed;
-* confirmation that no new feature scope was added during this corrective pass;
-* confirmation that no existing test was weakened or deleted to reach a passing state.
+* the exact commit tested;
+* confirmation that cargo check --workspace passed;
+* confirmation that cargo test --workspace --quiet passed;
+* the number and categories of restored HTTP tests;
+* the number and categories of restored processing tests;
+* the fixture design used to satisfy session-store, lease, and runtime-context requirements;
+* the deterministic solution used for the overlay-filesystem executable race;
+* confirmation that no required test remains ignored, deleted, or falsely successful;
+* confirmation that no unrelated feature work was included.
 
-Then stop, and resume deriving the next feature milestone from workspace/specs/contract.md and workspace/specs/specs.md on the following loop iteration.
+Then stop.
+
+The following milestone should be derived from the updated contract and specification. Unless new evidence changes the ordering, it should begin the smallest durable-state foundation:
+
+get-raw-data/state/
++ validated RuntimeContextPaths field
++ HttpAcquisitionContext::source_state_directory()
++ scaffold and persistence tests
+
+It should not yet introduce a universal Core-owned job-queue schema.
