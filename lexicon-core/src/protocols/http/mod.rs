@@ -19,7 +19,11 @@ pub use crate::runtime::{
 };
 pub use capability::{HttpCapability, HttpCapabilitySet};
 pub use contract::{HttpAcquireFn, HttpResumeFn, HttpSourceContractV1};
-pub use error::{AcquisitionError, AcquisitionResult, HttpExecutionError};
+pub use error::{
+    AcquisitionError, AcquisitionResult, HttpExecutionError, HttpRedirectFailure,
+    HttpRedirectFailureKind, HttpRetryExhaustionError, HttpRetryFinalOutcome,
+    RecordedHttpTransportFailure,
+};
 pub use invocation::{
     AdmittedHttpHandler, AdmittedHttpRuntimeInvocation, HttpRuntimeInvocationAdmissionError,
     admit_http_runtime_invocation,
@@ -32,7 +36,17 @@ pub use runner::{
     try_write_runtime_information_probe,
 };
 pub use transaction::{
-    HttpRecordedOutcome, HttpResponseStatusError, HttpTransactionIdentity, RecordedHeader,
-    RecordedHeaderCollection, RecordedHeaderValue, RecordedHttpRequest, RecordedHttpResponse,
-    RecordedTransaction, RecordedTransportFailure,
+    HttpAttemptIdentity, HttpLogicalRequestKey, HttpLogicalRequestKeyError, HttpRecordedOutcome,
+    HttpResponseStatusError, HttpTransactionIdentity, HttpTransactionIdentityError,
+    RecordedHeader, RecordedHeaderCollection, RecordedHeaderValue, RecordedHttpRequest,
+    RecordedHttpResponse, RecordedTransaction, RecordedTransportFailure,
 };
+pub use transaction::error::{
+    HttpBodyStreamingError, HttpClockError, HttpRecorderError,
+    HttpTransactionIdentityAllocationError, HttpTransactionPublicationError,
+};
+pub use transaction::metadata::{
+    AcquisitionProgressAdvanceError, HttpTransactionAdmissionError,
+    StoredTransportFailureClass,
+};
+pub use transport::StoredHttpVersion;

@@ -8,36 +8,139 @@ pub mod identity;
 pub mod metadata;
 pub(crate) mod recorder;
 
-pub use identity::HttpTransactionIdentity;
+pub use identity::{HttpTransactionIdentity, HttpTransactionIdentityError};
 pub(crate) use recorder::{RecordedAttemptContext, record_transaction_attempt};
 
-// ---------------------------------------------------------------------------
-// Public finalized recorded type
-// ---------------------------------------------------------------------------
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpLogicalRequestKey {
+    key: String,
+}
 
-/// A durable HTTP transaction record. Only constructable after the staging directory
-/// has been renamed, the raw-data parent synced, and acquisition progress updated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpLogicalRequestKeyError {
+    Empty,
+    TooLong,
+    InvalidCharacter,
+}
+
+impl HttpLogicalRequestKey {
+    pub fn new(key: impl AsRef<str>) -> Result<Self, HttpLogicalRequestKeyError> {
+        const MAX_LOGICAL_REQUEST_KEY_BYTES: usize = 512;
+
+        let key = key.as_ref();
+        if key.is_empty() {
+            return Err(HttpLogicalRequestKeyError::Empty);
+        }
+        if key.as_bytes().len() > MAX_LOGICAL_REQUEST_KEY_BYTES {
+            return Err(HttpLogicalRequestKeyError::TooLong);
+        }
+        if key
+            .chars()
+            .any(|ch| ch == '/' || ch == '\\' || ch == '\0' || ch.is_control())
+        {
+            return Err(HttpLogicalRequestKeyError::InvalidCharacter);
+        }
+        Ok(Self { key: key.to_string() })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.key
+    }
+}
+
+impl std::fmt::Display for HttpLogicalRequestKeyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("HTTP logical request key is empty"),
+            Self::TooLong => formatter.write_str("HTTP logical request key is too long"),
+            Self::InvalidCharacter => {
+                formatter.write_str("HTTP logical request key contains invalid characters")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HttpLogicalRequestKeyError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpAttemptIdentity {
+    pub(crate) physical_attempt_index: u32,
+    pub(crate) redirect_index: u32,
+    pub(crate) retry_index: u32,
+}
+
+impl HttpAttemptIdentity {
+    pub(crate) fn new(
+        physical_attempt_index: u32,
+        redirect_index: u32,
+        retry_index: u32,
+    ) -> Self {
+        Self {
+            physical_attempt_index,
+            redirect_index,
+            retry_index,
+        }
+    }
+
+    pub fn physical_attempt_index(&self) -> u32 {
+        self.physical_attempt_index
+    }
+
+    pub fn redirect_index(&self) -> u32 {
+        self.redirect_index
+    }
+
+    pub fn retry_index(&self) -> u32 {
+        self.retry_index
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordedTransaction {
     identity: HttpTransactionIdentity,
+    attempt_identity: HttpAttemptIdentity,
+    parent_transaction_id: Option<HttpTransactionIdentity>,
+    logical_request_key: Option<HttpLogicalRequestKey>,
     directory: PathBuf,
     request: RecordedHttpRequest,
     response: RecordedHttpResponse,
 }
 
 impl RecordedTransaction {
-    /// Internal constructor. Only call after finalization succeeds.
     pub(crate) fn new(
         identity: HttpTransactionIdentity,
+        attempt_identity: HttpAttemptIdentity,
+        parent_transaction_id: Option<HttpTransactionIdentity>,
+        logical_request_key: Option<HttpLogicalRequestKey>,
         directory: PathBuf,
         request: RecordedHttpRequest,
         response: RecordedHttpResponse,
     ) -> Self {
-        Self { identity, directory, request, response }
+        Self {
+            identity,
+            attempt_identity,
+            parent_transaction_id,
+            logical_request_key,
+            directory,
+            request,
+            response,
+        }
     }
 
     pub fn identity(&self) -> &HttpTransactionIdentity {
         &self.identity
+    }
+
+    pub fn attempt_identity(&self) -> &HttpAttemptIdentity {
+        &self.attempt_identity
+    }
+
+    pub fn parent_transaction_id(&self) -> Option<&HttpTransactionIdentity> {
+        self.parent_transaction_id.as_ref()
+    }
+
+    pub fn logical_request_key(&self) -> Option<&HttpLogicalRequestKey> {
+        self.logical_request_key.as_ref()
     }
 
     pub fn directory(&self) -> &Path {
@@ -51,25 +154,32 @@ impl RecordedTransaction {
     pub fn response(&self) -> &RecordedHttpResponse {
         &self.response
     }
+
+    pub fn transport_failure(&self) -> Option<&RecordedTransportFailure> {
+        match self.response.outcome() {
+            HttpRecordedOutcome::Response => None,
+            HttpRecordedOutcome::TransportFailure(failure) => Some(failure),
+        }
+    }
+
+    pub fn response_status(&self) -> Option<u16> {
+        self.response.status_code()
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Internal type-state structs (private to crate)
-// ---------------------------------------------------------------------------
-
-/// A transaction that has been atomically renamed to its final directory and whose
-/// raw-data parent has been synced. Not yet progress-published.
 pub(crate) struct FinalizedRecordedAttempt {
     pub(crate) transaction: RecordedTransaction,
-    /// Location header from the actual transport response (not from persisted metadata).
+    pub(crate) attempt_identity: HttpAttemptIdentity,
     pub(crate) effective_location: Option<String>,
-    /// The typed transport failure, if any.
+    pub(crate) invalid_location_encoding: bool,
     pub(crate) transport_failure: Option<HttpTransportFailure>,
 }
 
-// ---------------------------------------------------------------------------
-// Recorded request / response types
-// ---------------------------------------------------------------------------
+pub(crate) struct ProgressPublishedRecordedAttempt {
+    pub(crate) transaction: RecordedTransaction,
+    pub(crate) location_text: Option<String>,
+    pub(crate) invalid_location_encoding: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct RecordedHttpRequest {
@@ -139,7 +249,6 @@ pub enum RecordedHeaderValue {
 
 #[derive(Debug, Clone)]
 pub struct RecordedHttpResponse {
-    /// HTTP status code — `None` for transport-failure outcomes.
     status: Option<u16>,
     headers: RecordedHeaderCollection,
     body_path: PathBuf,
@@ -160,7 +269,6 @@ impl RecordedHttpResponse {
         Self { status, headers, body_path, body_length, body_sha256, outcome }
     }
 
-    /// The HTTP status code. Returns `None` for transport-failure outcomes.
     pub fn status_code(&self) -> Option<u16> {
         self.status
     }
@@ -185,9 +293,6 @@ impl RecordedHttpResponse {
         &self.outcome
     }
 
-    /// Require a successful HTTP response.
-    ///
-    /// Returns an error if the outcome is a transport failure or if the status is not 2xx.
     pub fn require_success(&self) -> Result<(), AcquisitionError> {
         match &self.outcome {
             HttpRecordedOutcome::TransportFailure(failure) => {
@@ -234,10 +339,6 @@ impl RecordedTransportFailure {
         self.failure.retryable()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Status error
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpResponseStatusError {
