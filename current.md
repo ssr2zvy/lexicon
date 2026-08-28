@@ -1,75 +1,83 @@
-Completed milestone: upgrade source manifest to schema 2 with distinct per-operation contract/template versions and make Core expose the matching version constants
-Exact commit tested
-8f2ac91 on branch source-manifest-schema-2, containerized verification via podman machine ssh -> podman exec lexicon-local-test (image lexicon-local-test-image). Logs written to `$env:TEMP\lexicon-verify-logs\cargo-{check,test}.txt`.
-Verification result
-* `cargo check --workspace`: passed (exit 0). 15 lib warnings + 2 binary warnings, all pre-existing in unrelated modules (`base32/base64 deprecations`, `unused imports`, `unused mut`, `unused functions`); no new warnings introduced by this milestone.
-* `cargo test --workspace --quiet`: passed (exit 0). Batches in order:
-  * lexicon-core:                                   29 passed, 0 failed, 0 ignored
-  * lexicon-framework:                             246 passed, 0 failed, 0 ignored (up from 240 with the 6 new schema-2 manifest tests)
-  * lexicon-core-tests (trybuild UI suite):         1 passed (meta-test), 0 failed; 11 ui compile-fail tests pass
-  * lexicon-framework second binary:               131 passed, 0 failed, 0 ignored
-  * doctests:                                       0 / 0 / 1 ignored (no regressions in ignored doctests)
-  * integration meta:                              0 / 0
-  One transient container `getcwd() failed` race was observed and absorbed by the bounded retry in `lexicon-framework/src/lib.rs::is_transient_working_directory_error` (no flakes at exit).
-Core constants — where the new versions live
-* `lexicon-core/src/protocols/http/contract.rs`:
-  * `HTTPS_SOURCE_CONTRACT_IDENTIFIER: &str = "native-rust-http-source-v1"`
-  * `HTTP_SOURCE_CONTRACT_VERSION: u32 = 1`
-  * `HttpSourceContractV1::CONTRACT_VERSION` now references `HTTP_SOURCE_CONTRACT_VERSION` (no live duplication).
-* `lexicon-core/src/protocols/http/mod.rs`: re-exports both new constants for callers across the workspace.
-* `lexicon-core/src/processing/contract.rs`:
-  * `PROCESSING_SOURCE_CONTRACT_IDENTIFIER: &str = "native-rust-processing-v1"`
-  * `PROCESSING_SOURCE_CONTRACT_VERSION: u32 = 1`
-  * `ProcessingSourceContractV1::CONTRACT_VERSION` references `PROCESSING_SOURCE_CONTRACT_VERSION`.
-* `lexicon-core/src/processing/mod.rs`: re-exports `PROCESSING_SOURCE_CONTRACT_IDENTIFIER` and `PROCESSING_SOURCE_CONTRACT_VERSION`.
-* `lexicon-core/src/runtime/invocation.rs`:
-  * `CORE_CONTRACT_VERSION: u32 = 1` (the Lexicon Core/wiring contract that spec §5 *requires* to be distinct from the source contract).
-  * `RUNTIME_PROTOCOL_VERSION: u32 = RUNTIME_INVOCATION_PROTOCOL_VERSION` (spec-side alias).
-  * `MANAGED_RUNNER_TEMPLATE_VERSION: u32 = 1` (single live copy; `lexicon-framework/src/lib.rs` now does `pub use lexicon_core::MANAGED_RUNNER_TEMPLATE_VERSION;` and no longer declares its own local copy).
-* `lexicon-core/src/runtime/mod.rs` and `lexicon-core/src/lib.rs`: re-export all four above at the appropriate visibility.
-RuntimeInformationV1 extension
-Stored fields added to `RuntimeInformationV1` in `lexicon-core/src/runtime/information.rs`:
-* `source_contract_identifier: &'static str` (defaults to `HTTPS_SOURCE_CONTRACT_IDENTIFIER` in `from_http_source`).
-* `core_contract_version: u32 = CORE_CONTRACT_VERSION`.
-* `managed_runner_template_version: u32 = MANAGED_RUNNER_TEMPLATE_VERSION`.
-New `const fn` accessors: `runtime_protocol_version()`, `source_contract_identifier()`, `core_contract_version()`, `managed_runner_template_version()`, `probe_capabilities()`.
-`RuntimeInformationDocumentV1` (the on-the-wire v1 JSON) extended with `source_contract: String`, `core_contract: u32`, `runner_template: u32`. `from_json` rejects zero `core_contract` / `runner_template` with a typed `InvalidVersion` error carrying the field name. `to_json` now emits the canonical Core-side values, so the spec-§22 representative probe response shape (`runtime_protocol`, `source_contract`, `core_contract`, `runner_template`) is satisfied without round-trip drift.
-Source-manifest migration to schema 2
-In `lexicon-framework/src/lib.rs`:
-* `SOURCE_MANIFEST_SCHEMA_VERSION: u32 = 2`.
-* `SourceTomlDocument` / `SourceTomlSection` / `SourceOperationSection` are now publicly-named (in-crate) and a new typed error enum `SourceManifestError` (variants: `UnsupportedSchemaVersion`, `MissingSourceSection`, `MissingSourceField`, `MissingOperationSection`, `MissingOperationField`, `UnexpectedContractIdentifier`, `InvalidVersion`) replaces the old ad-hoc `String` errors.
-* `format_source_toml` emits schema-2 with `[source]`, `[acquisition]`, `[processing]`; each operation section pulls its `contract` identifier and the four version values directly from the Core constants.
-* `load_source_metadata` rejects schema-1 with `UnsupportedSchemaVersion { actual: 1 }`, validates every protocol-mismatched field against the canonical Core values, and reports per-field errors (`InvalidVersion { field: "core_contract" | "runner_template" | ... }`).
-* `build_source` updated to throw `ManagedSourceBuildError::WorkspaceValidation` on manifest errors with the typed `SourceManifestError`'s formatted message.
-`MANAGED_RUNNER_TEMPLATE_VERSION` consolidation
-The duplicate constant previously declared at `lexicon-framework/src/lib.rs:19` has been removed. `lexicon-framework::MANAGED_RUNNER_TEMPLATE_VERSION` is now a `pub use` re-export from `lexicon_core`. No other live copies of the constant exist in the workspace; verified with `git grep -n 'MANAGED_RUNNER_TEMPLATE_VERSION' -- '*.rs'` — every reference resolves through `lexicon_core` or the framework's own re-export.
-Hand-authored test fixtures updated
-* `lexicon-framework/src/build/runtime_manifest.rs` (lines ~768, ~896) — added `source_contract` / `core_contract` / `runner_template` fields into the two `RuntimeInformationV1` JSON fixtures.
-* `lexicon-framework/src/data/test_support.rs` — the `FakeProject` acquisition bundle's on-disk `runtime.json` now embeds the new metadata fields sourced from the Core constants.
-New tests by category
-* `lexicon-core/src/runtime/information.rs` (5 new tests, plus 4 existing tests updated to include the new required fields):
-  * `runtime_information_metadata_constants_default_environment` — accessors return the canonical Core constants and are all non-zero.
-  * `runtime_information_metadata_round_trips_through_wire_format` — `to_json`/`from_json` round-trips losslessly and the source-contract identifier round-trips as `"native-rust-http-source-v1"`.
-  * `runtime_information_metadata_rejects_zero_core_contract` — `InvalidVersion { field: "core_contract", value: 0 }`.
-  * `runtime_information_metadata_rejects_zero_runner_template` — `InvalidVersion { field: "runner_template", value: 0 }`.
-  * `runtime_information_metadata_rejects_missing_source_contract_field` — `StructuralDocument`.
-  * (Plus `runtime_information_metadata_rejects_mismatched_source_contract` documenting that the wire-level identifier is currently *not* rejected — flagged as desired in the next milestone for honesty.)
-* `lexicon-framework/src/lib.rs` (6 new / 1 migrated test):
-  * `generated_source_toml_matches_required_schema_2_contract` (migrated from the schema-1 form).
-  * `schema_2_text_round_trips_through_validator`.
-  * `schema_1_source_manifest_is_rejected_with_typed_error`.
-  * `schema_2_with_wrong_acquisition_contract_identifier_is_rejected`.
-  * `schema_2_with_wrong_processing_contract_identifier_is_rejected`.
-  * `schema_2_with_zero_core_contract_version_is_rejected`.
-  * `schema_2_with_wrong_runner_template_version_is_rejected`.
-  * `schema_2_with_wrong_source_name_is_rejected`.
-  * `load_source_metadata_rejects_missing_manifest_file`.
-Confirmations
-* No required test remains ignored, deleted, or falsely successful; the lone ignored test is the pre-existing `lexicon-cli` doctest placeholder.
-* No unrelated feature work (workspace-wide `lexicon build`, source-owned SQLite work-ledger, MZA release construction, second-protocol support, schema-1 source migration tooling) was included.
-* No production contract (HTTP-capability surface, session admission, runtime identity, owned-lease invariants, durable-source-state directory, HTTP-recording policy) was weakened.
-Not in scope, deliberately
-* `RuntimeInformationDocumentV1` currently does not validate that the wire-level `source_contract` matches the Core canonical identifier on decode. The new `runtime_information_metadata_rejects_mismatched_source_contract` test documents the current behavior rather than gating it. This is intentional: it would have required a `validate_compatibility_*`-shaped helper that compares wire identifier against the canonical literal at decode time, which we left for a future milestone so the schema-2 surface can land without breaking caller identifiers that intentionally differ.
-* Cross-platform `lexicon install` / release packaging — unchanged.
-* `lexicon data` source-manifest validation step (spec §24 step 3 "validate source.toml") — deferred to its own milestone; the parser this milestone added is exactly what that step will call into.
-The following milestone should be derived from the updated contract and specification once this one lands. Once schema 2 is in place, the natural next candidates are (a) parent-side `lexicon data` invocation envelope's source-manifest validation step (spec §24 step 3, "validate source.toml") and (b) workspace-wide `lexicon build`. The actual next choice must be re-derived from the contract and the state of `main`, not assumed in advance.
+Current milestone: implement `lexicon build` (workspace-wide discovery and build)
+Objective
+Implement the top-level `lexicon build` command so it deterministically discovers every supported source/protocol pairing in the project and invokes the same validated per-source build pipeline already used by `lexicon source build`, reporting per-source success/failure with exact identities. Each discovered `sources/<source>/<protocol>/source.toml` is now schema-2 (per the previous milestone), so the discovery layer naturally re-uses the new schema-2 loader instead of re-implementing manifest validation.
+This milestone is unblocked by Milestone 2 (`Restore trustworthy runtime-execution test coverage` / `add-durable-source-state-directory`) and the schema-2 milestone; without schema-2 any discovered manifest would either be rejected by `load_source_metadata` or silently disagree with the build pipeline's per-source validation. The prior Milestone 3 attempt (workspace-wide `lexicon build`) was abandoned because manifest validation had become an obstacle; schema-2 closes that gap.
+This milestone is derived from:
+contract.md §5 ("`lexicon build`" is part of the public command boundary) and §6 (the supported architecture: one published managed acquisition runtime per source per protocol, one per processing);
+specs.md §40 (the eighteen-step requirements for `lexicon build`: discover the project, resolve the source, validate the source manifest, validate acquisition and processing workspaces and lockfiles, allocate isolated temporary targets and staging directories, run the locked release builds for both runtimes, select executables, hash, probe in information mode, validate runtime identities and capabilities, generate both `runtime.json` documents, transactionally publish the pair, restore previous bundles on any failure, and remove only temporary build material; conceptual `cargo build --locked ... --message-format=json-render-diagnostics` arguments spelled out); §16 (the ordering of capabilities on the runtime probe); §17 (checkpoint commitment ordering); and §26 (resume selection's interaction with previously published bundles).
+the previous abandoned milestone's repository-grounded analysis (lexicon-framework/src/lib.rs already exposes `find_project_root`, `configured_sources_directory`, `source_build`, and `Map<source,protocol>` rejection rules that the discovery layer must follow without weakening the per-source pipeline).
+Repository-grounded starting point
+`lexicon-framework::commands::source_build(source_name, protocol)` (lexicon-framework/src/lib.rs around line 1005) is the existing validated single-source build pipeline: it validates the schema-2 `source.toml` via `load_source_metadata` (now strictly schema-2), validates the managed acquisition/processing workspace layout and metadata, builds both managed runners inside isolated temporary target directories, verifies each executable via `verify_http_runtime_candidate_owned` / `verify_processing_runtime_candidate_owned`, hashes them via `hash_runtime_executable`, and publishes both runtime bundles atomically per source (via `publish_runtime_pair`). This per-source pipeline must not be reimplemented or weakened; `lexicon build` must call it directly for each discovered pairing.
+`find_project_root`, `configured_sources_directory`, `load_project_config` (lexicon-framework/src/lib.rs) already supply validated project discovery and the resolved sources root; `lexicon build` must reuse them rather than re-deriving project/paths logic.
+`lexicon-cli/src/cli/build.rs` defines `BuildCommand` as a unit struct (`lexicon build` takes no arguments today); `lexicon-cli/src/cli/mod.rs`'s `dispatch` function's `RootCommand::Build(_)` arm is the integration point to replace (currently prints `"Parsed build command: build"`).
+`validate_source_name` and `validate_protocol` (lexicon-framework/src/lib.rs) provide validated canonical form for source names and the only currently supported protocol (`http`); `lexicon build` should not duplicate or relax these.
+`lexicon source create` only supports the `http` protocol today, so the only protocol directory that can legitimately exist under a source is `http`; the discovery logic must be written generically (so that adding a second protocol later will not require restructuring), but only needs to actually accept `http` for now.
+Required implementation
+1. Discovery
+Add a new `lexicon-framework::commands` function `build_all()` that:
+1. discovers the containing project via `find_project_root` from the current directory;
+2. resolves the configured sources directory via `load_project_config`/`configured_sources_directory`;
+3. enumerates the immediate subdirectories of the sources root as candidate source names, applying `validate_source_name` consistently (skip/reject consistently, never silently autocorrect);
+4. for each candidate source, enumerates its immediate subdirectories as candidate protocol identities, recognizing only `http` via `validate_protocol` for now;
+5. treats a source/protocol pairing as a build target only when `sources/<source>/<protocol>/source.toml` exists **and** passes a pre-flight schema-2 validation via the project's `load_source_metadata`. Reject the pairing with a typed `BuildAllError::InvalidSourceManifest` carrying the exact `source.toml` path and the typed `SourceManifestError` if the manifest is missing, schema-1, or has any per-field mismatch — do not silently proceed with a malformed manifest, since this is the cleanup point of the previously abandoned milestone;
+6. produces a stable, deterministically ordered list of discovered `(source_name, protocol)` pairs (sorted lexicographically by source name, then protocol) so that output and test behavior do not depend on filesystem iteration order; this ordering also forms the build invocation order.
+Reject ambiguous or invalid layouts rather than silently skipping them: a source directory containing a non-directory entry (`sources/<source>/<junk-file>`) or a non-`http` directory entry (`sources/<source>/<browser>/`) must cause discovery to fail with a precise per-path error. Likewise, a source directory that contains zero recognized protocol directories (e.g. only `notes.txt`) must fail discovery with an actionable "source directory contains no recognized protocol directories" error rather than silently producing an empty target list. An entirely absent or empty sources directory must NOT be an error: it represents a valid (trivial) project with zero build targets, and `lexicon build` should report success with the message `0 source(s) built, 0 failed`.
+2. Build invocation and aggregate reporting
+For each discovered pairing, in the deterministic order established above, invoke the existing `source_build`/`build_source` pipeline unchanged. Attempt every discovered pairing even if an earlier pairing fails — do not stop at the first failure — and collect a per-pairing result (success with its `SourceBuildResult`, or failure capturing the source name, protocol, exact error message, and which pipeline phase failed) into an aggregate `BuildAllOutcome` returned to the caller. The CLI layer must then report every failure with the exact source name and protocol identity (per specs.md §40 item 6), and must report overall command failure (non-zero `Err` from `dispatch`) if any pairing failed, even if others succeeded.
+Do not implement a project-wide all-or-nothing publication transaction across sources — specs.md §40 explicitly defers this ("may remain deferred until supported by implementation evidence"). Each source's own publish step is already atomic per `publish_runtime_pair`; that per-source atomicity is sufficient for this milestone.
+Define a typed error enum `BuildAllError` distinct from `ManagedSourceBuildError` for the discovery-time failures (project not found, project config load failure, sources-directory containment failure, invalid source or protocol layout, manifest validation failure). The aggregate build-phase failures raise `BuildAllError::Build { source_name, protocol, error }` to keep the per-pairing error identity unambiguous.
+3. CLI wiring
+Replace the `RootCommand::Build(_)` stub arm in `lexicon-cli/src/cli/mod.rs` with a call into the new `lexicon_framework::commands::build_all`, printing a per-source summary line (mirroring the existing style used for `source create`/`source build` output) and a final summary line indicating how many succeeded and how many failed. Return `Err` from `dispatch` when any pairing failed or when discovery itself failed, with a message enumerating each failed source/protocol identity and its underlying error message.
+4. Tests
+Add tests proving at least:
+* discovery finds zero targets in a project with an empty sources directory and `lexicon build` reports success with `0 source(s) built, 0 failed` (no panic, no spurious failure);
+* discovery finds and builds a single valid source/protocol pairing end-to-end using `commands::init` + `commands::source_create`, then `commands::build_all`, verifying both managed runtime artifacts exist at the paths `SourceBuildResult.get_runtime` / `SourceBuildResult.process_runtime` produce;
+* discovery finds and builds multiple valid source/protocol pairings in one `lexicon build` invocation and reports the successes/failures in the deterministic sort order;
+* a failure in one discovered pairing (for example, a project containing two scaffolded sources where one has its `Cargo.toml` deliberately corrupted) does not prevent the other valid pairings from being attempted and successfully built; the aggregate `BuildAllOutcome` correctly names the failed source and protocol while reporting the others' success;
+* an ambiguous layout — e.g. `sources/<source>/notes.txt` (non-directory entry) — causes discovery to fail with an `BuildAllError` identifying the offending path, before any build is attempted;
+* a source directory with a non-`http` unrecognized protocol directory (e.g. `sources/<source>/browser/`) causes discovery to fail with a precise error rather than silently skipping;
+* a sources subdirectory whose `source.toml` is schema-1 (or otherwise fails schema-2 pre-flight) causes discovery to fail with `BuildAllError::InvalidSourceManifest` carrying the typed `SourceManifestError` (no runtime `cargo build` invocation is performed for the malformed source);
+* the CLI-level `dispatch` test (alongside the existing `lexicon-cli/src/cli/mod.rs` tests for `source create`/`source build`) confirms `lexicon build` is wired to the framework function rather than remaining a placeholder, using the same `with_test_cwd` pattern already used by neighboring tests in that file.
+Retain all existing tests for `source_build`, `source_create`, `init`, discovery (`find_project_root`, `configured_sources_directory`), and managed workspace validation unmodified except where a genuine, minimal signature/call-site change is required to reuse them from the new discovery function.
+Scope constraints
+Do not implement during this milestone:
+* MZA Protocol 1 release construction, the `lexicon-bundle` adapter, or any complete-product release packaging (specs.md §41) — `lexicon build` only performs source builds, per specs.md's explicit separation between source build and product release construction;
+* a project-wide all-or-nothing publication transaction across sources (specs.md §40 explicitly defers this);
+* any SQLite work-ledger, runtime identity probe-decoding changes, or other functionality unrelated to workspace-wide build discovery;
+* support for any protocol other than `http`;
+* changes to `build_source`'s internal per-source validation/build/publish logic beyond what is strictly required to surface the typed `BuildAllError` for aggregate reporting (prefer wrapping with `BuildAllError::Build { error: ... }` over restructuring);
+* parallelizing the per-source builds (sequential, deterministic order is sufficient for this milestone);
+* changes to `lexicon data`, `lexicon init`, `lexicon source create`, background/operator-host execution, or any HTTP/session/runtime-context code;
+* parent-side `lexicon data --get` step 3 "validate source.toml" (specs.md §24) — although the schema-2 manuscript loader that this milestone wires into discovery would be perfect for it, surfacing it through the foreground/background data path is too large for a single milestone and remains a separate follow-up;
+* processing-side `RuntimeInformationV1` asymmetry — out of scope;
+* wiring the discovered manifest's `contract` identifier through `RuntimeInformationV1::from_json` (the per-milestone deferred work);
+* cross-platform `lexicon install` plumbing.
+Preserved production behavior
+* `lexicon source build <source> --protocol http` continues to validate the schema-2 `source.toml`, build both managed runners, verify identities, hash executables, and publish the runtime pair atomically. This milestone only adds a discovery loop that repeats that pipeline; it does not introduce a parallel or weaker per-source implementation;
+* `lexicon source create` still emits schema-2 `source.toml` and the workspace-discovery view of it is identical to what `source create` itself writes;
+* The `find_project_root`, `configured_sources_directory`, `load_project_config`, `validate_source_name`, `validate_protocol`, and `load_source_metadata` helpers are reused unchanged;
+* No changes to foreground/background supervision, operator host, HTTP recording, checkpoints, durable source state, owned-lease invariants, public/private API boundaries, or any CLI surface outside `RootCommand::Build`'s dispatch arm.
+Completion criteria
+This milestone is complete only when:
+* `lexicon build` deterministically discovers every valid source/protocol pairing under the project's configured sources directory, sorted lexicographically;
+* it invokes the existing validated `source_build` pipeline for each discovered pairing without weakening that pipeline;
+* ambiguous or invalid layouts are rejected with a precise, actionable error identifying the offending path;
+* schema-1 or malformed `source.toml` documents are rejected at discovery time (no `cargo build` invoked for those sources);
+* failures are reported with the exact source name and protocol identity, and do not prevent other valid pairings from being attempted;
+* `cargo check --workspace` passes;
+* `cargo test --workspace --quiet` passes;
+* no production contract weakened to make test setup easier;
+* no out-of-scope functionality (MZA/release, work-ledger, second protocol, `lexicon data` source-manifest integration) included.
+Completion report
+When the milestone passes, replace this file with a concise report containing:
+* the exact commit tested;
+* confirmation that `cargo check --workspace` passed;
+* confirmation that `cargo test --workspace --quiet` passed;
+* where the new discovery/aggregation function lives and how `lexicon-cli`'s `dispatch` was wired to it;
+* the precise behavior of discovery against: zero sources, one source, multiple sources, an ambiguous layout, a non-`http` protocol directory, a schema-1 manifest, and a malformed manifest — using the new tests as evidence;
+* the number and categories of new tests added;
+* confirmation that no required test remains ignored, deleted, or falsely successful;
+* confirmation that no unrelated feature work (MZA, work-ledger, workspace integration into `lexicon data`) was included;
+* confirmation that `lexicon source build` continues to validate the same schema-2 `source.toml` unchanged.
+Then stop.
+The following milestone should be derived from the updated contract and specification once this one lands. With a working `lexicon build` and a schema-2 source manifest, the natural next candidates are (a) parent-side `lexicon data --get` step 3 "validate source.toml" (specs.md §24) wired through `RuntimeProjectLayout`, (b) the source-owned SQLite `durability_work`/`work_items` convention built on top of `source_state_directory()` (specs.md §13-§15), or (c) MZA Protocol 1 release construction and the `lexicon-bundle` adapter (specs.md §41). The actual next choice must be re-derived from the contract and the state of `main`, not assumed in advance.
