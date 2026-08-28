@@ -139,8 +139,40 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Some(RootCommand::Build(_)) => {
-            println!("Parsed build command: build");
-            Ok(())
+            let outcome = lexicon_framework::commands::build_all()
+                .map_err(|error| error.to_string())?;
+            for result in &outcome.succeeded {
+                println!(
+                    "[lexicon] Built source '{}' using protocol '{}'",
+                    result.source_name, result.protocol
+                );
+                println!("[lexicon]   - {}", result.get_runtime.display());
+                println!("[lexicon]   - {}", result.process_runtime.display());
+            }
+            for failure in &outcome.failed {
+                println!(
+                    "[lexicon] Failed to build source '{}' using protocol '{}': {}",
+                    failure.source_name, failure.protocol, failure.error
+                );
+            }
+            if outcome.is_success() {
+                println!(
+                    "[lexicon] Build complete: {} source(s) built, 0 failed",
+                    outcome.succeeded.len()
+                );
+                Ok(())
+            } else {
+                let failed_identities = outcome
+                    .failed
+                    .iter()
+                    .map(|failure| format!("{}/{}", failure.source_name, failure.protocol))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(format!(
+                    "build failed for {} source(s): {failed_identities}",
+                    outcome.failed.len()
+                ))
+            }
         }
         Some(RootCommand::OperatorHost(command)) => {
             let reference =
@@ -312,5 +344,21 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn dispatch_build_command_runs_build_all_on_empty_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        fs::write(
+            project_root.join("lexicon.toml"),
+            "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project_root.join("sources")).unwrap();
+
+        let cli = Cli::try_parse_from(["lexicon", "build"]).unwrap();
+        let result = with_test_cwd(project_root, || super::dispatch(cli));
+        assert!(result.is_ok(), "build on empty project should succeed: {result:?}");
     }
 }

@@ -597,6 +597,152 @@ pub mod commands {
     pub fn source_build(source_name: &str, protocol: &str) -> Result<SourceBuildResult, String> {
         build_source(source_name, protocol).map_err(|error| error.to_string())
     }
+
+    /// A single discovered source/protocol pairing that failed the per-source
+    /// build pipeline during a workspace-wide `lexicon build` run.
+    #[derive(Debug)]
+    pub struct SourceBuildFailure {
+        pub source_name: String,
+        pub protocol: String,
+        pub error: String,
+    }
+
+    /// Aggregate result of a `lexicon build` workspace-wide discovery-and-build
+    /// run. Every discovered source/protocol pairing is attempted independently;
+    /// a failure in one pairing does not prevent the others from being attempted.
+    #[derive(Debug)]
+    pub struct BuildAllOutcome {
+        pub succeeded: Vec<SourceBuildResult>,
+        pub failed: Vec<SourceBuildFailure>,
+    }
+
+    impl BuildAllOutcome {
+        pub fn is_success(&self) -> bool {
+            self.failed.is_empty()
+        }
+    }
+
+    /// Deterministically discover every supported source/protocol pairing
+    /// under the project's configured sources directory, then run the same
+    /// validated per-source build pipeline used by [`source_build`] for each
+    /// pair in stable order. Every discovered pair is attempted, even if
+    /// earlier pairs fail. See [`super::BuildAllError`] for the typed error
+    /// surface used by this function.
+    pub fn build_all() -> Result<BuildAllOutcome, BuildAllError> {
+        let targets = discover_build_targets()?;
+
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
+        for (source_name, protocol) in targets {
+            match source_build(&source_name, &protocol) {
+                Ok(result) => succeeded.push(result),
+                Err(error) => failed.push(SourceBuildFailure {
+                    source_name,
+                    protocol,
+                    error: error.to_string(),
+                }),
+            }
+        }
+
+        Ok(BuildAllOutcome { succeeded, failed })
+    }
+}
+
+/// Errors produced by [`commands::build_all`] during the discovery phase or
+/// for sources that fail the per-source build pipeline. Per-pairing build
+/// failures are captured in [`commands::SourceBuildFailure`] inside
+/// [`commands::BuildAllOutcome`]; only discovery-phase failures raise this
+/// typed error to abort the workspace-wide run before any `cargo build` runs.
+#[derive(Debug)]
+pub enum BuildAllError {
+    /// The current directory cannot be determined.
+    CurrentDirectory(std::io::Error),
+    /// The containing Lexicon project could not be discovered or configured.
+    ProjectDiscovery(ProjectRootDiscoveryError),
+    /// `lexicon.toml` could not be loaded or is structurally invalid.
+    ProjectConfig(ProjectConfigLoadError),
+    /// The sources directory entry under the project root is not a directory.
+    SourcesRootNotADirectory { path: PathBuf },
+    /// A non-directory entry exists directly inside the sources root.
+    NonDirectoryInSourcesRoot { path: PathBuf },
+    /// A non-directory entry exists inside a source directory.
+    NonDirectoryInSource { source: PathBuf, path: PathBuf },
+    /// A source directory contains a protocol entry that is not currently
+    /// recognized by this build.
+    UnrecognizedProtocolDirectory { source: PathBuf, protocol: PathBuf },
+    /// A source directory contains no recognized protocol directories.
+    NoRecognizedProtocolDirectories { source: PathBuf },
+    /// `source.toml` is missing or failed schema-2 pre-flight validation.
+    InvalidSourceManifest {
+        source: PathBuf,
+        manifest: PathBuf,
+        error: SourceManifestError,
+    },
+}
+
+impl fmt::Display for BuildAllError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CurrentDirectory(error) => {
+                write!(formatter, "failed to determine current directory: {error}")
+            }
+            Self::ProjectDiscovery(error) => {
+                write!(formatter, "failed to discover Lexicon project: {error}")
+            }
+            Self::ProjectConfig(error) => {
+                write!(formatter, "failed to load project configuration: {error}")
+            }
+            Self::SourcesRootNotADirectory { path } => write!(
+                formatter,
+                "configured sources directory '{}' is not a directory",
+                path.display()
+            ),
+            Self::NonDirectoryInSourcesRoot { path } => write!(
+                formatter,
+                "sources directory contains a non-directory entry '{}'; only source directories are permitted",
+                path.display()
+            ),
+            Self::NonDirectoryInSource { source, path } => write!(
+                formatter,
+                "source directory '{}' contains a non-directory entry '{}'; only protocol directories are permitted",
+                source.display(),
+                path.display()
+            ),
+            Self::UnrecognizedProtocolDirectory { source, protocol } => write!(
+                formatter,
+                "source directory '{}' contains an unrecognized protocol directory '{}'; only 'http' is currently built",
+                source.display(),
+                protocol.display()
+            ),
+            Self::NoRecognizedProtocolDirectories { source } => write!(
+                formatter,
+                "source directory '{}' does not contain any recognized protocol directories",
+                source.display()
+            ),
+            Self::InvalidSourceManifest {
+                source,
+                manifest,
+                error,
+            } => write!(
+                formatter,
+                "source manifest failed validation: source='{}' manifest='{}' error={}",
+                source.display(),
+                manifest.display(),
+                error
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BuildAllError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CurrentDirectory(error) => Some(error),
+            Self::ProjectDiscovery(error) => Some(error),
+            Self::ProjectConfig(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 fn validate_project_name(project_name: &str) -> Result<(), String> {
@@ -1114,6 +1260,113 @@ fn build_source(
         get_runtime: published.acquisition_directory().to_path_buf(),
         process_runtime: published.processing_directory().to_path_buf(),
     })
+}
+
+/// Deterministically discovers every supported source/protocol pairing under
+/// the project's configured sources directory for a workspace-wide `lexicon build`.
+///
+/// A pairing is a build target only when `sources/<source>/<protocol>/source.toml`
+/// exists and passes pre-flight schema-2 validation. Discovery rejects ambiguous or
+/// invalid layouts (non-directory entries, invalid source names, unrecognized
+/// protocol directories, protocol directories missing their `source.toml` marker,
+/// malformed manifests, or a source directory containing no recognized protocol
+/// directory at all) with an actionable error identifying the offending path,
+/// rather than silently skipping them. An entirely absent or empty sources
+/// directory is not an error; it simply yields zero targets.
+///
+/// The returned list is sorted lexicographically by source name, then by
+/// protocol, so callers observe a stable, deterministic build order.
+fn discover_build_targets() -> Result<Vec<(String, String)>, BuildAllError> {
+    let current_dir = env::current_dir().map_err(BuildAllError::CurrentDirectory)?;
+    let project_root = find_project_root(&current_dir).map_err(BuildAllError::ProjectDiscovery)?;
+    let sources_root =
+        configured_sources_directory(&project_root).map_err(BuildAllError::ProjectConfig)?;
+
+    if !sources_root.exists() {
+        return Ok(Vec::new());
+    }
+    if !sources_root.is_dir() {
+        return Err(BuildAllError::SourcesRootNotADirectory {
+            path: sources_root,
+        });
+    }
+
+    let mut source_entries = fs::read_dir(&sources_root)
+        .map_err(BuildAllError::CurrentDirectory)?
+        .collect::<Result<Vec<_>, std::io::Error>>()
+        .map_err(BuildAllError::CurrentDirectory)?;
+    source_entries.sort_by_key(|entry| entry.file_name());
+
+    let mut targets = Vec::new();
+    for source_entry in source_entries {
+        let source_path = source_entry.path();
+        if !source_path.is_dir() {
+            return Err(BuildAllError::NonDirectoryInSourcesRoot {
+                path: source_path,
+            });
+        }
+
+        let source_name = source_entry.file_name().to_string_lossy().into_owned();
+        if validate_source_name(&source_name).is_err() {
+            return Err(BuildAllError::NonDirectoryInSourcesRoot {
+                path: source_path,
+            });
+        }
+
+        let mut protocol_entries = fs::read_dir(&source_path)
+            .map_err(BuildAllError::CurrentDirectory)?
+            .collect::<Result<Vec<_>, std::io::Error>>()
+            .map_err(BuildAllError::CurrentDirectory)?;
+        protocol_entries.sort_by_key(|entry| entry.file_name());
+
+        let mut discovered_protocol_for_source = false;
+        for protocol_entry in protocol_entries {
+            let protocol_path = protocol_entry.path();
+            if !protocol_path.is_dir() {
+                return Err(BuildAllError::NonDirectoryInSource {
+                    source: source_path.clone(),
+                    path: protocol_path,
+                });
+            }
+
+            let protocol_name = protocol_entry.file_name().to_string_lossy().into_owned();
+            if protocol_name != "http" || validate_protocol(&protocol_name).is_err() {
+                return Err(BuildAllError::UnrecognizedProtocolDirectory {
+                    source: source_path.clone(),
+                    protocol: protocol_path,
+                });
+            }
+
+            let manifest_path = protocol_path.join("source.toml");
+            if !manifest_path.is_file() {
+                return Err(BuildAllError::InvalidSourceManifest {
+                    source: source_path.clone(),
+                    manifest: manifest_path,
+                    error: SourceManifestError::MissingSourceSection,
+                });
+            }
+
+            let manifest_contents = fs::read_to_string(&manifest_path)
+                .map_err(BuildAllError::CurrentDirectory)?;
+            validate_source_toml_text(&manifest_contents, &source_name, &protocol_name)
+                .map_err(|error| BuildAllError::InvalidSourceManifest {
+                    source: source_path.clone(),
+                    manifest: manifest_path,
+                    error,
+                })?;
+
+            targets.push((source_name.clone(), protocol_name));
+            discovered_protocol_for_source = true;
+        }
+
+        if !discovered_protocol_for_source {
+            return Err(BuildAllError::NoRecognizedProtocolDirectories {
+                source: source_path,
+            });
+        }
+    }
+
+    Ok(targets)
 }
 
 /// Parse and validate a schema-2 source manifest. Rejects non-schema-2 documents
@@ -2932,15 +3185,16 @@ mod tests {
 
     use lexicon_core::runtime::{OwnedRuntimeIdentity, RuntimeOperation, RuntimeProtocol};
 
-    use super::commands::{init, source_create};
+    use super::commands::{build_all, init, source_create};
     use super::{
-        BuiltManagedRunner, MANAGED_RUNNER_TEMPLATE_VERSION, ManagedRunnerArtifactSelectionError,
-        ManagedRunnerBuildError, ManagedSourceBuildError, ManagedWorkspaceMetadataError,
-        ManagedWorkspaceValidationError, SourceManifestError, configured_sources_directory,
-        finalize_source_staging, find_descendant_project_root, find_project_root,
-        format_http_managed_runner_main, format_implementation_cargo_toml,
-        format_processing_managed_runner_main, format_runner_cargo_toml, format_source_toml,
-        format_workspace_cargo_toml, load_source_metadata, select_artifact_from_cargo_output,
+        BuildAllError, BuiltManagedRunner, MANAGED_RUNNER_TEMPLATE_VERSION,
+        ManagedRunnerArtifactSelectionError, ManagedRunnerBuildError, ManagedSourceBuildError,
+        ManagedWorkspaceMetadataError, ManagedWorkspaceValidationError, SourceManifestError,
+        configured_sources_directory, discover_build_targets, finalize_source_staging,
+        find_descendant_project_root, find_project_root, format_http_managed_runner_main,
+        format_implementation_cargo_toml, format_processing_managed_runner_main,
+        format_runner_cargo_toml, format_source_toml, format_workspace_cargo_toml,
+        load_source_metadata, select_artifact_from_cargo_output,
         validate_managed_workspace_layout, validate_managed_workspace_metadata,
         validate_protocol, validate_source_name, validate_source_toml_text,
     };
@@ -3863,5 +4117,160 @@ runtime_protocol = 1
             source_dir.join("existing.txt").exists(),
             "existing content must remain untouched"
         );
+    }
+
+    #[test]
+    fn build_all_finds_zero_targets_in_empty_sources_directory() {
+        let parent_dir = unique_test_dir("lexicon-build-empty-");
+        let parent = parent_dir.path().to_path_buf();
+        let init_result = init(&parent, "empty-proj").unwrap();
+
+        let outcome = with_test_cwd(&init_result.project_directory, || build_all()).unwrap();
+        assert!(outcome.is_success());
+        assert_eq!(outcome.succeeded.len(), 0);
+        assert_eq!(outcome.failed.len(), 0);
+    }
+
+    #[test]
+    fn discover_build_targets_finds_valid_source_and_protocol() {
+        let parent_dir = unique_test_dir("lexicon-discover-valid-");
+        let parent = parent_dir.path().to_path_buf();
+        let init_result = init(&parent, "valid-proj").unwrap();
+
+        with_test_cwd(&init_result.project_directory, || {
+            source_create("my-source", "http").unwrap();
+            let targets = discover_build_targets().unwrap();
+            assert_eq!(targets, vec![("my-source".to_string(), "http".to_string())]);
+        });
+    }
+
+    #[test]
+    fn discover_build_targets_sorts_deterministically() {
+        let parent_dir = unique_test_dir("lexicon-discover-sort-");
+        let parent = parent_dir.path().to_path_buf();
+        let init_result = init(&parent, "sort-proj").unwrap();
+
+        with_test_cwd(&init_result.project_directory, || {
+            source_create("zebra-source", "http").unwrap();
+            source_create("alpha-source", "http").unwrap();
+            source_create("beta-source", "http").unwrap();
+
+            let targets = discover_build_targets().unwrap();
+            assert_eq!(
+                targets,
+                vec![
+                    ("alpha-source".to_string(), "http".to_string()),
+                    ("beta-source".to_string(), "http".to_string()),
+                    ("zebra-source".to_string(), "http".to_string()),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn discover_build_targets_rejects_non_directory_in_sources_root() {
+        let parent_dir = unique_test_dir("lexicon-discover-nondir-root-");
+        let parent = parent_dir.path().to_path_buf();
+        let init_result = init(&parent, "nondir-proj").unwrap();
+
+        with_test_cwd(&init_result.project_directory, || {
+            source_create("valid-source", "http").unwrap();
+            fs::write(init_result.project_directory.join("sources/junk.txt"), "junk").unwrap();
+
+            let result = discover_build_targets();
+            assert!(matches!(
+                result,
+                Err(BuildAllError::NonDirectoryInSourcesRoot { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn discover_build_targets_rejects_non_directory_in_source() {
+        let parent_dir = unique_test_dir("lexicon-discover-nondir-source-");
+        let parent = parent_dir.path().to_path_buf();
+        let init_result = init(&parent, "nondir-src-proj").unwrap();
+
+        with_test_cwd(&init_result.project_directory, || {
+            source_create("valid-source", "http").unwrap();
+            fs::write(
+                init_result.project_directory.join("sources/valid-source/notes.txt"),
+                "notes",
+            )
+            .unwrap();
+
+            let result = discover_build_targets();
+            assert!(matches!(
+                result,
+                Err(BuildAllError::NonDirectoryInSource { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn discover_build_targets_rejects_unrecognized_protocol_directory() {
+        let parent_dir = unique_test_dir("lexicon-discover-unrecog-proto-");
+        let parent = parent_dir.path().to_path_buf();
+        let init_result = init(&parent, "unrecog-proj").unwrap();
+
+        with_test_cwd(&init_result.project_directory, || {
+            source_create("valid-source", "http").unwrap();
+            fs::create_dir_all(
+                init_result.project_directory.join("sources/valid-source/browser"),
+            )
+            .unwrap();
+
+            let result = discover_build_targets();
+            assert!(matches!(
+                result,
+                Err(BuildAllError::UnrecognizedProtocolDirectory { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn discover_build_targets_rejects_schema_1_source_manifest() {
+        let parent_dir = unique_test_dir("lexicon-discover-schema1-");
+        let parent = parent_dir.path().to_path_buf();
+        let init_result = init(&parent, "schema1-proj").unwrap();
+
+        with_test_cwd(&init_result.project_directory, || {
+            source_create("valid-source", "http").unwrap();
+            // Overwrite source.toml with schema-1 content
+            let manifest_path = init_result
+                .project_directory
+                .join("sources/valid-source/http/source.toml");
+            fs::write(
+                &manifest_path,
+                "schema_version = 1\n[source]\nname = \"valid-source\"\nprotocol = \"http\"\n",
+            )
+            .unwrap();
+
+            let result = discover_build_targets();
+            assert!(matches!(
+                result,
+                Err(BuildAllError::InvalidSourceManifest {
+                    error: SourceManifestError::UnsupportedSchemaVersion { actual: 1 },
+                    ..
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn discover_build_targets_rejects_source_with_no_protocol_directories() {
+        let parent_dir = unique_test_dir("lexicon-discover-no-proto-");
+        let parent = parent_dir.path().to_path_buf();
+        let init_result = init(&parent, "no-proto-proj").unwrap();
+
+        with_test_cwd(&init_result.project_directory, || {
+            fs::create_dir_all(init_result.project_directory.join("sources/empty-source")).unwrap();
+
+            let result = discover_build_targets();
+            assert!(matches!(
+                result,
+                Err(BuildAllError::NoRecognizedProtocolDirectories { .. })
+            ));
+        });
     }
 }
