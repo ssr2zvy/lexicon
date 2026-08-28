@@ -25,7 +25,10 @@ pub use checkpoint::{
     HttpCheckpointEncodingError, HttpCheckpointKeyError, HttpCheckpointLookupError,
     HttpCheckpointPartialCommit, HttpHistoricalLookupError,
 };
-pub use contract::{HttpAcquireFn, HttpResumeFn, HttpSourceContractV1};
+pub use contract::{
+    HTTP_SOURCE_CONTRACT_VERSION, HTTPS_SOURCE_CONTRACT_IDENTIFIER, HttpAcquireFn, HttpResumeFn,
+    HttpSourceContractV1,
+};
 pub use error::{
     AcquisitionError, AcquisitionResult, HttpExecutionError, HttpRedirectFailure,
     HttpRedirectFailureKind, HttpRetryExhaustionError, HttpRetryFinalOutcome,

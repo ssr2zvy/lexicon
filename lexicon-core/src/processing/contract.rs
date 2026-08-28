@@ -2,6 +2,15 @@ use std::ffi::OsString;
 
 use super::{ProcessingContext, ProcessingResult};
 
+/// Canonical contract identifier for processing sources, as recorded in
+/// `sources/<source>/<protocol>/source.toml` (source manifest schema 2).
+pub const PROCESSING_SOURCE_CONTRACT_IDENTIFIER: &str = "native-rust-processing-v1";
+
+/// Canonical `contract` version for processing sources. Exposed under the
+/// spec-side name so manifest formatters and validators do not need to reach
+/// into the contract type's private constant.
+pub const PROCESSING_SOURCE_CONTRACT_VERSION: u32 = 1;
+
 pub type ProcessDataFn =
     fn(context: &mut ProcessingContext, args: &[OsString]) -> ProcessingResult<()>;
 
@@ -11,7 +20,7 @@ pub struct ProcessingSourceContractV1 {
 }
 
 impl ProcessingSourceContractV1 {
-    pub const CONTRACT_VERSION: u32 = 1;
+    pub const CONTRACT_VERSION: u32 = PROCESSING_SOURCE_CONTRACT_VERSION;
 
     pub const fn new(process: ProcessDataFn) -> Self {
         Self { process }

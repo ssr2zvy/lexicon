@@ -21,7 +21,10 @@ mod invocation;
 mod transactions;
 
 pub use context::ProcessingContext;
-pub use contract::{ProcessDataFn, ProcessingSourceContractV1};
+pub use contract::{
+    PROCESSING_SOURCE_CONTRACT_IDENTIFIER, PROCESSING_SOURCE_CONTRACT_VERSION, ProcessDataFn,
+    ProcessingSourceContractV1,
+};
 pub use error::{
     ProcessingContextConstructionError, ProcessingDatabaseCommitOutcomeUncertain,
     ProcessingDatabaseConfigurationError, ProcessingDatabaseDurabilityError,

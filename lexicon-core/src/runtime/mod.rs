@@ -14,7 +14,8 @@ pub use information::{
     RuntimeInformationEncodingError, RuntimeInformationV1,
 };
 pub use invocation::{
-    ProjectInvocationIdentity, RUNTIME_INVOCATION_PROTOCOL_VERSION, RuntimeExecutionMode,
+    CORE_CONTRACT_VERSION, MANAGED_RUNNER_TEMPLATE_VERSION, ProjectInvocationIdentity,
+    RUNTIME_INVOCATION_PROTOCOL_VERSION, RUNTIME_PROTOCOL_VERSION, RuntimeExecutionMode,
     RuntimeInvocationConstructionError, RuntimeInvocationDecodingError,
     RuntimeInvocationEncodingError, RuntimeInvocationEnvelopeV1, RuntimeInvocationIdentifierError,
     RuntimeInvocationValueError, RuntimeSupervisionMode, SessionInvocationIdentity,
