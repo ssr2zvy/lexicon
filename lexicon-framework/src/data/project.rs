@@ -20,6 +20,7 @@ use crate::{find_project_root, load_project_config, validate_protocol, validate_
 /// sources_root = project_root/<configured-sources-directory>
 /// protocol_root = sources_root/<source_name>/<protocol>
 /// ```
+#[derive(Debug)]
 pub struct RuntimeProjectLayout {
     project_root: PathBuf,
     sources_root: PathBuf,
@@ -180,6 +181,28 @@ pub fn resolve_project_layout(
             _ => ForegroundDataExecutionError::ProjectLayout(e),
         }
     })?;
+
+    let manifest_path = protocol_root.join("source.toml");
+    if !manifest_path.is_file() {
+        return Err(ForegroundDataExecutionError::MissingSourceManifest {
+            source_name: source_name.to_owned(),
+            path: manifest_path,
+        });
+    }
+
+    let manifest_contents = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        ForegroundDataExecutionError::ProjectDiscovery(
+            ProjectDiscoveryError::CurrentDirectory(e),
+        )
+    })?;
+
+    crate::validate_source_toml_text(&manifest_contents, source_name, protocol).map_err(
+        |error| ForegroundDataExecutionError::InvalidSourceManifest {
+            source_name: source_name.to_owned(),
+            path: manifest_path,
+            error,
+        },
+    )?;
 
     let layout = build_layout(
         project_root.clone(),
@@ -398,5 +421,121 @@ fn require_directory(
             path: path.to_path_buf(),
             source: e,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::data::error::ForegroundDataExecutionError;
+    use crate::data::request::DataOperation;
+    use crate::data::test_support::with_test_cwd;
+    use crate::SourceManifestError;
+
+    fn make_valid_project_structure(root: &Path, source_name: &str) {
+        fs::write(
+            root.join("lexicon.toml"),
+            "schema_version = 1\n[project]\nname = \"test-project\"\nsources_directory = \"sources\"\n",
+        )
+        .unwrap();
+
+        let protocol_root = root.join("sources").join(source_name).join("http");
+        fs::create_dir_all(&protocol_root).unwrap();
+        fs::create_dir_all(protocol_root.join("data/raw")).unwrap();
+        fs::create_dir_all(protocol_root.join("data/processed")).unwrap();
+        fs::create_dir_all(protocol_root.join("get-raw-data")).unwrap();
+        fs::create_dir_all(protocol_root.join("process-data")).unwrap();
+        fs::create_dir_all(protocol_root.join("get-raw-data/runtime")).unwrap();
+        fs::create_dir_all(protocol_root.join("process-data/runtime")).unwrap();
+    }
+
+    #[test]
+    fn resolve_project_layout_rejects_missing_source_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        make_valid_project_structure(project_root, "my-source");
+
+        let result = with_test_cwd(project_root, || {
+            resolve_project_layout("my-source", "http", DataOperation::Acquisition)
+        });
+
+        assert!(matches!(
+            result,
+            Err(ForegroundDataExecutionError::MissingSourceManifest { source_name, .. })
+                if source_name == "my-source"
+        ));
+    }
+
+    #[test]
+    fn resolve_project_layout_rejects_schema_1_source_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        make_valid_project_structure(project_root, "my-source");
+
+        let protocol_root = project_root.join("sources/my-source/http");
+        fs::write(
+            protocol_root.join("source.toml"),
+            "schema_version = 1\n[source]\nname = \"my-source\"\nprotocol = \"http\"\n",
+        )
+        .unwrap();
+
+        let result = with_test_cwd(project_root, || {
+            resolve_project_layout("my-source", "http", DataOperation::Acquisition)
+        });
+
+        assert!(matches!(
+            result,
+            Err(ForegroundDataExecutionError::InvalidSourceManifest {
+                error: SourceManifestError::UnsupportedSchemaVersion { actual: 1 },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn resolve_project_layout_rejects_mismatched_source_manifest_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        make_valid_project_structure(project_root, "my-source");
+
+        let protocol_root = project_root.join("sources/my-source/http");
+        let manifest = crate::format_source_toml("different-source", "http");
+        fs::write(protocol_root.join("source.toml"), manifest).unwrap();
+
+        let result = with_test_cwd(project_root, || {
+            resolve_project_layout("my-source", "http", DataOperation::Acquisition)
+        });
+
+        assert!(matches!(
+            result,
+            Err(ForegroundDataExecutionError::InvalidSourceManifest {
+                error: SourceManifestError::UnexpectedContractIdentifier { operation: "source", .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn resolve_project_layout_succeeds_with_valid_schema_2_source_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        make_valid_project_structure(project_root, "my-source");
+
+        let protocol_root = project_root.join("sources/my-source/http");
+        let manifest = crate::format_source_toml("my-source", "http");
+        fs::write(protocol_root.join("source.toml"), manifest).unwrap();
+
+        let result = with_test_cwd(project_root, || {
+            resolve_project_layout("my-source", "http", DataOperation::Acquisition)
+        });
+
+        assert!(result.is_ok(), "expected layout to resolve: {result:?}");
+        let (layout, project_name) = result.unwrap();
+        assert_eq!(project_name, "test-project");
+        assert_eq!(layout.source_name(), "my-source");
+        assert_eq!(layout.protocol(), "http");
     }
 }

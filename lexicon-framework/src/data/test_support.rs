@@ -89,6 +89,10 @@ pub(crate) fn build_fake_project(source_name: &str) -> FakeProject {
     .expect("write lexicon.toml");
 
     let protocol_root = project_root.join("sources").join(source_name).join("http");
+    fs::create_dir_all(&protocol_root).expect("create protocol root");
+    let source_toml = crate::format_source_toml(source_name, "http");
+    fs::write(protocol_root.join("source.toml"), source_toml).expect("write source.toml");
+
     fs::create_dir_all(protocol_root.join("data").join("raw")).expect("create data/raw");
     fs::create_dir_all(protocol_root.join("data").join("processed")).expect("create data/processed");
     fs::create_dir_all(protocol_root.join("get-raw-data").join("sessions"))
