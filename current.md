@@ -1,34 +1,225 @@
-Completed milestone: restore truthful contract and specification conformance
-Exact commit tested
-Local uncommitted worktree against branch `truthful-conformance-and-mza` based on commit `9893631` on `main`, verified via containerized podman execution (`lexicon-local-test-image` / `lexicon-local-test`) and native Windows host. Logs at `$env:TEMP\lexicon-verify-logs\cargo-{check,test}.txt`.
-Exact Linux and Windows environments
-* Linux: podman machine `ammachine`, container `lexicon-local-test` (image `lexicon-local-test-image`, x86_64 Linux).
-* Windows: Microsoft Windows 11 host (x86_64-pc-windows-msvc), PowerShell 5.1 / 7.
-Verification result
-* `cargo check --workspace`: passed (exit 0).
-* `cargo test --workspace --quiet`: passed (exit 0).
-  * `lexicon-cli`: 30 passed, 0 failed
-  * `lexicon-core`: 263 passed, 0 failed (all 38 fixture-backed execution tests passing, covering all 12 HTTP recording behavioral invariants)
-  * `lexicon-core-tests` (trybuild UI compile-fail suite): 1 passed (meta-test) + 11 UI compile-fail tests passing
-  * `lexicon-framework`: 144 passed, 0 failed
-  * Doctests: 0 passed, 1 ignored (pre-existing placeholder)
-  * Total automated tests: 438 passed, 0 failed.
-Installed source-create test result
-* `scaffold_generation_uses_embedded_core_identity_without_runtime_git` (`lexicon-framework/src/lib.rs:3484`) passes.
-* Scaffold generation resolves the Core Git revision at compile time via `build.rs` and embeds `EMBEDDED_CORE_GIT_REV` into the binary. It does not inspect `CARGO_MANIFEST_DIR` or run Git at runtime.
-Embedded Core identity
-* Produced by `lexicon-framework/build.rs` using `LEXICON_EMBEDDED_CORE_REV` env override or build-time `git rev-parse HEAD`.
-* Embedded as `pub const EMBEDDED_CORE_GIT_REV: &str = env!("LEXICON_EMBEDDED_CORE_REV");` in `lexicon-framework/src/lib.rs`.
-Selected MZA Protocol 1 revision
-* Protocol: `cargo-bundler-v0.1.0` (MZA Protocol 1), specified in `automation/build_bundle_mza/mza_artifacts.toml`.
-* `lexicon-bundle` simplified to pure MZA Protocol 1 adapter: consumes `include!(env!("MZA_BUNDLE_INPUTS"))`. Lexicon-owned installer reimplementations (`tar`, `xz2`, `winreg`, `windows-sys`, `install.rs`, `envpath.rs`) removed.
-Runtime-information argument verification
-* `RUNTIME_INFORMATION_PROBE_ARGUMENT` updated to canonical normative value `"--lexicon-runtime-info"` (specs.md §22) across `lexicon-core`, `lexicon-framework`, runners, probes, and tests.
-Complete §44 mapping
-* All 65 items across Source Contract, Scaffold and Validation, Build and Publication, HTTP Recording, Checkpoints, Durable Source State, Sessions and Supervision, Processing, and Environment Handling mapped to specific test functions and locations in `workspace/specs/status.md`.
-Skipped or environment-limited tests
-* Single ignored doctest placeholder in `lexicon-cli`.
-* No required tests skipped or falsely converted to success.
-Remaining contract or specification gaps
-* All mandatory requirements across `contract.md` and `specs.md` are verified and tested.
-* Explicitly deferred items remain: Core-owned task queue / `durable-work-v1` (§46), multi-protocol beyond HTTP (§2), and project-wide publication transaction across all sources (§40).
+Current milestone: make background supervision transfer continuous and failure-atomic
+
+Baseline
+
+This milestone applies to repository commit:
+
+8512a2f258383b06877c1929f71228954f3112f4
+
+or a direct descendant containing only work required by this milestone.
+
+The Unified Operator Host topology is structurally implemented, but the current background handoff does not satisfy the continuous-ownership guarantee in workspace/specs/specs.md §30.
+
+Objective
+
+Make:
+
+lexicon data --get <source> --protocol http --bg
+lexicon data --process <source> --protocol http --bg
+
+transfer supervision from the initiating Lexicon process to the spawned lexicon __operator-host without:
+
+* an unowned session interval;
+* ambiguous ownership acknowledgement;
+* a concurrent acquisition race;
+* an unreconciled session on failure;
+* an operator-host process surviving a failed handoff without authority or supervision.
+
+This milestone changes background supervision mechanics only. It does not introduce a Core-owned job queue.
+
+Current defect
+
+The initiating process currently releases its session lease before spawning the operator host:
+
+initiator releases lease
+→ session is temporarily unowned
+→ operator host is spawned
+→ operator host attempts to acquire lease
+
+The initiating process then considers the handoff successful when the session lease appears generally owned.
+
+This is insufficient because:
+
+1. another invocation can acquire the lease during the gap;
+2. ownership is not proven to belong to the spawned operator host;
+3. there is no handoff-specific nonce or successor identity;
+4. spawn failure, early exit, timeout, and inspection failure do not consistently reconcile the prepared session;
+5. dropping the child handle does not terminate or reap a running operator host.
+
+Required implementation
+
+1. Introduce a handoff identity
+
+Every background launch must create an unpredictable, single-use handoff identity.
+
+It must be bound to:
+
+* the session identity;
+* the expected operator-host invocation;
+* the initiating supervisor;
+* one handoff attempt.
+
+An unrelated process that acquires or observes the session lease must not be able to satisfy the acknowledgement.
+
+Do not expose the handoff identity as an ordinary source argument.
+
+2. Preserve continuous authority
+
+Implement one explicit continuous-ownership mechanism allowed by the specification, such as:
+
+* inherited lease authority;
+* an atomic durable successor transfer;
+* an acknowledgement protocol in which the initiator retains authority until the identified operator host is ready;
+* another mechanism with equivalent proof.
+
+There must be no externally observable state in which the session is simply unowned and available to an unrelated invocation.
+
+The implementation must work under the project’s supported Unix and Windows process and locking models. Platform-specific internals are acceptable behind one documented invariant.
+
+3. Require identity-bound acknowledgement
+
+The initiating process may report a successful background start only after it has proof that the particular spawned operator host accepted durable supervision for the expected session.
+
+The following is not sufficient:
+
+the lease currently appears owned
+
+The acknowledgement must establish:
+
+expected session
++ expected handoff identity
++ expected operator-host instance
++ durable supervisory authority
+
+Acknowledgement must be bounded by a timeout.
+
+4. Make failures terminal and deterministic
+
+Handle every failure point explicitly:
+
+* operator-host spawn failure;
+* operator host exits before acknowledgement;
+* acknowledgement timeout;
+* malformed or mismatched acknowledgement;
+* lease-state inspection failure;
+* session persistence failure;
+* ownership-transfer failure.
+
+For each failure:
+
+1. the initiating process must retain or recover sufficient authority to reconcile the session;
+2. the session must end in the appropriate durable terminal state;
+3. a spawned process that lacks acknowledged authority must be terminated and reaped;
+4. no child may continue unsupervised after the initiating command reports handoff failure;
+5. the returned CLI error must identify the handoff stage that failed.
+
+Do not mark the session successful merely because a process disappeared.
+
+5. Preserve public execution semantics
+
+The public interface remains:
+
+[--bg]
+
+--bg selects supervision mode for one top-level acquisition or processing invocation.
+
+Source-owned work items stored under:
+
+get-raw-data/state/
+
+inherit the mode of that invocation. They do not receive individual background flags, and Lexicon does not become their scheduler.
+
+Do not introduce:
+
+* a Core job-queue schema;
+* per-work-item operator hosts;
+* automatic background execution for every source work item;
+* framework interpretation of source phases or source work payloads.
+
+Required tests
+
+Add real multiprocess tests proving:
+
+1. the actual hidden __operator-host path is executed;
+2. the initiator does not release authority before the successor is ready;
+3. acknowledgement is tied to the spawned operator host;
+4. an unrelated lease holder cannot satisfy acknowledgement;
+5. a concurrent Lexicon invocation cannot steal the session during handoff;
+6. successful background start is reported only after durable acknowledgement;
+7. spawn failure produces a terminal reconciled session;
+8. early operator-host exit produces a terminal reconciled session;
+9. acknowledgement timeout terminates and reaps the spawned process;
+10. malformed or mismatched handoff identities are rejected;
+11. successful operator-host execution performs terminal reconciliation when the source child exits;
+12. acquisition and processing use the same supervisory invariant.
+
+A fake executor that merely changes the lease state to Owned is not sufficient evidence.
+
+Where Unix and Windows require different mechanisms, each implementation must receive native platform coverage. Unsupported environments must be reported as skipped by the surrounding workflow, never as passing through an early test return.
+
+Documentation corrections
+
+Update workspace/specs/status.md so that:
+
+* background handoff is not marked conformant until the new tests pass;
+* every “implemented and tested” row names an existing test;
+* prose descriptions and production functions are not listed as tests;
+* the tested commit is recorded exactly;
+* local or temporary logs are not presented as durable repository evidence.
+
+Do not describe the entire repository as contract-complete when this milestone passes.
+
+Verification
+
+Run from a clean checkout of the exact commit being reported:
+
+cargo check --workspace
+cargo test --workspace --quiet
+
+Also run the repository’s containerized verification workflow.
+
+Required native platform testing must cover every platform-specific ownership-transfer implementation.
+
+The completion report must record:
+
+* exact commit SHA;
+* exact commands;
+* pass, failure, and skip counts;
+* operating system and architecture;
+* test names establishing each handoff invariant;
+* the selected continuous-ownership mechanism;
+* how failed operator-host processes are terminated and reaped.
+
+Scope exclusions
+
+Do not include in this milestone:
+
+* foreground signal forwarding;
+* Core-revision identity changes;
+* MZA integration;
+* HTTP recording changes;
+* source-state or work-ledger changes;
+* a Core-owned job queue;
+* dependency-audit infrastructure;
+* installer behavior;
+* unrelated refactoring.
+
+Completion criteria
+
+This milestone is complete only when:
+
+1. no session-ownership gap exists during background handoff;
+2. acknowledgement identifies the expected operator host;
+3. unrelated ownership cannot produce false success;
+4. every handoff failure durably reconciles the session;
+5. failed or timed-out operator hosts cannot remain running unsupervised;
+6. real multiprocess tests cover success, contention, early exit, timeout, and malformed acknowledgement;
+7. acquisition and processing share the same proven invariant;
+8. workspace verification passes on the exact committed state;
+9. conformance documentation describes only demonstrated behavior.
+
+Following milestone
+
+After this milestone passes, replace current.md.
+
+The next milestone should make the embedded Core dependency identity fail closed and prove, through an installed-CLI black-box test, that both generated source workspaces resolve and build against the exact declared Core revision without access to the original checkout or Git executable.
