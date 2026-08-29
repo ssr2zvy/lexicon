@@ -11,3 +11,7 @@
 # automation
 **/mza/
 **/bundles/
+
+# accidental / local-only artifacts
+.github/
+lexicon/

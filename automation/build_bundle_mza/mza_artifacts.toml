@@ -1,22 +1,14 @@
-# Exact Lexicon artifact configuration accepted by the pinned MZA revision.
-# §11 MZA-01 of `current.md`.
-#
-# At the audited MZA commit `d2c2406ed9f83d2de4c7a38fbf1ac3a568d1e410` the
-# accepted artifact shape is `type = "main", name = "lexicon"` and three
-# cross-target triples are pinned here. The `windows-aarch64-gnu` triple is
-# intentionally deferred until the accepted MZA change exposes an exact
-# target-triple field (the audited revision synthesizes a non-existent
-# Rust target triple for that stanza and §11 forbids it).
-#
-# `lexicon-framework` is NOT a standalone artifact here: it is a library
-# linked into the one installed `lexicon` binary.
-
 [[artifact]]
 label = "lexicon_cli"
 crate = "../../../lexicon-cli"
 output_path = "../../../artifacts/"
-type = "main"
-name = "lexicon"
+type = "custom"
+
+[[artifact]]
+label = "lexicon_framework"
+crate = "../../../lexicon-framework"
+output_path = "../../../artifacts/"
+type = "custom"
 
 [[target]]
 label = "linux-x86_64-musl"
@@ -24,25 +16,13 @@ os = "linux"
 arch = "x86_64"
 environment = "musl"
 
-[[target]]
-label = "linux-aarch64-musl"
-os = "linux"
-arch = "aarch64"
-environment = "musl"
-
-[[target]]
-label = "windows-x86_64-gnu"
-os = "windows"
-arch = "x86_64"
-environment = "gnu"
-
 [[bundle]]
 label = "lexicon_bundle"
 crate = "../../../lexicon-bundle"
 output_path = "../../../artifacts/"
-type = "main"
-name = "lexicon-installer"
+type = "custom"
 protocol = "cargo-bundler-v0.1.0"
 inputs = [
     "lexicon_cli",
+    "lexicon_framework",
 ]
