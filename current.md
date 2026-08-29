@@ -1,39 +1,43 @@
-Completed milestone: make background supervision transfer continuous and failure-atomic
-Exact commit tested
-Local uncommitted worktree against branch `continuous-background-supervision-transfer` based on commit `8512a2f` on `main`, containerized verification via podman machine ssh -> podman exec lexicon-local-test (image `lexicon-local-test-image`). Logs written to `$env:TEMP\lexicon-verify-logs\cargo-{check,test}.txt`.
-Operating system and architecture
-* Linux: `Linux x86_64` (podman container `lexicon-local-test` on `ammachine` WSL VM)
-* Windows: `Microsoft Windows 11 x86_64-pc-windows-msvc`
-Verification result
-* `cargo check --workspace`: passed (exit 0).
-* `cargo test --workspace --quiet`: passed (exit 0). Batches in order:
-  * lexicon-cli:                                     30 passed, 0 failed, 0 ignored
-  * lexicon-core:                                   263 passed, 0 failed, 0 ignored
-  * lexicon-core-tests (trybuild UI suite):           1 passed (meta-test), 0 failed; 11 ui compile-fail tests pass
-  * lexicon-framework:                             147 passed, 0 failed, 0 ignored (up from 144; +3 new background supervision transfer tests)
-  * doctests:                                         0 / 0 / 1 ignored (pre-existing placeholder)
-  * Total automated tests:                           441 passed, 0 failed.
-Selected continuous-ownership mechanism
-* Single-use unguessable handoff token (`HandoffIntentDocumentV1`) written to session directory while the initiator holds the `session.lock` lease.
-* `OperatorHostInvocationV1` carries `handoff_token` to the spawned `__operator-host`.
-* Operator host verifies `handoff_intent.json` against its invocation token, writes `handoff_ack.json` (`HandoffAcknowledgementDocumentV1` with `session_id`, `handoff_token`, and its PID), and waits on `session.lock`.
-* Initiator verifies `handoff_ack.json` matching the session, token, and spawned child PID. Upon verification, initiator yields `session.lock` directly to the waiting operator host, which acquires it without an unowned gap.
-How failed operator-host processes are terminated and reaped
-* On acknowledgement timeout, acknowledgement mismatch, or early child exit: initiator retains lease authority, kills the spawned child (`child.kill()`), reaps it (`child.wait()`), and reconciles the prepared session to `Failed` via `prepared.fail_launch`.
-Test names establishing each handoff invariant
-* `successful_handoff_returns_outcome_once_lease_is_owned` (`lexicon-framework/src/data/background.rs:606`): verifies complete successful handoff with acknowledgement and continuous lease transfer.
-* `operator_host_exiting_before_ownership_is_a_typed_error` (`lexicon-framework/src/data/background.rs:641`): verifies that host exit before acknowledgement produces `OperatorHostExitedBeforeOwnership` and cleans up.
-* `ownership_timeout_is_a_typed_error` (`lexicon-framework/src/data/background.rs:661`): verifies timeout kills/reaps host, transitions session to `Failed`, and returns `OperatorHostOwnershipTimeout`.
-* `re_exec_spawn_failure_is_a_typed_error` (`lexicon-framework/src/data/background.rs:681`): verifies spawn failure produces `OperatorHostReExec` and reconciles session.
-* `operator_host_rejects_missing_or_mismatched_handoff_token` (`lexicon-framework/src/data/background.rs:761`): verifies unauthorized operator host invocation without matching handoff intent is rejected with `OperatorHostUnauthorizedHandoff`.
-* `mismatched_acknowledgement_token_fails_handoff` (`lexicon-framework/src/data/background.rs:801`): verifies corrupted/mismatched acknowledgement token causes handoff rejection with `OperatorHostAcknowledgementMismatch`.
-* `processing_background_handoff_succeeds` (`lexicon-framework/src/data/background.rs:835`): verifies processing operations share the exact same background handoff invariant.
-* `operator_host_rejects_a_session_that_is_no_longer_prepared` (`lexicon-framework/src/data/background.rs:708`): verifies operator host rejects sessions that are no longer `Prepared`.
-Confirmations
-* No session-ownership gap exists during background handoff.
-* Acknowledgement identifies the expected operator host by token and PID.
-* Unrelated ownership cannot produce false success.
-* Every handoff failure durably reconciles the session to `Failed`.
-* Failed or timed-out operator hosts are killed and reaped.
-Following milestone
-The following milestone should be derived from the updated contract and specification once this one lands. Candidate: fail-closed embedded Core dependency identity with installed-CLI black-box test proving source workspaces resolve and build without access to original checkout or Git.
+Current milestone: make embedded Core dependency identity fail closed and verify installed-CLI standalone execution
+Objective
+Ensure that the embedded Core dependency identity (specs.md §8) fails closed at compile time (rejecting missing, empty, or all-zero revisions in `lexicon-framework/build.rs`), and verify through an installed-CLI black-box test that both generated source workspaces resolve and build against the exact declared Core revision without access to the original checkout, `CARGO_MANIFEST_DIR`, or Git executable.
+This milestone is derived from:
+contract.md §4 (installed and linked components);
+specs.md §8 (embedded Core dependency identity: must be embedded at Lexicon build time, must not inspect CARGO_MANIFEST_DIR, must not run git rev-parse, must not require Git on operator machines);
+specs.md §44 (Scaffold and validation: installed scaffold generation without original Git checkout);
+the prior milestone's completion report identifying fail-closed build-time resolution as the next candidate.
+Repository-grounded starting point
+`lexicon-framework/build.rs` currently falls back to `0000000000000000000000000000000000000000` if Git fails or `LEXICON_EMBEDDED_CORE_REV` is unset. This fails open rather than failing closed at build time.
+Scaffold generation in `lexicon-framework/src/lib.rs` uses `pub const EMBEDDED_CORE_GIT_REV: &str = env!("LEXICON_EMBEDDED_CORE_REV");` to write `get-raw-data/Cargo.toml` and `process-data/Cargo.toml`.
+Required implementation
+1. Make build.rs fail closed
+In `lexicon-framework/build.rs`:
+* If `LEXICON_EMBEDDED_CORE_REV` is set, validate that it is a non-empty, valid hex commit SHA (40 characters) or valid version tag. Reject all-zeros (`00000000...`) or empty strings.
+* If unset, run `git rev-parse HEAD`. If Git fails or returns a non-40-hex string, panic during `build.rs` with an actionable compile error instructing how to provide `LEXICON_EMBEDDED_CORE_REV`.
+* Under no circumstances emit a dummy fallback or placeholder string.
+2. Validate embedded revision format
+In `lexicon-framework/src/lib.rs`:
+* Add compile-time or startup validation verifying `EMBEDDED_CORE_GIT_REV` is not empty, not all zeros, and is a valid 40-character hex revision.
+3. End-to-end installed-CLI standalone test
+Add a test (in `lexicon-cli` or `lexicon-framework` integration tests) that:
+* Uses the built `lexicon` binary in a clean temporary directory outside the repository;
+* Verifies `lexicon init <parent> <project>` succeeds;
+* Verifies `lexicon source create <source> --protocol http` succeeds without running Git or inspecting `CARGO_MANIFEST_DIR`;
+* Asserts that both generated workspaces (`get-raw-data/Cargo.toml` and `process-data/Cargo.toml`) contain `rev = "<embedded_rev>"`;
+* Asserts that `get-raw-data/Cargo.lock` and `process-data/Cargo.lock` were generated and exist.
+Scope constraints
+Do not implement during this milestone:
+* changes to runtime admission or HTTP execution;
+* changes to background supervision;
+* MZA release packaging changes;
+* second-protocol support.
+Completion criteria
+This milestone is complete only when:
+* `lexicon-framework/build.rs` fails closed when no valid Core Git revision can be resolved;
+* `EMBEDDED_CORE_GIT_REV` is guaranteed to be a valid 40-character hex revision;
+* the installed-CLI standalone test verifies source creation outside the repo;
+* `cargo check --workspace` passes;
+* `cargo test --workspace --quiet` passes;
+* no production contract is weakened.
+Completion report
+When the milestone passes, replace this file with a concise report and continue the loop.
