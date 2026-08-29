@@ -44,6 +44,7 @@ pub struct OperatorHostInvocationV1 {
     protocol: String,
     operation: DataOperation,
     session: SessionIdentity,
+    handoff_token: String,
 }
 
 impl OperatorHostInvocationV1 {
@@ -52,12 +53,14 @@ impl OperatorHostInvocationV1 {
         protocol: impl Into<String>,
         operation: DataOperation,
         session: SessionIdentity,
+        handoff_token: impl Into<String>,
     ) -> Self {
         Self {
             source_name: source_name.into(),
             protocol: protocol.into(),
             operation,
             session,
+            handoff_token: handoff_token.into(),
         }
     }
 
@@ -77,6 +80,10 @@ impl OperatorHostInvocationV1 {
         &self.session
     }
 
+    pub fn handoff_token(&self) -> &str {
+        &self.handoff_token
+    }
+
     pub fn to_json(&self) -> Result<String, OperatorHostInvocationEncodingError> {
         let document = OperatorHostInvocationDocumentV1 {
             schema_version: OPERATOR_HOST_INVOCATION_SCHEMA_VERSION,
@@ -84,6 +91,7 @@ impl OperatorHostInvocationV1 {
             protocol: self.protocol.clone(),
             operation: operation_identifier(self.operation).to_string(),
             session_id: self.session.id().to_string(),
+            handoff_token: self.handoff_token.clone(),
         };
 
         serde_json::to_string(&document)
@@ -124,6 +132,7 @@ impl OperatorHostInvocationV1 {
             protocol: document.protocol,
             operation,
             session,
+            handoff_token: document.handoff_token,
         })
     }
 }
@@ -151,6 +160,8 @@ struct OperatorHostInvocationDocumentV1 {
     protocol: String,
     operation: String,
     session_id: String,
+    #[serde(default)]
+    handoff_token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +228,7 @@ mod tests {
             "http",
             DataOperation::Acquisition,
             SessionIdentity::new("session-abc").unwrap(),
+            "token-123",
         );
 
         let json = reference.to_json().unwrap();
@@ -262,11 +274,13 @@ mod tests {
             "http",
             DataOperation::Processing,
             SessionIdentity::new("session-xyz").unwrap(),
+            "token-xyz",
         );
         let json = reference.to_json().unwrap();
         let decoded = OperatorHostInvocationV1::from_json(&json).unwrap();
         assert_eq!(decoded.operation(), DataOperation::Processing);
         assert_eq!(decoded.protocol(), "http");
+        assert_eq!(decoded.handoff_token(), "token-xyz");
     }
 
     #[test]

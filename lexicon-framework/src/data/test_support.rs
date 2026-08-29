@@ -103,9 +103,7 @@ pub(crate) fn build_fake_project(source_name: &str) -> FakeProject {
     let acquisition_bundle_dir = protocol_root.join("get-raw-data").join("runtime");
     let processing_bundle_dir = protocol_root.join("process-data").join("runtime");
     write_fake_http_bundle(&acquisition_bundle_dir, source_name);
-    // Processing operation layout resolution only requires the directory to exist;
-    // no test in this milestone admits a processing bundle.
-    fs::create_dir_all(&processing_bundle_dir).expect("create process-data/runtime");
+    write_fake_processing_bundle(&processing_bundle_dir, source_name);
 
     FakeProject {
         _root: root,
@@ -164,6 +162,45 @@ fn write_fake_http_bundle(bundle_dir: &Path, source_name: &str) {
     // trailing `\n`, no `\r`, and no leading/trailing whitespace inside the payload.
     // `serde_json::to_vec` alone produces no trailing newline at all, which
     // `validate_manifest_text` rejects as `InvalidBoundary`.
+    let mut manifest_bytes = serde_json::to_vec(&manifest).expect("serialize manifest");
+    manifest_bytes.push(b'\n');
+    fs::write(bundle_dir.join("runtime.json"), manifest_bytes).expect("write runtime.json");
+}
+
+/// Write a real, admissible processing runtime bundle into `bundle_dir`.
+fn write_fake_processing_bundle(bundle_dir: &Path, source_name: &str) {
+    fs::create_dir_all(bundle_dir).expect("create processing bundle dir");
+
+    let executable_name = "fake-processing-runtime";
+    let executable_path = bundle_dir.join(executable_name);
+    fs::write(&executable_path, b"fake-processing-executable-bytes-for-tests").expect("write executable");
+
+    let artifact = hash_runtime_executable(&executable_path).expect("hash executable");
+
+    let contract_version = lexicon_core::processing::ProcessingSourceContractV1::CONTRACT_VERSION;
+    let runtime_information = serde_json::json!({
+        "schema_version": 1,
+        "identity": {
+            "source": source_name,
+            "protocol": "http",
+            "operation": "processing",
+            "source_contract_version": contract_version,
+        },
+        "descriptor": {
+            "contract_version": contract_version,
+        },
+    });
+
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "artifact": {
+            "executable": executable_name,
+            "size": artifact.size(),
+            "sha256": artifact.sha256(),
+        },
+        "runtime_information": runtime_information,
+    });
+
     let mut manifest_bytes = serde_json::to_vec(&manifest).expect("serialize manifest");
     manifest_bytes.push(b'\n');
     fs::write(bundle_dir.join("runtime.json"), manifest_bytes).expect("write runtime.json");

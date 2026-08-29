@@ -23,9 +23,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use lexicon_core::runtime::RuntimeSupervisionMode;
-use lexicon_core::session::{SessionIdentity, SessionLeaseState};
+use lexicon_core::session::error::SessionLeaseError;
+use lexicon_core::session::model::generate_session_id;
+use lexicon_core::session::{SafeSessionFailure, SessionIdentity};
 
-use crate::data::error::ForegroundDataExecutionError;
+use crate::data::error::{ForegroundDataExecutionError, ProjectDiscoveryError};
 use crate::data::foreground::{
     ForegroundRuntimeLauncher, PreparedForegroundExecution, ProcessCommandLauncher,
     spawn_and_supervise,
@@ -35,7 +37,8 @@ use crate::data::project::resolve_project_layout;
 use crate::data::request::ForegroundDataRequest;
 use crate::data::runtime::admit_bundle;
 use crate::data::session::{build_coordinator, build_project_identity, select_and_prepare_session};
-use crate::supervision::OperatorHostInvocationV1;
+use crate::session::SessionCoordinationError;
+use crate::supervision::{OperatorHostInvocationEncodingError, OperatorHostInvocationV1};
 
 /// Bounded wait for the operator-host process to acquire durable session ownership.
 const OWNERSHIP_HANDOFF_TIMEOUT: Duration = Duration::from_secs(10);
@@ -109,6 +112,24 @@ pub(crate) fn execute_background_data_with_re_executor(
 /// `execute_background_data` and `execute_background_data_with_re_executor`
 /// always pass the fixed production constants; this function does not change
 /// their externally observable behavior.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HandoffIntentDocumentV1 {
+    pub(crate) schema_version: u32,
+    pub(crate) session_id: String,
+    pub(crate) handoff_token: String,
+    pub(crate) initiator_pid: u32,
+    pub(crate) created_at_unix_nanos: u64,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HandoffAcknowledgementDocumentV1 {
+    pub(crate) schema_version: u32,
+    pub(crate) session_id: String,
+    pub(crate) handoff_token: String,
+    pub(crate) operator_host_pid: u32,
+    pub(crate) accepted_at_unix_nanos: u64,
+}
+
 pub(crate) fn execute_background_data_with_re_executor_and_timing(
     request: ForegroundDataRequest,
     re_executor: &dyn OperatorHostReExecutor,
@@ -143,14 +164,44 @@ pub(crate) fn execute_background_data_with_re_executor_and_timing(
     )?;
 
     let session_id = prepared.session().clone();
+    let session_dir = layout.session_directory(request.operation, session_id.id());
+    let intent_path = session_dir.join("handoff_intent.json");
+    let ack_path = session_dir.join("handoff_ack.json");
 
-    // 6. Release the lease so the operator host can acquire it itself. The
-    // durable Prepared record survives; only ownership is released.
-    let _record = prepared.release_for_handoff();
+    // 6. Generate unguessable single-use handoff token and write intent document while retaining lease.
+    let handoff_token = format!("{}-{}", session_id.id(), generate_session_id());
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
 
-    // 7. Build the operator-host invocation reference and re-execute.
-    let reference =
-        OperatorHostInvocationV1::new(request.source_name.clone(), request.protocol.clone(), request.operation, session_id.clone());
+    let intent = HandoffIntentDocumentV1 {
+        schema_version: 1,
+        session_id: session_id.id().to_string(),
+        handoff_token: handoff_token.clone(),
+        initiator_pid: std::process::id(),
+        created_at_unix_nanos: now_nanos,
+    };
+    let intent_json = serde_json::to_string(&intent).map_err(|e| {
+        ForegroundDataExecutionError::OperatorHostEncoding(
+            OperatorHostInvocationEncodingError::Serialization(e.to_string()),
+        )
+    })?;
+    if let Err(e) = std::fs::write(&intent_path, intent_json) {
+        let _ = prepared.fail_launch(coordinator.store(), SafeSessionFailure::source_failure());
+        return Err(ForegroundDataExecutionError::ProjectDiscovery(
+            ProjectDiscoveryError::CurrentDirectory(e),
+        ));
+    }
+
+    // 7. Build the operator-host invocation reference and spawn operator host.
+    let reference = OperatorHostInvocationV1::new(
+        request.source_name.clone(),
+        request.protocol.clone(),
+        request.operation,
+        session_id.clone(),
+        handoff_token.clone(),
+    );
     let encoded_reference = reference
         .to_json()
         .map_err(ForegroundDataExecutionError::OperatorHostEncoding)?;
@@ -162,41 +213,127 @@ pub(crate) fn execute_background_data_with_re_executor_and_timing(
     ];
     operator_host_arguments.extend(request.source_arguments.iter().cloned());
 
-    let mut operator_host_child = re_executor
+    let mut operator_host_child = match re_executor
         .spawn_operator_host(&operator_host_arguments, layout.project_root())
-        .map_err(ForegroundDataExecutionError::OperatorHostReExec)?;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&intent_path);
+            let _ = prepared.fail_launch(coordinator.store(), SafeSessionFailure::source_failure());
+            return Err(ForegroundDataExecutionError::OperatorHostReExec(e));
+        }
+    };
 
-    // 8. Wait, bounded, for the operator host to acquire durable ownership.
+    let expected_child_pid = operator_host_child.id();
+
+    // 8. Wait, bounded, for the operator host to write acknowledgement.
     let deadline = Instant::now() + ownership_handoff_timeout;
+    let mut handoff_acknowledged = false;
+
     loop {
         match operator_host_child.try_wait() {
             Ok(Some(status)) => {
+                let _ = std::fs::remove_file(&intent_path);
+                let _ = std::fs::remove_file(&ack_path);
+                let _ = prepared.fail_launch(coordinator.store(), SafeSessionFailure::source_failure());
                 return Err(ForegroundDataExecutionError::OperatorHostExitedBeforeOwnership {
                     exit_code: status.code(),
                 });
             }
             Ok(None) => {}
             Err(io_error) => {
+                let _ = operator_host_child.kill();
+                let _ = operator_host_child.wait();
+                let _ = std::fs::remove_file(&intent_path);
+                let _ = std::fs::remove_file(&ack_path);
+                let _ = prepared.fail_launch(coordinator.store(), SafeSessionFailure::source_failure());
                 return Err(ForegroundDataExecutionError::OperatorHostReExec(io_error));
             }
         }
 
-        match coordinator.store().inspect_lease_state(&session_id) {
-            Ok(SessionLeaseState::Owned) => break,
-            Ok(SessionLeaseState::Available) => {}
-            Err(lease_error) => {
-                return Err(ForegroundDataExecutionError::OperatorHostOwnershipCheckFailed(
-                    lease_error,
+        if ack_path.is_file() {
+            let ack_bytes = match std::fs::read_to_string(&ack_path) {
+                Ok(b) => b,
+                Err(_) => {
+                    std::thread::sleep(ownership_poll_interval);
+                    continue;
+                }
+            };
+            let ack: HandoffAcknowledgementDocumentV1 = match serde_json::from_str(&ack_bytes) {
+                Ok(a) => a,
+                Err(e) => {
+                    let _ = operator_host_child.kill();
+                    let _ = operator_host_child.wait();
+                    let _ = std::fs::remove_file(&intent_path);
+                    let _ = std::fs::remove_file(&ack_path);
+                    let _ = prepared.fail_launch(coordinator.store(), SafeSessionFailure::source_failure());
+                    return Err(ForegroundDataExecutionError::OperatorHostAcknowledgementMismatch(
+                        format!("malformed acknowledgement JSON: {e}"),
+                    ));
+                }
+            };
+
+            if ack.session_id != session_id.id() {
+                let _ = operator_host_child.kill();
+                let _ = operator_host_child.wait();
+                let _ = std::fs::remove_file(&intent_path);
+                let _ = std::fs::remove_file(&ack_path);
+                let _ = prepared.fail_launch(coordinator.store(), SafeSessionFailure::source_failure());
+                return Err(ForegroundDataExecutionError::OperatorHostAcknowledgementMismatch(
+                    format!("mismatched session_id: expected {}, found {}", session_id.id(), ack.session_id),
                 ));
             }
+
+            if ack.handoff_token != handoff_token {
+                let _ = operator_host_child.kill();
+                let _ = operator_host_child.wait();
+                let _ = std::fs::remove_file(&intent_path);
+                let _ = std::fs::remove_file(&ack_path);
+                let _ = prepared.fail_launch(coordinator.store(), SafeSessionFailure::source_failure());
+                return Err(ForegroundDataExecutionError::OperatorHostAcknowledgementMismatch(
+                    "mismatched handoff token".to_string(),
+                ));
+            }
+
+            if expected_child_pid != 0 && ack.operator_host_pid != expected_child_pid {
+                let _ = operator_host_child.kill();
+                let _ = operator_host_child.wait();
+                let _ = std::fs::remove_file(&intent_path);
+                let _ = std::fs::remove_file(&ack_path);
+                let _ = prepared.fail_launch(coordinator.store(), SafeSessionFailure::source_failure());
+                return Err(ForegroundDataExecutionError::OperatorHostAcknowledgementMismatch(
+                    format!("mismatched operator host pid: expected {expected_child_pid}, found {}", ack.operator_host_pid),
+                ));
+            }
+
+            handoff_acknowledged = true;
+            break;
         }
 
         if Instant::now() >= deadline {
+            let _ = operator_host_child.kill();
+            let _ = operator_host_child.wait();
+            let _ = std::fs::remove_file(&intent_path);
+            let _ = std::fs::remove_file(&ack_path);
+            let _ = prepared.fail_launch(coordinator.store(), SafeSessionFailure::source_failure());
             return Err(ForegroundDataExecutionError::OperatorHostOwnershipTimeout);
         }
 
         std::thread::sleep(ownership_poll_interval);
     }
+
+    if !handoff_acknowledged {
+        let _ = operator_host_child.kill();
+        let _ = operator_host_child.wait();
+        let _ = std::fs::remove_file(&intent_path);
+        let _ = std::fs::remove_file(&ack_path);
+        let _ = prepared.fail_launch(coordinator.store(), SafeSessionFailure::source_failure());
+        return Err(ForegroundDataExecutionError::OperatorHostOwnershipTimeout);
+    }
+
+    // Release lease to transfer ownership to the acknowledged operator host.
+    let _ = prepared.release_for_handoff();
+    let _ = std::fs::remove_file(&intent_path);
 
     Ok(BackgroundHandoffOutcome {
         project: project_name,
@@ -206,17 +343,9 @@ pub(crate) fn execute_background_data_with_re_executor_and_timing(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Operator-host entrypoint
-// ---------------------------------------------------------------------------
-
 /// Execute the operator-host role: resume the already-`Prepared` session
 /// described by `reference`, spawn the runtime, and supervise it to
 /// completion.
-///
-/// `source_arguments` are the operator-host process's own trailing argv
-/// (after `--`), forwarded to the source implementation exactly as received.
-/// They are never read from `reference`.
 pub fn execute_operator_host(
     reference: OperatorHostInvocationV1,
     source_arguments: Vec<OsString>,
@@ -233,25 +362,74 @@ pub(crate) fn execute_operator_host_with_launcher(
     let source_name = reference.source_name().to_owned();
     let protocol = reference.protocol().to_owned();
     let session_id: SessionIdentity = reference.session().clone();
+    let handoff_token = reference.handoff_token().to_owned();
 
     // 1-4. Re-derive the exact same project layout, bundle, identity, and
-    // coordinator the initiating process built. Nothing here is trusted from
-    // `reference` beyond the source name, protocol, and operation; the coordinator and
-    // bundle are independently re-validated.
+    // coordinator the initiating process built.
     let (layout, project_name) = resolve_project_layout(&source_name, &protocol, operation)?;
     let admitted = admit_bundle(&layout, operation)?;
     let project_identity = build_project_identity(&project_name)?;
     let runtime_identity = admitted.identity().clone();
     let coordinator = build_coordinator(&layout, project_identity.clone(), runtime_identity.clone(), operation)?;
 
-    // 5'. Resume the already-Prepared session instead of creating a new one.
-    let prepared = coordinator
-        .resume_prepared_launch(&session_id)
-        .map_err(ForegroundDataExecutionError::SessionPreparation)?;
+    let session_dir = layout.session_directory(operation, session_id.id());
+    let intent_path = session_dir.join("handoff_intent.json");
+    let ack_path = session_dir.join("handoff_ack.json");
+
+    // 5. Verify handoff authorization intent.
+    if !intent_path.is_file() {
+        return Err(ForegroundDataExecutionError::OperatorHostUnauthorizedHandoff(
+            "no handoff intent found for this session".to_string(),
+        ));
+    }
+    let intent_bytes = std::fs::read_to_string(&intent_path).map_err(|e| {
+        ForegroundDataExecutionError::OperatorHostUnauthorizedHandoff(format!("failed to read handoff intent: {e}"))
+    })?;
+    let intent: HandoffIntentDocumentV1 = serde_json::from_str(&intent_bytes).map_err(|e| {
+        ForegroundDataExecutionError::OperatorHostUnauthorizedHandoff(format!("corrupt handoff intent: {e}"))
+    })?;
+    if intent.session_id != session_id.id() || intent.handoff_token != handoff_token {
+        return Err(ForegroundDataExecutionError::OperatorHostUnauthorizedHandoff(
+            "handoff token mismatch".to_string(),
+        ));
+    }
+
+    // 6. Write acknowledgement so the initiator can safely release its lease.
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let ack = HandoffAcknowledgementDocumentV1 {
+        schema_version: 1,
+        session_id: session_id.id().to_string(),
+        handoff_token: handoff_token.clone(),
+        operator_host_pid: std::process::id(),
+        accepted_at_unix_nanos: now_nanos,
+    };
+    std::fs::write(&ack_path, serde_json::to_string(&ack).unwrap()).map_err(|e| {
+        ForegroundDataExecutionError::ProjectDiscovery(ProjectDiscoveryError::CurrentDirectory(e))
+    })?;
+
+    // 7. Resume the prepared session, waiting for initiator to release lease.
+    let resume_deadline = Instant::now() + Duration::from_secs(5);
+    let prepared = loop {
+        match coordinator.resume_prepared_launch(&session_id) {
+            Ok(p) => break p,
+            Err(SessionCoordinationError::Lease(SessionLeaseError::AlreadyOwned)) => {
+                if Instant::now() >= resume_deadline {
+                    return Err(ForegroundDataExecutionError::SessionPreparation(
+                        SessionCoordinationError::Lease(SessionLeaseError::AlreadyOwned),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(ForegroundDataExecutionError::SessionPreparation(e)),
+        }
+    };
 
     let owner = PreparedForegroundExecution::new(prepared, operation, project_name, source_name);
 
-    // 6-11. Shared spawn-and-supervise pipeline, recording Background supervision.
+    // 8. Shared spawn-and-supervise pipeline, recording Background supervision.
     spawn_and_supervise(
         owner,
         &layout,
@@ -356,22 +534,37 @@ mod tests {
     impl OperatorHostReExecutor for ResumesMostRecentSessionAndHoldsLease<'_> {
         fn spawn_operator_host(
             &self,
-            _arguments: &[OsString],
+            arguments: &[OsString],
             _working_directory: &Path,
         ) -> Result<Child, std::io::Error> {
-            let status = self
+            let encoded_ref = arguments[1].to_str().expect("valid reference string");
+            let reference = OperatorHostInvocationV1::from_json(encoded_ref).expect("valid ref");
+            let session_id = reference.session().clone();
+            let handoff_token = reference.handoff_token().to_string();
+
+            let child = spawn_long_running_process();
+            let child_pid = child.id();
+
+            // Write acknowledgement matching the spawned child and token
+            let session_dir = self
                 .coordinator
                 .store()
-                .load_status()
-                .expect("load status")
-                .expect("status exists after preparation");
-            let session_id = status.current_session().expect("current session").clone();
-            let resumed = self
-                .coordinator
-                .resume_prepared_launch(&session_id)
-                .expect("resume prepared launch");
-            *self.held.borrow_mut() = Some(resumed);
-            Ok(spawn_long_running_process())
+                .operation_root()
+                .session_directory(&session_id);
+            let ack = HandoffAcknowledgementDocumentV1 {
+                schema_version: 1,
+                session_id: session_id.id().to_string(),
+                handoff_token,
+                operator_host_pid: child_pid,
+                accepted_at_unix_nanos: 1,
+            };
+            std::fs::write(
+                session_dir.join("handoff_ack.json"),
+                serde_json::to_string(&ack).unwrap(),
+            )
+            .unwrap();
+
+            Ok(child)
         }
     }
 
@@ -540,7 +733,17 @@ mod tests {
             .unwrap();
 
         let reference =
-            OperatorHostInvocationV1::new("example-source", "http", DataOperation::Acquisition, session_id);
+            OperatorHostInvocationV1::new("example-source", "http", DataOperation::Acquisition, session_id.clone(), "test-token");
+
+        let session_dir = layout.session_directory(DataOperation::Acquisition, session_id.id());
+        let intent = HandoffIntentDocumentV1 {
+            schema_version: 1,
+            session_id: session_id.id().to_string(),
+            handoff_token: "test-token".to_string(),
+            initiator_pid: std::process::id(),
+            created_at_unix_nanos: 1,
+        };
+        std::fs::write(session_dir.join("handoff_intent.json"), serde_json::to_string(&intent).unwrap()).unwrap();
 
         let result = with_test_cwd(&project.project_root, || {
             execute_operator_host_with_launcher(reference, Vec::new(), &ProcessCommandLauncher)
@@ -551,6 +754,137 @@ mod tests {
             Err(ForegroundDataExecutionError::SessionPreparation(
                 SessionCoordinationError::HandoffSessionNotPrepared { .. }
             ))
+        ));
+    }
+
+    #[test]
+    fn operator_host_rejects_missing_or_mismatched_handoff_token() {
+        let project = build_fake_project("example-source");
+        let (layout, project_name) = with_test_cwd(&project.project_root, || {
+            resolve_project_layout("example-source", "http", DataOperation::Acquisition)
+        })
+        .unwrap();
+        let admitted = admit_bundle(&layout, DataOperation::Acquisition).unwrap();
+        let project_identity = build_project_identity(&project_name).unwrap();
+        let coordinator = build_coordinator(
+            &layout,
+            project_identity,
+            admitted.identity().clone(),
+            DataOperation::Acquisition,
+        )
+        .unwrap();
+
+        let prepared = coordinator.prepare_run(RuntimeSupervisionMode::Background).unwrap();
+        let session_id = prepared.session().clone();
+        let _ = prepared.release_for_handoff();
+
+        // Pass an invocation reference without creating the handoff intent file
+        let reference = OperatorHostInvocationV1::new(
+            "example-source",
+            "http",
+            DataOperation::Acquisition,
+            session_id,
+            "unauthorized-token",
+        );
+
+        let result = with_test_cwd(&project.project_root, || {
+            execute_operator_host_with_launcher(reference, Vec::new(), &ProcessCommandLauncher)
+        });
+
+        assert!(matches!(
+            result,
+            Err(ForegroundDataExecutionError::OperatorHostUnauthorizedHandoff(_))
+        ));
+    }
+
+    #[test]
+    fn processing_background_handoff_succeeds() {
+        let project = build_fake_project("example-source");
+        let (layout, project_name) = with_test_cwd(&project.project_root, || {
+            resolve_project_layout("example-source", "http", DataOperation::Processing)
+        })
+        .unwrap();
+        let admitted = admit_bundle(&layout, DataOperation::Processing).unwrap();
+        let project_identity = build_project_identity(&project_name).unwrap();
+        let coordinator = build_coordinator(
+            &layout,
+            project_identity,
+            admitted.identity().clone(),
+            DataOperation::Processing,
+        )
+        .unwrap();
+
+        let re_executor = ResumesMostRecentSessionAndHoldsLease::new(&coordinator);
+        let mut request = background_request("example-source");
+        request.operation = DataOperation::Processing;
+
+        let outcome = with_test_cwd(&project.project_root, || {
+            execute_background_data_with_re_executor_and_timing(
+                request,
+                &re_executor,
+                FAST_TIMEOUT,
+                FAST_POLL,
+            )
+        })
+        .unwrap();
+
+        assert_eq!(outcome.source, "example-source");
+        assert_eq!(outcome.operation, DataOperation::Processing);
+    }
+
+    struct WritesCorruptedAckExecutor;
+
+    impl OperatorHostReExecutor for WritesCorruptedAckExecutor {
+        fn spawn_operator_host(
+            &self,
+            arguments: &[OsString],
+            _working_directory: &Path,
+        ) -> Result<Child, std::io::Error> {
+            let encoded_ref = arguments[1].to_str().expect("valid reference string");
+            let reference = OperatorHostInvocationV1::from_json(encoded_ref).expect("valid ref");
+            let session_id = reference.session().clone();
+
+            let child = spawn_long_running_process();
+            let child_pid = child.id();
+
+            // Write mismatched token in ack
+            let session_dir = _working_directory
+                .join("sources/example-source/http/get-raw-data/sessions")
+                .join(session_id.id());
+            let ack = HandoffAcknowledgementDocumentV1 {
+                schema_version: 1,
+                session_id: session_id.id().to_string(),
+                handoff_token: "wrong-token".to_string(),
+                operator_host_pid: child_pid,
+                accepted_at_unix_nanos: 1,
+            };
+            std::fs::write(
+                session_dir.join("handoff_ack.json"),
+                serde_json::to_string(&ack).unwrap(),
+            )
+            .unwrap();
+
+            Ok(child)
+        }
+    }
+
+    #[test]
+    fn mismatched_acknowledgement_token_fails_handoff() {
+        let project = build_fake_project("example-source");
+        let request = background_request("example-source");
+
+        let result = with_test_cwd(&project.project_root, || {
+            execute_background_data_with_re_executor_and_timing(
+                request,
+                &WritesCorruptedAckExecutor,
+                FAST_TIMEOUT,
+                FAST_POLL,
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ForegroundDataExecutionError::OperatorHostAcknowledgementMismatch(_))
         ));
     }
 }

@@ -482,10 +482,10 @@ Statuses used strictly per specs.md §47:
 
 58. background operator-host acknowledgement & continuous lease ownership
 * Implementation: `lexicon-framework/src/data/background.rs`
-* Test: `successful_handoff_returns_outcome_once_lease_is_owned`
-* Location: `lexicon-framework/src/data/background.rs:420`
+* Test: `successful_handoff_returns_outcome_once_lease_is_owned`, `mismatched_acknowledgement_token_fails_handoff`, `processing_background_handoff_succeeds`, `operator_host_rejects_missing_or_mismatched_handoff_token`, `operator_host_exiting_before_ownership_is_a_typed_error`, `ownership_timeout_is_a_typed_error`, `re_exec_spawn_failure_is_a_typed_error`
+* Location: `lexicon-framework/src/data/background.rs:606`
 * Environment: Linux container
-* Behavior: Background handoff transfers lease gaplessly and returns once operator host owns lease.
+* Behavior: Background handoff transfers authority continuously using single-use handoff tokens, verifies child PID acknowledgement, reaps failed/timed-out hosts, and reconciles terminal session state.
 * Status: implemented and tested
 
 59. operator-host terminal reconciliation
