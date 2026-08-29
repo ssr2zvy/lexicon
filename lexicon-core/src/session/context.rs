@@ -283,7 +283,13 @@ impl SessionDataPaths {
         }
     }
 
-    pub fn from_legacy_parts(
+    /// Test-only constructor that mirrors the pre-COREID-03 public
+    /// signature. Production code MUST go through [`Self::from_context_paths`]
+    /// with a validated `RuntimeContextPaths` so the acquisition state
+    /// directory is always populated for acquisition-side contexts.
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn from_legacy_parts(
         protocol_root: std::path::PathBuf,
         operation_root: std::path::PathBuf,
         session_directory: std::path::PathBuf,

@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "advisories": [],
+  "comment": "Populate by `cargo audit --json` against the curated advisory database. The hardened build producer refuses to run without advisories.json present; the offline producer refuses to fabricate content."
+}

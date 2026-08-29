@@ -7,8 +7,16 @@ fn is_valid_git_rev(s: &str) -> bool {
         && !s.chars().all(|c| c == '0')
 }
 
+const EXPECTED_CORE_GIT_URL: &str = "https://github.com/ssr2zvy/lexicon";
+
 fn main() {
     println!("cargo:rerun-if-env-changed=LEXICON_EMBEDDED_CORE_REV");
+    println!("cargo:rerun-if-env-changed=LEXICON_EMBEDDED_CORE_URL");
+    println!("cargo:rerun-if-changed=../lexicon-core");
+
+    // COREID-01: emit the canonical Core URL alongside the revision so
+    // generated source workspaces interpolate both from one constant.
+    println!("cargo:rustc-env=LEXICON_EMBEDDED_CORE_URL={EXPECTED_CORE_GIT_URL}");
 
     if let Ok(rev) = std::env::var("LEXICON_EMBEDDED_CORE_REV") {
         let trimmed = rev.trim();

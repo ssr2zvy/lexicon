@@ -5,6 +5,7 @@ members = [
     "lexicon-framework",
     "lexicon-core",
     "lexicon-bundle",
+    "automation/conformance-matrix",
 ]
 
 [workspace.package]

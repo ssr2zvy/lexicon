@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 pub mod build;
 pub mod data;
+pub mod fs;
+pub mod identity;
+pub mod process;
 pub mod publication;
 pub mod session;
 pub mod supervision;
@@ -1740,11 +1743,47 @@ fn resolve_managed_package_id(
         })
 }
 
+/// Strongly-typed view of a Cargo JSON `compiler-artifact` record (BUILD-01).
+///
+/// We deliberately reject artifacts that carry non-bin kinds, missing
+/// executables, test-profile entries, or a wrong `target.name`. Previously
+/// the selector matched on `serde_json::Value` lookups; this struct pins
+/// every required field so a malformed record fails at the type boundary
+/// instead of propagating through.
+#[derive(Debug, serde::Deserialize)]
+struct CompilerArtifact {
+    reason: String,
+    package_id: String,
+    target: CargoTarget,
+    profile: CargoProfile,
+    executable: Option<PathBuf>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CargoTarget {
+    kind: Vec<String>,
+    crate_types: Vec<String>,
+    name: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CargoProfile {
+    test: bool,
+}
+
 fn select_artifact_from_cargo_output(
     cargo_output: &str,
     expected_package_id: &str,
     expected_binary_name: &str,
+    expected_target_directory: &Path,
 ) -> Result<PathBuf, ManagedRunnerArtifactSelectionError> {
+    let expected_target_canonical = expected_target_directory
+        .canonicalize()
+        .map_err(|_| ManagedRunnerArtifactSelectionError::MissingExecutablePath {
+            package_id: expected_package_id.to_owned(),
+            binary_name: expected_binary_name.to_owned(),
+        })?;
+
     let mut matches = Vec::new();
     let mut missing_executable_path = false;
 
@@ -1754,32 +1793,45 @@ fn select_artifact_from_cargo_output(
             continue;
         }
 
-        let value = serde_json::from_str::<serde_json::Value>(trimmed).map_err(|_| {
+        let artifact: CompilerArtifact = serde_json::from_str(trimmed).map_err(|_| {
             ManagedRunnerArtifactSelectionError::MalformedJsonLine {
                 line: trimmed.to_owned(),
             }
         })?;
-        if value.get("reason").and_then(|item| item.as_str()) != Some("compiler-artifact") {
+        if artifact.reason != "compiler-artifact" {
             continue;
         }
-        if value.get("package_id").and_then(|item| item.as_str()) != Some(expected_package_id) {
+        if artifact.package_id != expected_package_id {
+            continue;
+        }
+        if artifact.target.kind != ["bin"] {
+            continue;
+        }
+        if artifact.target.crate_types != ["bin"] {
+            continue;
+        }
+        if artifact.target.name != expected_binary_name {
+            continue;
+        }
+        if artifact.profile.test {
             continue;
         }
 
-        let target = value.get("target").cloned().unwrap_or_default();
-        let is_bin = target
-            .get("kind")
-            .and_then(|item| item.as_array())
-            .is_some_and(|kinds| kinds.iter().any(|item| item.as_str() == Some("bin")));
-        if !is_bin {
-            continue;
-        }
-        if target.get("name").and_then(|item| item.as_str()) != Some(expected_binary_name) {
-            continue;
-        }
-
-        match value.get("executable").and_then(|item| item.as_str()) {
-            Some(path) => matches.push(PathBuf::from(path)),
+        match artifact.executable {
+            Some(path) => {
+                let canonical = path
+                    .canonicalize()
+                    .map_err(|_| ManagedRunnerArtifactSelectionError::MalformedJsonLine {
+                        line: trimmed.to_owned(),
+                    })?;
+                if !canonical.starts_with(&expected_target_canonical) {
+                    return Err(ManagedRunnerArtifactSelectionError::MissingExecutablePath {
+                        package_id: expected_package_id.to_owned(),
+                        binary_name: expected_binary_name.to_owned(),
+                    });
+                }
+                matches.push(canonical)
+            }
             None => missing_executable_path = true,
         }
     }
@@ -3153,6 +3205,7 @@ fn build_managed_runner(
         workspace_manifest,
         expected_package,
         expected_binary,
+        &target_dir,
     )
     .map_err(|error| {
         ManagedSourceBuildError::CargoBuild(ManagedRunnerBuildError::ArtifactSelection(error))
@@ -3668,10 +3721,13 @@ runtime_protocol = 1
 
     #[test]
     fn select_managed_runner_executable_rejects_no_artifact() {
+        let target_dir = tempfile::tempdir().unwrap();
+        let output = r#"{"reason":"compiler-artifact","package_id":"pkg 0.1.0","target":{"kind":["bin"],"crate_types":["bin"],"name":"other"},"executable":"/bin/other"}"#;
         let result = select_artifact_from_cargo_output(
-            r#"{"reason":"compiler-artifact","package_id":"pkg 0.1.0","target":{"kind":["bin"],"name":"other"},"executable":"/bin/other"}"#,
+            output,
             "expected 0.1.0",
             "expected-bin",
+            target_dir.path(),
         );
 
         assert!(matches!(
@@ -3682,10 +3738,16 @@ runtime_protocol = 1
 
     #[test]
     fn select_managed_runner_executable_rejects_multiple_artifacts() {
-        let output = r#"{"reason":"compiler-artifact","package_id":"expected 0.1.0","target":{"kind":["bin"],"name":"expected-bin"},"executable":"/bin/one"}
-{"reason":"compiler-artifact","package_id":"expected 0.1.0","target":{"kind":["bin"],"name":"expected-bin"},"executable":"/bin/two"}"#;
+        let target_dir = tempfile::tempdir().unwrap();
+        let output = r#"{"reason":"compiler-artifact","package_id":"expected 0.1.0","target":{"kind":["bin"],"crate_types":["bin"],"name":"expected-bin"},"executable":"/bin/one"}
+{"reason":"compiler-artifact","package_id":"expected 0.1.0","target":{"kind":["bin"],"crate_types":["bin"],"name":"expected-bin"},"executable":"/bin/two"}"#;
 
-        let result = select_artifact_from_cargo_output(output, "expected 0.1.0", "expected-bin");
+        let result = select_artifact_from_cargo_output(
+            output,
+            "expected 0.1.0",
+            "expected-bin",
+            target_dir.path(),
+        );
 
         assert!(matches!(
             result,
@@ -3695,9 +3757,14 @@ runtime_protocol = 1
 
     #[test]
     fn select_managed_runner_executable_exact_package_id_required() {
-        let output = r#"{"reason":"compiler-artifact","package_id":"expected-similar 0.1.0","target":{"kind":["bin"],"name":"expected-bin"},"executable":"/bin/one"}"#;
-
-        let result = select_artifact_from_cargo_output(output, "expected 0.1.0", "expected-bin");
+        let target_dir = tempfile::tempdir().unwrap();
+        let output = r#"{"reason":"compiler-artifact","package_id":"expected-similar 0.1.0","target":{"kind":["bin"],"crate_types":["bin"],"name":"expected-bin"},"executable":"/bin/one"}"#;
+        let result = select_artifact_from_cargo_output(
+            output,
+            "expected 0.1.0",
+            "expected-bin",
+            target_dir.path(),
+        );
 
         assert!(matches!(
             result,
@@ -3707,9 +3774,14 @@ runtime_protocol = 1
 
     #[test]
     fn select_managed_runner_executable_exact_binary_name_required() {
-        let output = r#"{"reason":"compiler-artifact","package_id":"expected 0.1.0","target":{"kind":["bin"],"name":"wrong-bin"},"executable":"/bin/one"}"#;
-
-        let result = select_artifact_from_cargo_output(output, "expected 0.1.0", "expected-bin");
+        let target_dir = tempfile::tempdir().unwrap();
+        let output = r#"{"reason":"compiler-artifact","package_id":"expected 0.1.0","target":{"kind":["bin"],"crate_types":["bin"],"name":"wrong-bin"},"executable":"/bin/one"}"#;
+        let result = select_artifact_from_cargo_output(
+            output,
+            "expected 0.1.0",
+            "expected-bin",
+            target_dir.path(),
+        );
 
         assert!(matches!(
             result,
@@ -3719,7 +3791,13 @@ runtime_protocol = 1
 
     #[test]
     fn select_managed_runner_executable_rejects_malformed_json_line() {
-        let result = select_artifact_from_cargo_output("{", "expected 0.1.0", "expected-bin");
+        let target_dir = tempfile::tempdir().unwrap();
+        let result = select_artifact_from_cargo_output(
+            "{",
+            "expected 0.1.0",
+            "expected-bin",
+            target_dir.path(),
+        );
 
         assert!(matches!(
             result,

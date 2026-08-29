@@ -392,6 +392,11 @@ pub enum HttpTransactionAdmissionError {
     HeaderNameInvalid,
     HeaderValueEncodingInvalid,
     SensitiveHeaderRedactionInvalid,
+    /// A mandatory sensitive header was persisted as raw bytes instead of a
+    /// structural redaction marker. Distinct from the older
+    /// [`SensitiveHeaderRedactionInvalid`] so callers and tests can identify
+    /// the asymmetric rule committed by HTTP-01.
+    SensitiveHeaderNotRedacted { name: String },
     RequestBodyInvariant,
     ResponseBodyInvariant,
     IncompleteResponseNotFinalized,
@@ -485,6 +490,12 @@ impl std::fmt::Display for HttpTransactionAdmissionError {
             }
             Self::SensitiveHeaderRedactionInvalid => {
                 formatter.write_str("HTTP sensitive header redaction is invalid")
+            }
+            Self::SensitiveHeaderNotRedacted { name } => {
+                write!(
+                    formatter,
+                    "HTTP mandatory sensitive header was not structurally redacted: {name}"
+                )
             }
             Self::RequestBodyInvariant => {
                 formatter.write_str("HTTP request body metadata is inconsistent")
@@ -896,39 +907,47 @@ fn validate_expected_response_entries(
 fn admit_headers(
     headers: &[StoredHeader],
 ) -> Result<Vec<RecordedHeader>, HttpTransactionAdmissionError> {
+    // HTTP-01 asymmetric rule:
+    //   * A header that is structurally redacted (`StoredHeaderValue::Redacted`)
+    //     is admitted unconditionally — a custom explicitly sensitive header
+    //     like `X-Api-Key` is allowed to use the same shape.
+    //   * A header that arrived with raw bytes (`Utf8` or `Base64`) must not
+    //     carry a mandatory sensitive name. Non-mandatory names are admitted
+    //     so that custom redaction-eligible names remain structurally redacted
+    //     rather than leaking.
     headers
         .iter()
         .map(|header| {
             HeaderName::from_bytes(header.name.as_bytes())
                 .map_err(|_| HttpTransactionAdmissionError::HeaderNameInvalid)?;
 
-            let lower = header.name.to_ascii_lowercase();
-            let must_be_redacted = matches!(
-                lower.as_str(),
-                "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
-            );
+            let mandatory =
+                crate::protocols::http::sensitivity::is_mandatory_sensitive_header(&header.name);
 
             let value = match &header.value {
+                StoredHeaderValue::Redacted => RecordedHeaderValue::Redacted,
                 StoredHeaderValue::Utf8(text) => {
-                    if must_be_redacted {
-                        return Err(HttpTransactionAdmissionError::SensitiveHeaderRedactionInvalid);
+                    if mandatory {
+                        return Err(
+                            HttpTransactionAdmissionError::SensitiveHeaderNotRedacted {
+                                name: header.name.clone(),
+                            },
+                        );
                     }
                     RecordedHeaderValue::Utf8(text.clone())
                 }
                 StoredHeaderValue::Base64(encoded) => {
-                    if must_be_redacted {
-                        return Err(HttpTransactionAdmissionError::SensitiveHeaderRedactionInvalid);
+                    if mandatory {
+                        return Err(
+                            HttpTransactionAdmissionError::SensitiveHeaderNotRedacted {
+                                name: header.name.clone(),
+                            },
+                        );
                     }
                     base64::engine::general_purpose::STANDARD
                         .decode(encoded)
                         .map_err(|_| HttpTransactionAdmissionError::HeaderValueEncodingInvalid)?;
                     RecordedHeaderValue::Base64(encoded.clone())
-                }
-                StoredHeaderValue::Redacted => {
-                    if !must_be_redacted {
-                        return Err(HttpTransactionAdmissionError::SensitiveHeaderRedactionInvalid);
-                    }
-                    RecordedHeaderValue::Redacted
                 }
             };
 

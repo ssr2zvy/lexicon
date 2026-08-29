@@ -749,9 +749,21 @@ The probe must be bounded by a timeout and output-size limit.
 
 Probe output must be machine-readable and must not be contaminated by source-authored startup output.
 
-23. Runtime invocation envelope
+23. Runtime invocation transport
 
-The parent launches a runtime using a private, versioned envelope containing at least:
+The logical runtime invocation consists of three separately validated channels:
+
+1. a schema-versioned identity envelope containing project, source, protocol,
+   operation, session, runtime identity, and execution mode;
+2. the private `LEXICON_RUNTIME_CONTEXT_V1` environment document containing
+   validated native paths and session context; and
+3. trailing native OS arguments delivered as `OsString` values.
+
+No source-specific argument is serialized through UTF-8 JSON. The runner rejects
+identity or path disagreement between the envelope, private context, executable
+manifest, and durable session.
+
+The identity envelope contains at least:
 
 * envelope version;
 * project identity;
@@ -759,20 +771,27 @@ The parent launches a runtime using a private, versioned envelope containing at 
 * protocol;
 * operation;
 * session identity;
+* runtime identity;
+* execution mode.
+
+The `LEXICON_RUNTIME_CONTEXT_V1` environment document contains at least:
+
 * session directory;
 * session lease identity;
-* execution mode;
-* source arguments.
+* validated source state directory;
+* validated raw and processed directories.
 
-Source arguments remain operating-system strings. The envelope encoding must support:
+The trailing native arguments preserve `OsString` values across the boundary
+and must support:
 
 * non-UTF-8 Unix arguments;
 * Windows Unicode arguments;
 * empty strings;
-* arguments beginning with -;
-* arguments containing the public -- token.
+* arguments beginning with `-`;
+* arguments containing the public `--` token.
 
-Sensitive values should not be placed in the envelope when doing so exposes them in process listings.
+Sensitive values must not be placed in the envelope when doing so exposes them
+in process listings.
 
 24. Parent-side data --get
 
@@ -1186,13 +1205,25 @@ lexicon-bundle/
 
 The adapter must use the actual types and entrypoints exported by the selected MZA Protocol 1 dependency.
 
-If MZA provides generated Rust through MZA_BUNDLE_INPUTS, the consumer uses:
+The accepted MZA revision (`d2c2406…` or later accepted commit) sets
+`MZA_BUNDLE_INPUTS` to the build-host TOML specification path; the
+MZA-protocol-aware `build.rs` of this bundle reads that TOML path, copies
+the selected archives into `OUT_DIR`, and emits a generated Rust file. The
+consumer source uses:
 
 include!(
-    env!("MZA_BUNDLE_INPUTS")
+    concat!(env!("OUT_DIR"), "/mza_bundle_inputs.rs"),
 );
 
-Generated material belongs in Cargo’s OUT_DIR.
+The exact generated file is `mza_bundle_inputs.rs` under `OUT_DIR`. The
+bundle's `build.rs` is the single consumer input boundary; the consumer
+source never reads `MZA_BUNDLE_INPUTS` directly.
+
+When no MZA build harness is active — for example during standalone
+`cargo check`/`cargo test` against the workspace — the build script emits
+an empty adapter so the include compiles without invoking MZA. The release
+build never takes that path; MZA is always invoked before release
+construction.
 
 The bundle must install:
 
@@ -1242,8 +1273,9 @@ If hostile third-party sources become a requirement, the architecture must be re
 Source contract
 
 * valid descriptor compile-pass;
-* missing descriptor compile-fail;
-* private handler compile-fail;
+* private acquisition handler behind a public `SOURCE` descriptor: compile-pass;
+* private processing handlers behind a public `SOURCE` descriptor: compile-pass;
+* missing public `SOURCE` descriptor in a managed source library: runner-link or compile failure;
 * wrong acquisition signature compile-fail;
 * wrong resume signature compile-fail;
 * unsupported capability rejection.

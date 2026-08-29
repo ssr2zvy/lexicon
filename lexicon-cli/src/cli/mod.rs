@@ -12,6 +12,45 @@ pub use init::InitCommand;
 pub use operator_host::OperatorHostCommand;
 pub use source::{SourceAction, SourceCommand};
 
+// FOREGROUND-02: typed cancellation surfacing. The audit fixes shell
+// cancellation exit codes to 130 (SIGINT/CTRL_C_EVENT) and 143
+// (SIGTERM/CTRL_BREAK_EVENT). Forward the cancellation kind observed
+// by the supervisor into the typed CLI error so the binary's exit
+// status faithfully reflects operator intent.
+use std::process::ExitCode;
+
+/// Map a `SupervisedChild` cancellation outcome onto the canonical
+/// shell exit code. We do NOT convert forced-terminated and
+/// gracefully-cancelled outcomes into different exit codes: the audit
+/// explicitly maps both to 130 (interrupt) or 143 (terminate) based on
+/// the originating kind, then optionally to 1 if the kind is unknown.
+pub fn cancellation_exit_code(
+    kind: lexicon_framework::process::CancellationKind,
+    forced: bool,
+) -> ExitCode {
+    match (kind, forced) {
+        (lexicon_framework::process::CancellationKind::Interrupt, _)
+        | (lexicon_framework::process::CancellationKind::ConsoleClose, _) => ExitCode::from(130),
+        (lexicon_framework::process::CancellationKind::Terminate, _) => ExitCode::from(143),
+    }
+}
+
+/// Convenience: translate a `SupervisionOutcome::Cancelled*`.
+pub fn exit_code_for_outcome(
+    outcome: &lexicon_framework::process::SupervisionOutcome,
+) -> ExitCode {
+    match outcome {
+        lexicon_framework::process::SupervisionOutcome::Completed { .. } => ExitCode::SUCCESS,
+        lexicon_framework::process::SupervisionOutcome::CancelledGracefully { kind, .. }
+        | lexicon_framework::process::SupervisionOutcome::CancelledForcefully { kind, .. } => {
+            cancellation_exit_code(*kind, false)
+        }
+        lexicon_framework::process::SupervisionOutcome::CancellationUncertain { .. } => {
+            ExitCode::from(1)
+        }
+    }
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "lexicon",
@@ -43,20 +82,99 @@ pub enum RootCommand {
     OperatorHost(OperatorHostCommand),
 }
 
-pub fn dispatch(cli: Cli) -> Result<(), String> {
+/// Typed CLI error surface (CLI-01 + FOREGROUND-02). The `Interrupted`
+/// variant carries the cancellation outcome through the typed boundary
+/// so `main.rs` returns the canonical 130/143 exit codes that shells
+/// parse.
+#[derive(Debug)]
+pub enum CliError {
+    /// A `lexicon data` foreground or `--process` rejection reached the
+    /// CLI surface.
+    ForegroundData(String),
+    /// A `lexicon data --bg` handoff could not complete.
+    BackgroundHandoff(String),
+    /// A `lexicon source create|build` operation failed.
+    SourceCommand(String),
+    /// `lexicon init` failed.
+    Init(String),
+    /// `lexicon build` failed.
+    BuildAll(String),
+    /// The reserved `--bg` operator host surfaced an error.
+    OperatorHost(String),
+    /// Operator requested cancellation; we record the kind and whether
+    /// the supervisor escalated to forced termination. The audit forbids
+    /// misreporting cancellation as success; this variant carries
+    /// observable shape data so the `Display` impl never hides it.
+    Interrupted {
+        kind: lexicon_framework::process::CancellationKind,
+        unix_signal: Option<u8>,
+        forced: bool,
+    },
+    /// Generic fallback; will be deprecated as concrete variants
+    /// replace stringly-typed dispatch paths.
+    Message(String),
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ForegroundData(message)
+            | Self::BackgroundHandoff(message)
+            | Self::SourceCommand(message)
+            | Self::Init(message)
+            | Self::BuildAll(message)
+            | Self::OperatorHost(message)
+            | Self::Message(message) => formatter.write_str(message),
+            Self::Interrupted {
+                kind,
+                forced,
+                ..
+            } => write!(formatter, "operator interrupted (kind={kind}, forced={forced})"),
+        }
+    }
+}
+
+impl CliError {
+    /// Map the typed error to a typed `ExitCode` per CLI-01 / FOREGROUND-02.
+    /// Cancellation kinds honor the audit's canonical mapping: SIGINT and
+    /// console close map to 130, SIGTERM maps to 143. Force-terminated
+    /// cancellations share the same exit code as their graceful
+    /// counterparts because shells do not distinguish between them.
+    pub fn exit_code(&self) -> ExitCode {
+        if let Self::Interrupted { kind, .. } = self {
+            return cancellation_exit_code(*kind, false);
+        }
+        ExitCode::from(1)
+    }
+}
+
+/// Convert a free-form string error from a legacy dispatch path into a
+/// `CliError`. Each dispatch site picks the variant that best describes
+/// its failure class.
+fn into_message(error: String) -> CliError {
+    CliError::Message(error)
+}
+
+pub fn dispatch(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         None => {
             let mut command = Cli::command();
             command
                 .print_help()
-                .map_err(|error| format!("failed to render help output: {error}"))?;
+                .map_err(|error| into_message(format!("failed to render help output: {error}")))?;
             Ok(())
         }
         Some(RootCommand::Data(command)) => {
-            let protocol = command.normalized_protocol()?;
+            let protocol = command
+                .normalized_protocol()
+                .map_err(into_message)?;
             let (operation, source_name) = match command.mode() {
-                DataMode::Get(source) => (lexicon_framework::data::DataOperation::Acquisition, source),
-                DataMode::Process(source) => (lexicon_framework::data::DataOperation::Processing, source),
+                DataMode::Get(source) => {
+                    (lexicon_framework::data::DataOperation::Acquisition, source)
+                }
+                DataMode::Process(source) => {
+                    (lexicon_framework::data::DataOperation::Processing, source)
+                }
             };
             let background = command.bg;
             let request = lexicon_framework::data::ForegroundDataRequest {
@@ -78,7 +196,7 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                         );
                         Ok(())
                     }
-                    Err(err) => Err(err.to_string()),
+                    Err(err) => Err(CliError::BackgroundHandoff(err.to_string())),
                 }
             } else {
                 match lexicon_framework::data::execute_foreground_data(request) {
@@ -91,7 +209,7 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                         );
                         Ok(())
                     }
-                    Err(err) => Err(err.to_string()),
+                    Err(err) => Err(CliError::ForegroundData(err.to_string())),
                 }
             }
         }
@@ -100,7 +218,8 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                 let result = lexicon_framework::commands::source_create(
                     &create_command.source_name,
                     &create_command.protocol,
-                )?;
+                )
+                .map_err(|err| CliError::SourceCommand(err))?;
                 println!(
                     "[lexicon] Created source '{}' using protocol '{}' at {}",
                     result.source_name,
@@ -117,7 +236,8 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                 let result = lexicon_framework::commands::source_build(
                     &build_command.source_name,
                     &build_command.protocol,
-                )?;
+                )
+                .map_err(|err| CliError::SourceCommand(err))?;
                 println!(
                     "[lexicon] Built source '{}' using protocol '{}'",
                     result.source_name, result.protocol
@@ -129,8 +249,8 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
             }
         },
         Some(RootCommand::Init(command)) => {
-            let result =
-                lexicon_framework::commands::init(&command.parent_path, &command.project_name)?;
+            let result = lexicon_framework::commands::init(&command.parent_path, &command.project_name)
+                .map_err(|err| CliError::Init(err))?;
             println!(
                 "[lexicon] Initialized project '{}' at {}",
                 command.project_name,
@@ -140,7 +260,7 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
         }
         Some(RootCommand::Build(_)) => {
             let outcome = lexicon_framework::commands::build_all()
-                .map_err(|error| error.to_string())?;
+                .map_err(|err| CliError::BuildAll(err.to_string()))?;
             for result in &outcome.succeeded {
                 println!(
                     "[lexicon] Built source '{}' using protocol '{}'",
@@ -168,16 +288,17 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                     .map(|failure| format!("{}/{}", failure.source_name, failure.protocol))
                     .collect::<Vec<_>>()
                     .join(", ");
-                Err(format!(
+                Err(CliError::BuildAll(format!(
                     "build failed for {} source(s): {failed_identities}",
                     outcome.failed.len()
-                ))
+                )))
             }
         }
         Some(RootCommand::OperatorHost(command)) => {
-            let reference =
-                lexicon_framework::supervision::OperatorHostInvocationV1::from_json(&command.reference)
-                    .map_err(|error| error.to_string())?;
+            let reference = lexicon_framework::supervision::OperatorHostInvocationV1::from_json(
+                &command.reference,
+            )
+            .map_err(|error| CliError::OperatorHost(error.to_string()))?;
             match lexicon_framework::data::execute_operator_host(reference, command.passthrough) {
                 Ok(outcome) => {
                     println!(
@@ -188,7 +309,7 @@ pub fn dispatch(cli: Cli) -> Result<(), String> {
                     );
                     Ok(())
                 }
-                Err(err) => Err(err.to_string()),
+                Err(err) => Err(CliError::OperatorHost(err.to_string())),
             }
         }
     }
@@ -359,7 +480,10 @@ mod tests {
 
         let cli = Cli::try_parse_from(["lexicon", "build"]).unwrap();
         let result = with_test_cwd(project_root, || super::dispatch(cli));
-        assert!(result.is_ok(), "build on empty project should succeed: {result:?}");
+        assert!(
+            matches!(result, Ok(())),
+            "build on empty project should succeed: {result:?}"
+        );
     }
 
     #[test]
@@ -392,7 +516,10 @@ mod tests {
         ])
         .unwrap();
         let create_res = with_test_cwd(&project_dir, || super::dispatch(create_cli));
-        assert!(create_res.is_ok(), "source create failed: {create_res:?}");
+        assert!(
+            matches!(create_res, Ok(())),
+            "source create failed: {create_res:?}"
+        );
 
         let protocol_dir = project_dir.join("sources/my-src/http");
         assert!(protocol_dir.join("source.toml").is_file());

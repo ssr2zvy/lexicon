@@ -90,10 +90,17 @@ impl HttpAcquisitionContext {
     }
 
     /// The contract-reserved durable-state directory for this acquisition source
-    /// (`get-raw-data/state/`), per contract.md §9 and specs.md §11. `None` only for a
-    /// context built through the legacy, non-session-bound construction path.
-    pub fn source_state_directory(&self) -> Option<&Path> {
-        self.paths.source_state_directory()
+    /// (`get-raw-data/state/`), per contract.md §9 and specs.md §11.
+    ///
+    /// COREID-03 changes the type from `Option<&Path>` to `&Path`: an
+    /// acquisition context is required to come from validated context
+    /// paths, so a missing state directory is impossible. The `expect`
+    /// reflects the typed invariant; building an `HttpAcquisitionContext`
+    /// without a state directory in production code is a programmer error.
+    pub fn source_state_directory(&self) -> &Path {
+        self.paths
+            .source_state_directory()
+            .expect("validated acquisition context always has source state directory")
     }
 
     pub fn session_identity(&self) -> Option<&crate::session::SessionIdentity> {
@@ -102,12 +109,9 @@ impl HttpAcquisitionContext {
 
     /// Create (if absent) and validate the durable source-state directory before source
     /// code is invoked, per specs.md §11 ("Core must create and validate the directory
-    /// before calling source code"). A no-op returning `Ok(())` when this context has no
-    /// source-state directory (the legacy construction path).
+    /// before calling source code"). Required for acquisition contexts.
     pub(crate) fn ensure_source_state_directory_ready(&self) -> Result<(), SessionValidationError> {
-        let Some(directory) = self.source_state_directory() else {
-            return Ok(());
-        };
+        let directory = self.source_state_directory();
         std::fs::create_dir_all(directory)
             .map_err(SessionValidationError::SourceStateDirectoryCreation)?;
         validate_managed_path(
@@ -116,48 +120,6 @@ impl HttpAcquisitionContext {
             HttpManagedPathValidationMode::ExistingDirectory,
         )
         .map_err(SessionValidationError::ManagedPath)
-    }
-
-    #[doc(hidden)]
-    pub fn from_env_legacy() -> Result<Self, String> {
-        let value = std::env::var("LEXICON_SOURCE_DIRECTORY")
-            .map_err(|_| "missing LEXICON_SOURCE_DIRECTORY; the runtime must supply the absolute source directory".to_string())?;
-        let source_directory = PathBuf::from(value);
-
-        if source_directory.is_relative() {
-            return Err("invalid LEXICON_SOURCE_DIRECTORY: must be an absolute path".to_string());
-        }
-
-        if !source_directory.is_dir() {
-            return Err(
-                "invalid LEXICON_SOURCE_DIRECTORY: path does not exist or is not a directory"
-                    .to_string(),
-            );
-        }
-
-        let raw_data_directory = source_directory.join("data/raw");
-        let processed_data_directory = source_directory.join("data/processed");
-        let operation_root = source_directory.join("get-raw-data");
-        let session_directory = operation_root.join("sessions/legacy");
-
-        let (transport, transport_init_error) = match ReqwestHttpTransport::new() {
-            Ok(t) => (Some(Box::new(t) as Box<dyn HttpTransport>), None),
-            Err(e) => (None, Some(e)),
-        };
-
-        Ok(Self {
-            paths: SessionDataPaths::from_legacy_parts(
-                source_directory,
-                operation_root,
-                session_directory,
-                raw_data_directory,
-                processed_data_directory,
-            ),
-            session_identity: None,
-            transport,
-            transport_init_error,
-            transaction_registry: HashMap::new(),
-        })
     }
 
     pub fn execute(&mut self, request: HttpRequest) -> AcquisitionResult<RecordedTransaction> {
@@ -230,6 +192,7 @@ impl HttpAcquisitionContext {
                             AcquisitionError::execution(HttpExecutionError::CounterOverflow)
                         })?,
                         sensitive_query_names: request.sensitive_query_names.clone(),
+                        sensitive_header_names: request.sensitive_header_names.clone(),
                     },
                     &request,
                     transport.as_ref(),
@@ -1164,18 +1127,28 @@ fn redirect_request_from(
         _ => return Err(HttpRedirectFailureKind::UnsupportedScheme),
     }
 
-    let cross_origin = request.url.scheme() != next_url.scheme()
-        || request.url.domain() != next_url.domain()
-        || request.url.port_or_known_default() != next_url.port_or_known_default();
+    // HTTP-02: exact origin comparison. Replacing `Url::domain()` lets the
+    // redirect policy correctly strip headers when the next URL is an IP
+    // literal (which has no registrable domain and would otherwise be
+    // misclassified as same-origin).
+    let cross_origin = !same_origin(&request.url, &next_url);
 
     let mut next_headers = Vec::new();
     for header in &request.headers {
-        let name = header.name.to_ascii_lowercase();
-        let sensitive_cross_origin = matches!(
-            name.as_str(),
-            "authorization" | "proxy-authorization" | "cookie" | "host"
+        let lower = header.name.to_ascii_lowercase();
+        // Mandatory sensitive names are always stripped across origins.
+        let mandatory = crate::protocols::http::sensitivity::is_mandatory_sensitive_header(
+            &header.name,
         );
-        if cross_origin && (sensitive_cross_origin || header.sensitive) {
+        // `Host` is removed on cross-origin redirects per the contract: the
+        // next transport calculates the right authority from the URL.
+        let is_host_header = lower == "host";
+        let explicitly_sensitive = header.sensitive
+            || request
+                .sensitive_header_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&lower));
+        if cross_origin && (mandatory || is_host_header || explicitly_sensitive) {
             continue;
         }
         next_headers.push(header.clone());
@@ -1204,11 +1177,86 @@ fn redirect_request_from(
         retry_policy: request.retry_policy.clone(),
         redirect_policy: request.redirect_policy,
         sensitive_query_names: request.sensitive_query_names.clone(),
+        sensitive_header_names: request.sensitive_header_names.clone(),
     })
 }
 
 fn is_redirect_status(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// HTTP-02 exact origin comparison.
+///
+/// Two URLs are same-origin only when their scheme, host string, and
+/// port-or-known-default all match. We deliberately avoid `Url::domain()`:
+/// IP literals have no registrable domain and would be misclassified as
+/// same-origin when in fact they should not be.
+fn same_origin(left: &url::Url, right: &url::Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+#[cfg(test)]
+mod redirect_origin_tests {
+    use super::same_origin;
+    use url::Url;
+
+    fn url(input: &str) -> Url {
+        Url::parse(input).expect("valid url")
+    }
+
+    #[test]
+    fn scheme_change_is_cross_origin() {
+        let left = url("https://example.com/path");
+        let right = url("http://example.com/path");
+        assert!(!same_origin(&left, &right));
+    }
+
+    #[test]
+    fn host_change_is_cross_origin() {
+        let left = url("https://example.com/path");
+        let right = url("https://other.example/path");
+        assert!(!same_origin(&left, &right));
+    }
+
+    #[test]
+    fn port_change_is_cross_origin() {
+        let left = url("https://example.com:8443/path");
+        let right = url("https://example.com:9443/path");
+        assert!(!same_origin(&left, &right));
+    }
+
+    #[test]
+    fn same_origin_when_only_path_differs() {
+        let left = url("https://example.com/aaa");
+        let right = url("https://example.com/bbb");
+        assert!(same_origin(&left, &right));
+    }
+
+    #[test]
+    fn ip_literals_with_different_octets_are_cross_origin() {
+        let left = url("http://127.0.0.1:8080/a");
+        let right = url("http://127.0.0.2:8080/a");
+        assert!(!same_origin(&left, &right));
+    }
+
+    #[test]
+    fn loopback_ip_literal_pair_is_same_origin() {
+        let left = url("http://127.0.0.1:8080/a");
+        let right = url("http://127.0.0.1:8081/b");
+        // Different ports: still cross-origin.
+        assert!(!same_origin(&left, &right));
+        let same = url("http://127.0.0.1:8080/a");
+        assert!(same_origin(&left, &same));
+    }
+
+    #[test]
+    fn host_string_distinguishes_name_vs_ip() {
+        let name = url("https://example.com/a");
+        let ip = url("https://93.184.216.34/a");
+        assert!(!same_origin(&name, &ip));
+    }
 }
 
 fn persist_progress(

@@ -218,13 +218,18 @@ pub enum SessionFailureCode {
     ProcessingDatabaseTransactionFailed,
     /// The bound processing context could not prove its required invariants.
     ProcessingContextConstructionFailed,
+    /// The acquisition or resume handler propagated a Rust panic across the
+    /// Core boundary. Core translates the unwinding termination into this
+    /// fixed failure code so the durable record never retains arbitrary
+    /// panic text and a session reconciliation never reports success.
+    HandlerPanicked,
 }
 
 impl SessionFailureCode {
     /// Stable snake_case identifier for this failure code.
     ///
     /// These values are part of the public display surface; do not use `{:?}`.
-    pub const fn identifier(&self) -> &'static str {
+    pub const fn identifier(self) -> &'static str {
         match self {
             Self::SourceReturnedError => "source_returned_error",
             Self::RuntimeInitializationFailed => "runtime_initialization_failed",
@@ -248,6 +253,7 @@ impl SessionFailureCode {
             Self::ProcessingDatabaseOpenFailed => "processing_database_open_failed",
             Self::ProcessingDatabaseTransactionFailed => "processing_database_transaction_failed",
             Self::ProcessingContextConstructionFailed => "processing_context_construction_failed",
+            Self::HandlerPanicked => "handler_panicked",
         }
     }
 }

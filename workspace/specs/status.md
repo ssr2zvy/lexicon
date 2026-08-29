@@ -1,554 +1,747 @@
-# Lexicon Implementation Status and Conformance Matrix
-Status: Normative implementation status and verification matrix
-Implements: specs.md §47, contract.md §1
-Authority: contract.md, specs.md
+# Lexicon Implementation Status
 
-## Overview
-This document tracks the verified implementation status of the Lexicon architecture against `workspace/specs/contract.md` (Contract Version 1) and `workspace/specs/specs.md` (Specification Version 1, Source-Manifest Schema 2).
+Normative implementation status for Lexicon achieving Contract V1 and
+Specification V1 conformance (`workspace/specs/contract.md`,
+`workspace/specs/specs.md`). The mechanical conformance matrix lives in
+[`workspace/specs/conformance.toml`](conformance.toml); this document is
+its prose counterpart. Every row uses the **exact** MATRIX-01 shape from
+`current.md` §5.
 
-Statuses used strictly per specs.md §47:
-* `implemented and tested`: Fully implemented and verified by specific named automated behavioral tests.
-* `intentionally deferred`: Deliberately deferred under an explicit specification permission clause (e.g. §46 Core-owned work queue, multi-protocol beyond HTTP, project-wide publication transaction).
-* `implemented but insufficiently tested`: Implemented in production code but missing dedicated multi-platform or end-to-end tests.
-* `partially implemented`: Subsystem is incomplete.
-* `not implemented`: Unimplemented.
+The master milestone remains open until:
+
+1. MZA publishes and pins a Protocol 1 installer API that owns install,
+   upgrade, uninstall, command registration, and platform integration
+   (`current.md` §3); or
+2. the committee explicitly amends `contract.md` to remove that
+   requirement.
+
+Until one of those events occurs, every `Gate 6`/`Gate 8` row carries
+`Status: not implemented` with `Open gap` describing the upstream
+prerequisite. All other rows are `Status: implemented, unverified` —
+implementation is in place and unit / integration targets exist, but no
+durable CI evidence (a green workflow run URL) is available yet. CI-01
+publishes the manifest schema but the first green run is still pending.
+
+No row claims `Status: conformant` — that flag requires durable
+evidence linked to an exact commit, and per the audit's own §17 wording
+"a number in current.md without the attached exact-SHA manifest is not
+evidence."
 
 ---
 
-## Required Tests Matrix (specs.md §44)
+## 1. Source contract compile-time guarantees (specs.md §44)
 
-### Source Contract
-1. valid descriptor compile-pass
-* Implementation: `lexicon-core/src/protocols/http/contract.rs`, `lexicon-core/src/processing/contract.rs`
-* Test: `source_contract_can_be_declared_as_const`, `descriptor_works_in_a_constant`
-* Location: `lexicon-core/src/protocols/http/contract.rs:251`, `lexicon-core/src/processing/contract.rs:111`
-* Environment: Linux container, Windows
-* Behavior: Valid const descriptors construct and evaluate at compile time without error.
-* Status: implemented and tested
+### specs-44-valid-descriptor-compile-pass
 
-2. missing descriptor compile-fail
-* Implementation: `lexicon-core-tests/tests/ui/`
-* Test: `missing_handler.rs`
-* Location: `lexicon-core-tests/tests/ui/missing_handler.rs`
-* Environment: Linux container (trybuild UI compile-fail test)
-* Behavior: Runner binary fails compilation when no valid SOURCE descriptor is exported.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#44`
+* Implementation:
+  * `lexicon-core/src/protocols/http/contract.rs:HttpSourceContractV1`
+  * `lexicon-core/src/processing/contract.rs:ProcessingSourceContractV1`
+* Automated evidence:
+  * `core::protocols::http::contract::tests::source_contract_can_be_declared_as_const`
+  * `core::processing::contract::tests::descriptor_works_in_a_constant`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-3. private handler compile-fail
-* Implementation: `lexicon-core-tests/tests/ui/`
-* Test: `private_handler.rs` (tested via visibility rules)
-* Location: `lexicon-core-tests/tests/ui/`
-* Environment: Linux container (trybuild UI test)
-* Behavior: Attempting to bind non-matching visibility handler fails compilation.
-* Status: implemented and tested
+### specs-44-private-acquisition-handler
 
-4. wrong acquisition signature compile-fail
-* Implementation: `lexicon-core-tests/tests/ui/`
-* Test: `wrong_argument_type.rs`, `reversed_parameters.rs`, `context_by_value.rs`, `bool_return.rs`
-* Location: `lexicon-core-tests/tests/ui/`
-* Environment: Linux container (trybuild UI compile-fail tests)
-* Behavior: Compiling an acquisition handler with invalid parameter types or return types fails.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#44`
+* Implementation:
+  * `lexicon-core/src/protocols/http/contract.rs`
+  * `lexicon-core/tests/ui-pass/private_acquisition_handler.rs`
+* Automated evidence:
+  * `core::tests::contract_ui::compile_pass_contracts`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-5. wrong resume signature compile-fail
-* Implementation: `lexicon-core-tests/tests/ui/`
-* Test: `invalid_resume_handlers.rs`
-* Location: `lexicon-core-tests/tests/ui/invalid_resume_handlers.rs`
-* Environment: Linux container (trybuild UI compile-fail tests)
-* Behavior: Compiling a resume handler with invalid signature fails.
-* Status: implemented and tested
+### specs-44-private-processing-handlers
 
-6. unsupported capability rejection
-* Implementation: `lexicon-core/src/runtime/information.rs` (`validate_capabilities`)
-* Test: `missing_capabilities_produce_incompatible_error`, `missing_capabilities_return_admission_error`
-* Location: `lexicon-core/src/runtime/information.rs:507`, `lexicon-core/src/protocols/http/runner.rs:837`
-* Environment: Linux container
-* Behavior: Probing or admitting a runtime with missing required capabilities fails with typed error.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#44`
+* Implementation:
+  * `lexicon-core/src/processing/contract.rs`
+  * `lexicon-core/tests/ui-pass/private_processing_handlers.rs`
+* Automated evidence:
+  * `core::tests::contract_ui::compile_pass_contracts`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-### Scaffold and Validation
-7. atomic source creation
-* Implementation: `lexicon-framework/src/lib.rs` (`generate_source_scaffold`, `finalize_source_staging`)
-* Test: `finalize_source_staging_cleans_up_tempdir_when_rename_fails`
-* Location: `lexicon-framework/src/lib.rs:4084`
-* Environment: Linux container, Windows
-* Behavior: Failure during staging cleans up temp directories without leaving partial state.
-* Status: implemented and tested
+### specs-44-missing-public-source-descriptor
 
-8. exact source layout
-* Implementation: `lexicon-framework/src/lib.rs` (`generate_source_scaffold`)
-* Test: `cli_source_create_calls_framework_library_directly`
-* Location: `lexicon-cli/src/cli/mod.rs:245`
-* Environment: Linux container, Windows
-* Behavior: Created source has exact directories (`http/data/raw`, `http/data/processed`, `http/get-raw-data`, `http/process-data`, `http/get-raw-data/state`).
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#44`
+* Implementation:
+  * `lexicon-core/tests/ui/missing_exported_source_descriptor.rs`
+  * `lexicon-core/tests/managed_runner_contract.rs`
+* Automated evidence:
+  * `core::tests::managed_runner_contract::missing_exported_source_descriptor_in_runner_boundary_fails_compile`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-9. schema-2 manifest
-* Implementation: `lexicon-framework/src/lib.rs` (`format_source_toml`, `validate_source_toml_text`)
-* Test: `generated_source_toml_matches_required_schema_2_contract`, `schema_1_source_manifest_is_rejected_with_typed_error`
-* Location: `lexicon-framework/src/lib.rs:3246`, `lexicon-framework/src/lib.rs:3287`
-* Environment: Linux container, Windows
-* Behavior: Emits schema 2 with distinct `[acquisition]` and `[processing]` version fields; rejects schema 1.
-* Status: implemented and tested
+### contract-7-wrong-acquisition-signature-compile-fail
 
-10. managed runner integrity
-* Implementation: `lexicon-framework/src/lib.rs` (`validate_managed_workspace_layout`, `validate_managed_workspace_metadata`)
-* Test: `workspace_validation_accepts_correct_template_version_marker`, `workspace_validation_rejects_modified_runner_template_content`
-* Location: `lexicon-framework/src/lib.rs:3886`, `lexicon-framework/src/lib.rs:3903`
-* Environment: Linux container, Windows
-* Behavior: Rejects modified canonical runner source, missing template markers, or wrong package structure.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/contract.md#7`
+* Implementation:
+  * `lexicon-core/tests/ui/wrong_argument_type.rs`
+  * `lexicon-core/tests/ui/reversed_parameters.rs`
+  * `lexicon-core/tests/ui/context_by_value.rs`
+  * `lexicon-core/tests/ui/bool_return.rs`
+  * `lexicon-core/tests/contract_ui.rs`
+* Automated evidence:
+  * `core::tests::contract_ui::compile_fail_contracts`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-11. source-owned main.rs rejection
-* Implementation: `lexicon-framework/src/lib.rs` (`validate_managed_workspace_layout`)
-* Test: `workspace_validation_rejects_source_owned_main_entrypoint_file`
-* Location: `lexicon-framework/src/lib.rs:3928`
-* Environment: Linux container, Windows
-* Behavior: Rejects any source implementation crate exposing a binary main.rs.
-* Status: implemented and tested
+### contract-7-unsupported-capability-rejection
 
-12. lockfile requirement
-* Implementation: `lexicon-framework/src/lib.rs` (`generate_workspace_lockfile`, `read_lockfile_snapshot`)
-* Test: `generate_workspace_lockfile` in scaffold generation
-* Location: `lexicon-framework/src/lib.rs:891`
-* Environment: Linux container
-* Behavior: Requires and generates committed `Cargo.lock` during scaffold generation without compiling.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/contract.md#7`
+* Implementation: `lexicon-core/src/runtime/information.rs:validate_capabilities`
+* Automated evidence:
+  * `core::runtime::information::tests::missing_capabilities_produce_incompatible_error`
+  * `core::runtime::information::tests::missing_capabilities_return_admission_error`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-13. installed scaffold generation without original Git checkout
-* Implementation: `lexicon-framework/build.rs`, `lexicon-framework/src/lib.rs` (`EMBEDDED_CORE_GIT_REV`)
-* Test: `scaffold_generation_uses_embedded_core_identity_without_runtime_git`
-* Location: `lexicon-framework/src/lib.rs:3484`
-* Environment: Linux container, Windows
-* Behavior: Scaffold generation uses compile-time embedded Core Git revision without inspecting `CARGO_MANIFEST_DIR` or running Git.
-* Status: implemented and tested
+## 2. Source creation, durability, and validation (specs.md §6, §7, §10)
 
-### Build and Publication
-14. locked release build
-* Implementation: `lexicon-framework/src/lib.rs` (`build_managed_runner`)
-* Test: `build_managed_runner` flags in `lexicon-framework/src/lib.rs:3134` (`--release --locked`)
-* Location: `lexicon-framework/src/lib.rs:3134`
-* Environment: Linux container
-* Behavior: Invokes Cargo release build with `--locked` and `--message-format=json-render-diagnostics`.
-* Status: implemented and tested
+### specs-7-atomic-source-creation
 
-15. isolated target directory
-* Implementation: `lexicon-framework/src/lib.rs` (`build_managed_runner`)
-* Test: `build_managed_runner` target dir isolation in `lexicon-framework/src/lib.rs:3115`
-* Location: `lexicon-framework/src/lib.rs:3115`
-* Environment: Linux container
-* Behavior: Builds inside dedicated isolated temporary target directory.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#7`
+* Implementation:
+  * `lexicon-framework/src/lib.rs:generate_source_scaffold`
+  * `lexicon-framework/src/fs/durable.rs`
+* Automated evidence:
+  * `lexicon-framework::lib::tests::finalize_source_staging_cleans_up_tempdir_when_rename_fails`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-16. exact Cargo JSON artifact selection
-* Implementation: `lexicon-framework/src/lib.rs` (`select_artifact_from_cargo_output`)
-* Test: `select_managed_runner_executable`
-* Location: `lexicon-framework/src/lib.rs:1434`
-* Environment: Linux container
-* Behavior: Selects executable matching package ID, binary target name, kind bin, and release profile.
-* Status: implemented and tested
+### specs-6-exact-source-layout
 
-17. acquisition build failure preserves runtimes
-* Implementation: `lexicon-framework/src/lib.rs` (`build_source`)
-* Test: `build_source` failure propagation
-* Location: `lexicon-framework/src/lib.rs:1128`
-* Environment: Linux container
-* Behavior: Failure during acquisition build aborts before publication and preserves existing bundles.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#6`
+* Implementation: `lexicon-framework/src/lib.rs:generate_source_scaffold`
+* Automated evidence:
+  * `cli::cli::mod::tests::cli_source_create_calls_framework_library_directly`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-18. processing build failure preserves runtimes
-* Implementation: `lexicon-framework/src/lib.rs` (`build_source`)
-* Test: `build_source` failure propagation
-* Location: `lexicon-framework/src/lib.rs:1134`
-* Environment: Linux container
-* Behavior: Failure during processing build aborts before publication and preserves existing bundles.
-* Status: implemented and tested
+### specs-5-schema-2-manifest
 
-19. runtime probe mismatch
-* Implementation: `lexicon-framework/src/build/runtime_verification.rs`
-* Test: `artifact_changed_during_probe_returns_changed_error`, `identity_disagreement_produces_incompatible_error`
-* Location: `lexicon-framework/src/build/runtime_verification.rs:578`, `lexicon-core/src/runtime/information.rs:1464`
-* Environment: Linux container
-* Behavior: Rejects runtimes whose probe output disagrees with expected compiled identity.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#5`
+* Implementation:
+  * `lexicon-framework/src/lib.rs:format_source_toml`
+  * `lexicon-framework/src/lib.rs:validate_source_toml_text`
+* Automated evidence:
+  * `lexicon-framework::lib::tests::generated_source_toml_matches_required_schema_2_contract`
+  * `lexicon-framework::lib::tests::schema_1_source_manifest_is_rejected_with_typed_error`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-20. executable hash mismatch
-* Implementation: `lexicon-framework/src/build/runtime_verification.rs`
-* Test: `final_hash_failure_returns_final_hash`
-* Location: `lexicon-framework/src/build/runtime_verification.rs:531`
-* Environment: Linux container
-* Behavior: Detects hash alteration between initial hash and post-probe verification.
-* Status: implemented and tested
+### specs-10-managed-runner-integrity
 
-21. paired publication rollback
-* Implementation: `lexicon-framework/src/publication/runtime_pair.rs`
-* Test: `publication_fails_when_processing_staging_is_missing_and_cleans_up`
-* Location: `lexicon-framework/src/publication/runtime_pair.rs`
-* Environment: Linux container
-* Behavior: If either runtime replacement fails, both are rolled back to previous bundles.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#10`
+* Implementation:
+  * `lexicon-framework/src/lib.rs:validate_managed_workspace_layout`
+  * `lexicon-framework/src/lib.rs:validate_managed_workspace_metadata`
+* Automated evidence:
+  * `lexicon-framework::lib::tests::workspace_validation_accepts_correct_template_version_marker`
+  * `lexicon-framework::lib::tests::workspace_validation_rejects_modified_runner_template_content`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-22. Windows executable-lock rollback behavior
-* Implementation: `lexicon-framework/src/publication/runtime_pair.rs`
-* Test: Windows file-replacement retry & rollback
-* Location: `lexicon-framework/src/publication/runtime_pair.rs`
-* Environment: Windows native (implemented in code; platform-verified)
-* Behavior: Handles Windows executable file locks during atomic replacement with rollback.
-* Status: implemented and tested
+### specs-10-source-owned-main-rejection
 
-### HTTP Recording
-23. one GET
-* Implementation: `lexicon-core/src/protocols/http/context.rs` (`execute`)
-* Test: `http_recording_one_get_is_durably_recorded`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1898`
-* Environment: Linux container
-* Behavior: GET request records transaction on disk, response status 200, body verified.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#10`
+* Implementation: `lexicon-framework/src/lib.rs:validate_managed_workspace_layout`
+* Automated evidence:
+  * `lexicon-framework::lib::tests::workspace_validation_rejects_source_owned_main_entrypoint_file`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-24. POST request-body preservation
+### specs-7-lockfile-requirement
+
+* Contract/spec authority: `workspace/specs/specs.md#7`
+* Implementation:
+  * `lexicon-framework/src/lib.rs:generate_workspace_lockfile`
+  * `lexicon-framework/src/lib.rs:read_lockfile_snapshot`
+* Automated evidence:
+  * `lexicon-framework::lib::tests::generate_workspace_lockfile`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
+
+## 3. Installed-CLI core identity (specs.md §8)
+
+### specs-8-installed-scaffold-without-checkout
+
+* Contract/spec authority: `workspace/specs/specs.md#8`
+* Implementation:
+  * `lexicon-framework/build.rs`
+  * `lexicon-framework/src/lib.rs:EMBEDDED_CORE_GIT_REV`
+  * `lexicon-framework/src/build/core_dependency.rs:REQUIRED_CORE_GIT_URL`
+* Automated evidence:
+  * `installed_core_identity::installed_lexicon_source_create_embeds_compiled_core_identity_outside_repo`
+  * `installed_core_identity::installed_lexicon_source_create_fails_clearly_when_protocol_is_unknown`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
+
+## 4. Build and publication (specs.md §19, §21)
+
+### specs-19-locked-release-build
+
+* Contract/spec authority: `workspace/specs/specs.md#19`
+* Implementation: `lexicon-framework/src/lib.rs:build_managed_runner`
+* Automated evidence:
+  * `lexicon-framework::lib::tests::build_managed_runner`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
+
+### specs-21-paired-runtime-compatibility
+
+* Contract/spec authority: `workspace/specs/specs.md#21`
+* Implementation:
+  * `lexicon-framework/src/publication/runtime_pair.rs:publish_runtime_pair`
+  * `lexicon-framework/src/publication/file_system.rs`
+* Automated evidence:
+  * `lexicon-framework::publication::runtime_pair::tests::publication_fails_when_processing_staging_is_missing_and_cleans_up`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
+
+## 5. HTTP recording and audit (specs.md §24)
+
+### specs-24-compressed-response-exact-bytes
+
+* Contract/spec authority: `workspace/specs/specs.md#24`
 * Implementation: `lexicon-core/src/protocols/http/transaction/recorder.rs`
-* Test: `http_recording_post_request_body_preservation`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1927`
-* Environment: Linux container
-* Behavior: POST request body bytes recorded byte-for-byte in `request/body` on disk.
-* Status: implemented and tested
+* Automated evidence:
+  * `core::protocols::http::runner::tests::compressed_response_preserves_exact_wire_bytes_and_hash`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-25. compressed response preservation
-* Implementation: `lexicon-core/src/protocols/http/context.rs`, `recorder.rs`
-* Test: `http_recording_compressed_response_preservation`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1953`
-* Environment: Linux container
-* Behavior: Raw compressed entity bytes (`[0x1f, 0x8b]`) preserved on disk before content decoding.
-* Status: implemented and tested
+### specs-24-redirect-chain-lineage
 
-26. redirect chain
+* Contract/spec authority: `workspace/specs/specs.md#24`
 * Implementation: `lexicon-core/src/protocols/http/context.rs`
-* Test: `http_recording_redirect_chain`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1985`
-* Environment: Linux container
-* Behavior: Redirect responses recorded with parent/child relationship and incremented `redirect_index`.
-* Status: implemented and tested
+* Automated evidence:
+  * `core::protocols::http::runner::tests::redirect_chain_persists_each_attempt_with_parent_identity`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-27. retry attempts
-* Implementation: `lexicon-core/src/protocols/http/context.rs`, `policy.rs`
-* Test: `http_recording_retry_attempts`
-* Location: `lexicon-core/src/protocols/http/runner.rs:2016`
-* Environment: Linux container
-* Behavior: Transient failures retried and each attempt independently recorded on disk with `retry_index`.
-* Status: implemented and tested
+### specs-24-retry-policy-three-attempts
 
-28. connection failure
-* Implementation: `lexicon-core/src/protocols/http/context.rs`, `recorder.rs`
-* Test: `http_recording_connection_failure`
-* Location: `lexicon-core/src/protocols/http/runner.rs:2042`
-* Environment: Linux container
-* Behavior: Connection failures recorded on disk with `RecordedTransportFailure` metadata.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#24`
+* Implementation: `lexicon-core/src/protocols/http/context.rs`
+* Automated evidence:
+  * `core::protocols::http::runner::tests::retry_policy_persists_exactly_three_distinct_attempts`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-29. truncated response
-* Implementation: `lexicon-core/src/protocols/http/context.rs`, `recorder.rs`
-* Test: `http_recording_truncated_response`
-* Location: `lexicon-core/src/protocols/http/runner.rs:2071`
-* Environment: Linux container
-* Behavior: Truncated response preserves partial body on disk and returns streaming error.
-* Status: implemented and tested
+### specs-24-connection-failure-final-metadata
 
-30. request metadata
-* Implementation: `lexicon-core/src/protocols/http/transaction/metadata.rs`
-* Test: `http_recording_request_metadata_structure`
-* Location: `lexicon-core/src/protocols/http/runner.rs:2097`
-* Environment: Linux container
-* Behavior: `request/metadata.json` records schema version, method, url, and headers.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#24`
+* Implementation: `lexicon-core/src/protocols/http/context.rs`
+* Automated evidence:
+  * `core::protocols::http::runner::tests::connection_failure_persists_finalized_failure_metadata`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-31. response metadata
-* Implementation: `lexicon-core/src/protocols/http/transaction/metadata.rs`
-* Test: `http_recording_response_metadata_structure`
-* Location: `lexicon-core/src/protocols/http/runner.rs:2124`
-* Environment: Linux container
-* Behavior: `response/metadata.json` records status, completion timestamp, and body sha256.
-* Status: implemented and tested
+### specs-24-truncated-body-partial-bytes
 
-32. mandatory header redaction
+* Contract/spec authority: `workspace/specs/specs.md#24`
 * Implementation: `lexicon-core/src/protocols/http/transaction/recorder.rs`
-* Test: `http_recording_mandatory_header_redaction`
-* Location: `lexicon-core/src/protocols/http/runner.rs:2159`
-* Environment: Linux container
-* Behavior: `Authorization` and `Cookie` headers redacted structurally in metadata.
-* Status: implemented and tested
+* Automated evidence:
+  * `core::protocols::http::runner::tests::truncated_body_preserves_partial_bytes_and_incomplete_marker`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-33. sensitive-query redaction
-* Implementation: `lexicon-core/src/protocols/http/transaction/recorder.rs`
-* Test: `http_recording_sensitive_query_redaction`
-* Location: `lexicon-core/src/protocols/http/runner.rs:2189`
-* Environment: Linux container
-* Behavior: Sensitive query parameters declared via `sensitive_query_name` are redacted in metadata.
-* Status: implemented and tested
+### specs-24-mandatory-explicit-redaction
 
-34. record-before-return
+* Contract/spec authority: `workspace/specs/specs.md#24`
+* Implementation:
+  * `lexicon-core/src/protocols/http/sensitivity.rs`
+  * `lexicon-core/src/protocols/http/transaction/recorder.rs`
+  * `lexicon-core/src/protocols/http/transaction/metadata.rs`
+* Automated evidence:
+  * `core::protocols::http::runner::tests::all_mandatory_and_explicit_headers_are_structurally_redacted`
+  * `core::protocols::http::runner::tests::sensitive_query_never_appears_in_any_durable_or_diagnostic_text`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
+
+### specs-24-cross-origin-strip-secrets
+
+* Contract/spec authority: `workspace/specs/specs.md#24`
+* Implementation: `lexicon-core/src/protocols/http/context.rs:same_origin`
+* Automated evidence:
+  * `core::protocols::http::runner::tests::cross_origin_redirect_strips_secrets_for_ip_literal_hosts`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
+
+### specs-24-execute-returns-after-sync
+
+* Contract/spec authority: `workspace/specs/specs.md#24`
 * Implementation: `lexicon-core/src/protocols/http/context.rs`
-* Test: `http_recording_record_before_return_guarantee`
-* Location: `lexicon-core/src/protocols/http/runner.rs:2217`
-* Environment: Linux container
-* Behavior: All transaction files are fully synced to disk before `context.execute` returns.
-* Status: implemented and tested
+* Automated evidence:
+  * `core::protocols::http::runner::tests::execute_returns_only_after_transaction_directory_sync`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-### Checkpoints
-35. commit after durable keyed transaction
-* Implementation: `lexicon-core/src/protocols/http/context.rs` (`commit_checkpoint`)
-* Test: `repeated_discovery_converges_without_duplicating_work`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1526`
-* Environment: Linux container
-* Behavior: Commits checkpoint referencing backing durable transaction with matching logical key.
-* Status: implemented and tested
+## 6. Checkpoints (specs.md §36)
 
-36. reject commit without matching transaction
-* Implementation: `lexicon-core/src/protocols/http/context.rs` (`commit_checkpoint`)
-* Test: `commit_checkpoint` rejects unexecuted logical key with `NoTransactionForKey`
-* Location: `lexicon-core/src/protocols/http/context.rs:528`
-* Environment: Linux container
-* Behavior: Attempting to commit checkpoint without backing transaction returns `NoTransactionForKey`.
-* Status: implemented and tested
+### specs-36-checkpoint-backs-completed-transaction
 
-37. lookup across compatible sessions
-* Implementation: `lexicon-core/src/protocols/http/context.rs` (`has_checkpoint`)
-* Test: `repeated_discovery_converges_without_duplicating_work`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1526`
-* Environment: Linux container
-* Behavior: `has_checkpoint` scans historical compatible sessions and admits valid checkpoints.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#36`
+* Implementation:
+  * `lexicon-core/src/protocols/http/checkpoint/mod.rs`
+  * `lexicon-core/src/protocols/http/checkpoint/tests.rs`
+* Automated evidence:
+  * `core::protocols::http::checkpoint::tests::checkpoint_commit_requires_progress_published_transaction`
+  * `core::protocols::http::checkpoint::tests::checkpoint_commit_requires_completed_response`
+  * `core::protocols::http::checkpoint::tests::checkpoint_commit_rejects_transaction_from_other_session`
+  * `core::protocols::http::checkpoint::tests::checkpoint_commit_rejects_logical_key_mismatch`
+  * `core::protocols::http::checkpoint::tests::checkpoint_commit_rejects_attempt_identity_mismatch`
+  * `core::protocols::http::checkpoint::tests::checkpoint_commit_rejects_missing_or_corrupt_backing_transaction`
+  * `core::protocols::http::checkpoint::tests::checkpoint_commit_is_atomically_published_and_directory_synced`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-38. missing backing transaction
-* Implementation: `lexicon-core/src/protocols/http/context.rs`
-* Test: `admit_http_checkpoint_from_disk` validates transaction existence
-* Location: `lexicon-core/src/protocols/http/checkpoint/`
-* Environment: Linux container
-* Behavior: Checkpoint lookup rejects candidate whose backing transaction was deleted or corrupted.
-* Status: implemented and tested
+## 7. Processing (specs.md §39)
 
-39. crash after response before checkpoint
-* Implementation: `lexicon-core/src/protocols/http/context.rs`, `runner.rs`
-* Test: `repeated_discovery_converges_without_duplicating_work`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1526`
-* Environment: Linux container
-* Behavior: Interruption before checkpoint commit allows repeated execution to complete cleanly.
-* Status: implemented and tested
+### specs-39-raw-transaction-enumeration
 
-40. checkpoint-backed resume
-* Implementation: `lexicon-core/src/protocols/http/context.rs`, `runner.rs`
-* Test: `crash_after_checkpoint_before_work_completion_is_reconciled`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1626`
-* Environment: Linux container
-* Behavior: Recovery inspects `has_checkpoint` and advances state without repeating HTTP requests.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#39`
+* Implementation: `lexicon-core/src/processing/transactions.rs`
+* Automated evidence:
+  * `processing_catalog_accepts_only_finalized_admitted_transactions`
+  * `processing_catalog_orders_by_completion_then_identity`
+  * `processing_catalog_rejects_duplicate_transaction_identity`
+  * `processing_catalog_ignores_well_formed_live_staging_directory`
+  * `processing_catalog_rejects_malformed_staging_name`
+  * `processing_catalog_rejects_symlink_and_unexpected_file`
+  * `processing_catalog_requires_succeeded_acquisition_session`
+  * `processing_catalog_rejects_project_runtime_session_mismatch`
+  * `processing_catalog_rejects_transaction_outside_session_time_bounds`
+  * `processing_catalog_rejects_corrupt_transaction_metadata_or_body_hash`
+  * `processing_catalog_rejects_missing_acquisition_session`
+  * `processing_catalog_does_not_mutate_raw_data`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-### Durable Source State
-41. validated state path
-* Implementation: `lexicon-core/src/session/context.rs`, `lexicon-core/src/protocols/http/context.rs`
-* Test: `source_state_directory_is_created_and_writable_before_handler_runs`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1306`
-* Environment: Linux container
-* Behavior: `source_state_directory()` is validated, created, and writable inside handler.
-* Status: implemented and tested
+### specs-39-incomplete-transaction-handling
 
-42. state survives sessions
-* Implementation: `lexicon-core/src/session/context.rs`, `lexicon-core/src/session/test_support.rs`
-* Test: `source_state_directory_persists_across_sequential_sessions`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1338`
-* Environment: Linux container
-* Behavior: Marker file written in session 1 is present and readable in session 2.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#39`
+* Implementation: `lexicon-core/src/processing/transactions.rs`
+* Automated evidence:
+  * `processing_context_filters_out_incomplete_transactions`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-43. state survives runtime rebuild and publication
-* Implementation: `lexicon-framework/src/lib.rs` (`build_source`)
-* Test: `build_source` preserves `get-raw-data/state/`
-* Location: `lexicon-framework/src/lib.rs`
-* Environment: Linux container
-* Behavior: Rebuilding and publishing runtimes does not delete or alter `get-raw-data/state/`.
-* Status: implemented and tested
+### specs-39-staged-database-publication
 
-44. work insertion deduplication
-* Implementation: `lexicon-core/src/protocols/http/runner.rs` (`WorkLedger`)
-* Test: `work_insertion_deduplication_converges_without_duplicate_rows`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1497`
-* Environment: Linux container
-* Behavior: Multiple insertions of same `(kind, stable_key)` item do not create duplicate rows.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#39`
+* Implementation:
+  * `lexicon-core/src/processing/context.rs`
+  * `lexicon-core/src/protocols/http/runner.rs:catch_unwind`
+* Automated evidence:
+  * `core_begins_transaction_before_source_handler`
+  * `successful_handler_commits_database_once`
+  * `source_commit_or_rollback_attempt_is_detected`
+  * `uncertain_commit_retains_uncertain_typed_outcome`
+  * `commit_failure_never_reports_session_success`
+  * `processing_context_exposes_read_only_admitted_catalog`
+  * `require_transaction_active_distinguishes_open_from_after_handler`
+  * `handler_panic_is_caught_reconciled_and_rolls_back`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL. Audit-named
+  panic-recovery test (`handler_panic_is_caught_reconciled_and_rolls_back`)
+  is now landed: `lexicon-core/src/protocols/http/runner.rs` wires
+  `std::panic::catch_unwind` around the source-handler invocation and
+  translates the unwinding termination into a typed
+  `HttpRuntimeInvocationExecutionError::HandlerPanicked` plus the durable
+  `SessionFailureCode::HandlerPanicked` failure code; the test asserts
+  neither the durable `diagnostic` nor the typed error carries the
+  source panic payload text.
 
-45. repeated discovery convergence
-* Implementation: `lexicon-core/src/protocols/http/runner.rs` (`WorkLedger`)
-* Test: `repeated_discovery_converges_without_duplicating_work`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1526`
-* Environment: Linux container
-* Behavior: Interrupted discovery re-run converges without duplicate items.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#39`
+* Implementation: `lexicon-core/src/processing/context.rs`
+* Automated evidence:
+  * `handler_error_rolls_back_and_preserves_previous_database`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-46. crash after checkpoint before work completion
-* Implementation: `lexicon-core/src/protocols/http/runner.rs` (`WorkLedger`)
-* Test: `crash_after_checkpoint_before_work_completion_is_reconciled`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1626`
-* Environment: Linux container
-* Behavior: Crash after checkpoint commit is reconciled to complete on next session.
-* Status: implemented and tested
+## 8. Foreground supervision and cancellation (specs.md §29, contract.md §20)
 
-47. recovery marks checkpointed work complete
-* Implementation: `lexicon-core/src/protocols/http/runner.rs` (`WorkLedger`)
-* Test: `crash_after_checkpoint_before_work_completion_is_reconciled`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1626`
-* Environment: Linux container
-* Behavior: Reconciled item status is updated to `complete` in SQLite ledger.
-* Status: implemented and tested
+### specs-29-foreground-interruption
 
-48. SQLite schema migration
-* Implementation: `lexicon-core/src/protocols/http/runner.rs`
-* Test: `sqlite_schema_migration_upgrades_tables_and_preserves_records`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1725`
-* Environment: Linux container
-* Behavior: Transactional SQLite migration from v1 to v2 upgrades schema and preserves records.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#29`
+* Implementation:
+  * `lexicon-framework/src/process/mod.rs:wait_with_cancellation`
+  * `lexicon-framework/src/process/cancellation.rs:CancellationState`
+  * `lexicon-cli/tests/foreground_cancellation.rs:UncoopFakeChild`
+  * `lexicon-cli/tests/foreground_cancellation.rs:FailingTermChild`
+* Automated evidence:
+  * `foreground_cancellation::completed_outcome_when_child_exits_before_any_cancellation`
+  * `foreground_cancellation::graceful_cancellation_path_uses_recorded_kind`
+  * `foreground_cancellation::termination_kind_maps_to_documented_cancel_outcome`
+  * `foreground_cancellation::shell_exit_codes_collapses_graceful_and_forceful_to_same_shell_code`
+  * `foreground_cancellation::cancellation_records_graceful_failure_code`
+  * `foreground_cancellation::cancellation_records_forced_failure_code`
+  * `foreground_cancellation::wait_or_kill_error_never_reports_false_success`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-49. simultaneous unsupported writer rejection
-* Implementation: `lexicon-core/src/protocols/http/runner.rs`
-* Test: `simultaneous_unsupported_writer_rejection_via_sqlite_locking`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1801`
-* Environment: Linux container
-* Behavior: Concurrent write transactions on state database are rejected by SQLite locking.
-* Status: implemented and tested
+### contract-20-stale-lease-recovery
 
-### Sessions and Supervision
-50. source success
-* Implementation: `lexicon-framework/src/data/foreground.rs`, `lexicon-core/src/session/store.rs`
-* Test: `session_transitions_to_succeeded_after_successful_handler`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1212`
-* Environment: Linux container
-* Behavior: Successful execution transitions session to `Succeeded`.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/contract.md#20`
+* Implementation:
+  * `lexicon_framework::data::session`
+  * `lexicon-core/src/session/store.rs`
+* Automated evidence:
+  * `select_and_prepare_session`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-51. ordinary source error
-* Implementation: `lexicon-framework/src/data/foreground.rs`, `lexicon-core/src/protocols/http/runner.rs`
-* Test: `session_transitions_to_failed_after_source_authored_error`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1236`
-* Environment: Linux container
-* Behavior: Handler error transitions session to `Failed`.
-* Status: implemented and tested
+### specs-26-abandon-policy
 
-52. source panic & abnormal child exit
-* Implementation: `lexicon-framework/src/data/foreground.rs` (`wait_and_reconcile`)
-* Test: `abnormal_termination_reconciliation`
-* Location: `lexicon-framework/src/data/foreground.rs`
-* Environment: Linux container
-* Behavior: Child abnormal termination or nonzero exit is reconciled to `Failed` in session store.
-* Status: implemented and tested
-
-53. foreground interruption
-* Implementation: `lexicon-framework/src/data/foreground.rs`
-* Test: `wait_and_reconcile` loop handles `Interrupted`
-* Location: `lexicon-framework/src/data/foreground.rs:148`
-* Environment: Linux container
-* Behavior: Retries wait on `ErrorKind::Interrupted` without dropping supervisor lease.
-* Status: implemented and tested
-
-54. stale lease recovery
-* Implementation: `lexicon-framework/src/data/session.rs`, `lexicon-core/src/session/store.rs`
-* Test: `select_and_prepare_session` stale lease recovery
-* Location: `lexicon-framework/src/data/session.rs`
-* Environment: Linux container
-* Behavior: Stale unrenewed lease is reclaimed and transitioned to `Failed` before new session.
-* Status: implemented and tested
-
-55. abandon policy
+* Contract/spec authority: `workspace/specs/specs.md#26`
 * Implementation: `lexicon-framework/src/data/session.rs`
-* Test: `select_and_prepare_session` with `--abandon-past-fail`
-* Location: `lexicon-framework/src/data/session.rs`
-* Environment: Linux container
-* Behavior: Prior failed session is abandoned and fresh session created under explicit policy.
-* Status: implemented and tested
+* Automated evidence:
+  * `select_and_prepare_session`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-56. non-UTF-8 Unix arguments
-* Implementation: `lexicon-core/src/runtime/invocation_transport.rs`
-* Test: `non_utf8_unix_source_argument_is_preserved_byte_for_byte`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1156`
-* Environment: Linux container
-* Behavior: Raw bytes with invalid UTF-8 sequences (`[0x80]`) forwarded losslessly across invocation.
-* Status: implemented and tested
+### specs-23-non-utf8-unix-arg-preservation
 
-57. Windows Unicode arguments
-* Implementation: `lexicon-core/src/runtime/invocation_transport.rs`
-* Test: `source_argument_fidelity_is_preserved_across_dispatch`
-* Location: `lexicon-core/src/protocols/http/runner.rs:1121`
-* Environment: Linux container, Windows
-* Behavior: Unicode strings (`héllo-üñîçødé`) forwarded accurately.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#23`
+* Implementation:
+  * `lexicon-core/src/runtime/invocation_transport.rs`
+* Automated evidence:
+  * `non_utf8_unix_source_argument_is_preserved_byte_for_byte`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-58. background operator-host acknowledgement & continuous lease ownership
+### specs-23-windows-unicode-arg-preservation
+
+* Contract/spec authority: `workspace/specs/specs.md#23`
+* Implementation:
+  * `lexicon-core/src/runtime/invocation_transport.rs`
+* Automated evidence:
+  * `source_argument_fidelity_is_preserved_across_dispatch`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
+
+## 9. Background handoff and operator host (specs.md §30, contract.md §30)
+
+### specs-30-background-operator-host-handoff
+
+* Contract/spec authority: `workspace/specs/specs.md#30`
 * Implementation: `lexicon-framework/src/data/background.rs`
-* Test: `successful_handoff_returns_outcome_once_lease_is_owned`, `mismatched_acknowledgement_token_fails_handoff`, `processing_background_handoff_succeeds`, `operator_host_rejects_missing_or_mismatched_handoff_token`, `operator_host_exiting_before_ownership_is_a_typed_error`, `ownership_timeout_is_a_typed_error`, `re_exec_spawn_failure_is_a_typed_error`
-* Location: `lexicon-framework/src/data/background.rs:606`
-* Environment: Linux container
-* Behavior: Background handoff transfers authority continuously using single-use handoff tokens, verifies child PID acknowledgement, reaps failed/timed-out hosts, and reconciles terminal session state.
-* Status: implemented and tested
+* Automated evidence:
+  * `successful_handoff_returns_outcome_once_lease_is_owned`
+  * `mismatched_acknowledgement_token_fails_handoff`
+  * `processing_background_handoff_succeeds`
+  * `operator_host_rejects_missing_or_mismatched_handoff_token`
+  * `operator_host_exiting_before_ownership_is_a_typed_error`
+  * `ownership_timeout_is_a_typed_error`
+  * `re_exec_spawn_failure_is_a_typed_error`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-59. operator-host terminal reconciliation
-* Implementation: `lexicon-framework/src/data/background.rs` (`execute_operator_host`)
-* Test: `operator_host_rejects_a_session_that_is_no_longer_prepared`
-* Location: `lexicon-framework/src/data/background.rs:515`
-* Environment: Linux container
-* Behavior: Operator host supervises runtime and reconciles terminal session state.
-* Status: implemented and tested
+### specs-30-operator-host-terminal-reconciliation
 
-### Processing
-60. raw transaction enumeration
-* Implementation: `lexicon-core/src/processing/transactions.rs`
-* Test: `raw_transactions` in `lexicon-core/src/processing/`
-* Location: `lexicon-core/src/processing/`
-* Environment: Linux container
-* Behavior: Enumerates completed raw transactions from disk.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/specs.md#30`
+* Implementation: `lexicon-framework/src/data/background.rs`
+* Automated evidence:
+  * `operator_host_rejects_a_session_that_is_no_longer_prepared`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-61. incomplete transaction handling
-* Implementation: `lexicon-core/src/processing/transactions.rs`
-* Test: `ProcessingContext` filters out incomplete/partial transactions
-* Location: `lexicon-core/src/processing/`
-* Environment: Linux container
-* Behavior: Incomplete transactions distinguished and not admitted as finalized.
-* Status: implemented and tested
+### current-15-cli-bg-fg-cancellation-integration
 
-62. staged database publication
-* Implementation: `lexicon-core/src/processing/context.rs`
-* Test: `publish_database`
-* Location: `lexicon-core/src/processing/`
-* Environment: Linux container
-* Behavior: Source writes to staged database and publishes atomically.
-* Status: implemented and tested
+* Contract/spec authority: `current.md#15`
+* Implementation:
+  * `lexicon-cli/tests/background_handoff.rs`
+  * `lexicon-cli/tests/foreground_cancellation.rs`
+  * `lexicon-framework/src/data/background.rs`
+  * `lexicon-framework/src/process/mod.rs`
+* Automated evidence:
+  * `operator_host_invocation_round_trips_typed_reference_through_json`
+  * `operator_host_invocation_decoder_rejects_unknown_operation`
+  * `operator_host_invocation_decoder_rejects_unknown_schema_version`
+  * `operator_host_invocation_decoder_rejects_empty_protocol`
+  * `operator_host_invocation_decoder_rejects_unknown_fields`
+  * `execute_data_rejects_foreground_path_for_background_request`
+  * `background_outcome_carries_project_source_session_and_operation`
+  * `operator_host_binary_surfaces_typed_error_for_malformed_reference`
+  * `operator_host_binary_against_nonexistent_project_does_not_succeed`
+  * `completed_outcome_when_child_exits_before_any_cancellation`
+  * `graceful_cancellation_path_uses_recorded_kind`
+  * `termination_kind_maps_to_documented_cancel_outcome`
+  * `shell_exit_codes_collapses_graceful_and_forceful_to_same_shell_code`
+  * `cancellation_records_graceful_failure_code`
+  * `cancellation_records_forced_failure_code`
+  * `wait_or_kill_error_never_reports_false_success`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
 
-63. failed processing preserves prior output
-* Implementation: `lexicon-core/src/processing/context.rs`
-* Test: Processing failure preserves previous database
-* Location: `lexicon-core/src/processing/`
-* Environment: Linux container
-* Behavior: Unsuccessful processing aborts staging without overwriting active processed data.
-* Status: implemented and tested
+## 10. Sessions and supervision end-to-end (specs.md §30, contract.md §20)
 
-64. paired runtime compatibility
-* Implementation: `lexicon-framework/src/publication/runtime_pair.rs`
-* Test: Paired admission in `lexicon-framework/src/data/session.rs`
-* Location: `lexicon-framework/src/publication/runtime_pair.rs`
-* Environment: Linux container
-* Behavior: Acquisition and processing runtimes published and admitted as compatible pair.
-* Status: implemented and tested
+### contract-20-ordinary-source-error
 
-### Environment Handling
-65. no false success on test skips
-* Implementation: `lexicon-framework/src/build/runtime_probe.rs`, `runtime_staging.rs`, `lib.rs`
-* Test: Bounded retries for transient `ETXTBSY` and working-directory conditions
-* Location: `lexicon-framework/src/build/runtime_probe.rs:1669`, `lexicon-framework/src/lib.rs:3964`
-* Environment: Linux container, Windows
-* Behavior: Exhausted retry budgets return errors rather than converting failures into skips or false successes.
-* Status: implemented and tested
+* Contract/spec authority: `workspace/specs/contract.md#20`
+* Implementation:
+  * `lexicon-framework/src/data/foreground.rs`
+  * `lexicon-core/src/protocols/http/runner.rs`
+* Automated evidence: `session_transitions_to_failed_after_source_authored_error`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
+
+### contract-20-source-panic-and-abnormal-exit
+
+* Contract/spec authority: `workspace/specs/contract.md#20`
+* Implementation:
+  * `lexicon-framework/src/data/foreground.rs:wait_and_reconcile`
+* Automated evidence: `abnormal_termination_reconciliation`
+* Required environment: `linux-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
+
+## 11. Environment handling for retries and probes (specs.md §44)
+
+### specs-44-no-false-success-on-test-skips
+
+* Contract/spec authority: `workspace/specs/specs.md#44`
+* Implementation:
+  * `lexicon-framework/src/build/runtime_probe.rs`
+  * `lexicon-framework/src/build/runtime_staging.rs`
+  * `lexicon-framework/src/lib.rs`
+* Automated evidence:
+  * `bounded_retries_for_transient_ETXTBSY`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that captures the manifest URL.
+
+## 12. CI durable evidence (current.md §13/§14)
+
+### ci-01-conformance-workflow
+
+* Contract/spec authority: `current.md#13`
+* Implementation: `.github/workflows/conformance.yml`
+* Automated evidence:
+  * `.github/workflows/conformance.yml` consumed by `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1`
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First green workflow run; manifest URL published; cycle re-tried until clean.
+
+### ci-02-verification-manifest
+
+* Contract/spec authority: `current.md#14`
+* Implementation:
+  * `verification/README.md`
+  * `verification/verification-manifest.json`
+* Automated evidence: `verification/verification-manifest.json` produced by `linux-container` and `windows-native` jobs.
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run produces a real manifest with the recorded SHA, toolchain, and exit codes.
+
+## 13. Supply chain policy (current.md §12)
+
+### supply-01-release-policy
+
+* Contract/spec authority: `current.md#12`
+* Implementation:
+  * `workspace/specs/release-policy.md`
+  * `automation/build_bundle_mza/produce_supply_inventory.sh`
+  * `automation/build_bundle_mza/hardened_build.sh`
+  * `verification/dependencies/cargo-metadata.json`
+  * `verification/dependencies/cargo-tree.txt`
+  * `verification/dependencies/build-scripts.json`
+  * `verification/dependencies/proc-macros.json`
+  * `verification/dependencies/licenses.json`
+  * `verification/dependencies/advisories.json`
+  * `verification/sbom.cdx.json`
+* Automated evidence: producer scripts produce the inventory.
+* Required environment: `linux-x86_64` (offline)
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First offline producer run; SBOM and inventory hashed and stored.
+
+## 14. Windows runtime replacement (current.md §15)
+
+### current-15-windows-runtime-replacement
+
+* Contract/spec authority: `current.md#15`
+* Implementation:
+  * `lexicon-framework/tests/windows_runtime_replacement.rs`
+  * `lexicon-framework/src/publication/runtime_pair.rs:publish_runtime_pair`
+  * `lexicon-framework/src/publication/file_system.rs`
+* Automated evidence:
+  * `published_runtime_pair_exposes_documented_accessors`
+  * `staged_temp_layout_round_trip_blob_under_windows_runner`
+  * `retry_pause_window_for_real_publication_is_at_least_a_few_milliseconds`
+  * `publication_primitive_reachable_from_cross_platform_integration_target`
+* Required environment: `linux-x86_64` (compile-pass only), `windows-x86_64` (real evidence)
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First native Windows runner publish round-trip that proves bounded retry under real ERROR_SHARING_VIOLATION.
+
+## 15. MZA release construction (current.md §11) — blocked
+
+### mza-01-pin-upstream-source
+
+* Contract/spec authority: `current.md#11`
+* Implementation:
+  * `.gitmodules`
+  * `automation/build_bundle_mza/mza/` (MZA submodule)
+* Automated evidence: `.gitmodules` declares the submodule; `git submodule status --recursive` runs without dirty suffixes (per §16).
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `not implemented`
+* Open gap: MZA does not publish a Protocol 1 installer API that owns install/upgrade/uninstall/command registration/platform integration. The audit itself records this as an exogenous blocker in `current.md` §3.
+
+### mza-02-real-installer-entrypoint
+
+* Contract/spec authority: `current.md#11`
+* Implementation:
+  * `lexicon-bundle/build.rs` (empty adapter path)
+  * `lexicon-bundle/src/main.rs` (`MzaBundleInput` include adapter)
+  * `lexicon-bundle/Cargo.toml` (build-deps `serde`, `toml`)
+* Automated evidence: `cargo check` succeeds against the empty adapter; adapter slices in once a non-empty TOML is provided through `MZA_BUNDLE_INPUTS`.
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `not implemented`
+* Open gap: Same upstream MZA installer API blocker recorded against `mza-01`.
+
+### release-01-locked-noninteractive-build
+
+* Contract/spec authority: `current.md#11`
+* Implementation: `automation/build_bundle_mza/build_release.sh`
+* Automated evidence: shell script refuses to run while `<accepted-mza-sha>` is a placeholder.
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `not implemented`
+* Open gap: `<accepted-mza-sha>` placeholder; depends on accepted MZA release commit.
+
+### release-02-obsolete-orchestration-deleted
+
+* Contract/spec authority: `current.md#11`
+* Implementation:
+  * `automation/build_bundle_install/` removed
+  * `lexicon-install.toml` removed
+  * `README.md` retargeted to `build_release.sh`
+  * `containerization/test-container/{entrypoint.sh,README.md}` point at `build_release.sh`
+  * `containerization/lexicon-container/{Containerfile,README.md}` marked inert pending accepted MZA
+  * Member `Cargo.lock` files removed; root `Cargo.lock` is the workspace lockfile
+  * `.cargo/config.toml` provides `vendored-sources` shim
+* Automated evidence: directory listings and shell guards in `build_release.sh` confirm removal.
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `implemented, unverified`
+* Open gap: First CI run that observes the cleanup commit through the conformance workflow.
+
+## 16. Master completion criteria (current.md §18) — blocked
+
+### final-18-conformance
+
+* Contract/spec authority: `current.md#18`
+* Implementation: this status document and `workspace/specs/conformance.toml`.
+* Automated evidence: the conformance workflow `.github/workflows/conformance.yml` runs the `conformance-final` gate.
+* Required environment: `linux-x86_64`, `windows-x86_64`
+* Durable evidence: `none`
+* Status: `not implemented`
+* Open gap: Items 1..29 of §18 remain until every prerequisite passes — including Gate 6 (MZA upstream API) and durable green CI evidence.
 
 ---
 
-## Explicitly Deferred Items
-1. Core-owned task queue / `durable-work-v1` capability (§46): Intentionally deferred per specs.md §46 in favor of the source-owned SQLite model.
-2. Protocols beyond HTTP (§2): Intentionally deferred; HTTP is the initial supported protocol.
-3. Project-wide publication transaction across all sources (§40): Intentionally deferred per specs.md §40.
+## Explicitly Deferred Items (per `current.md` §16)
+
+These are deferred by contract, not by stagnation:
+
+1. `specs-46-core-owned-task-queue`: deferred per `workspace/specs/specs.md#46`
+   in favor of the source-owned SQLite model.
+2. `specs-2-protocols-beyond-http`: deferred per `workspace/specs/specs.md#2`;
+   HTTP is the initial supported protocol.
+3. `specs-40-project-wide-publication-transaction`: deferred per
+   `workspace/specs/specs.md#40`; per-pair runtime publication is
+   completed and tested, but a project-wide transaction across every
+   source/protocol pairing is out of scope for Contract V1.
+
+No row above claims `Status: conformant`. Conformant status requires
+durable evidence tied to an exact commit, and per `current.md` §17
+"a number in current.md without the attached exact-SHA manifest is not
+evidence." A row reaches `conformant` only after `.github/workflows/conformance.yml`
+publishes a green manifest URL and that URL replaces `durable_evidence = none`
+in this same commit.

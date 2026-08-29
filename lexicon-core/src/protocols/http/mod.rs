@@ -7,8 +7,12 @@ pub mod invocation;
 pub mod policy;
 pub mod request;
 pub mod runner;
+pub(crate) mod sensitivity;
 pub(crate) mod transport;
 pub mod transaction;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use context::{
     AcquisitionProgressError, HttpAcquisitionContext, HttpProgressPartialCommit,

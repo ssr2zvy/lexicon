@@ -1,21 +1,31 @@
 #!/usr/bin/env bash
+# Test-container entrypoint (current.md §13 / §16 / RELEASE-02).
+#
+# The release/bundle entrypoint now lives at
+# `automation/build_bundle_mza/build_release.sh`. The previous
+# `automation/build_bundle_install/` scripts (`build_bundle_install.sh`,
+# `install.sh`, `get_build_variables.sh`, `local_build_variables.sh`,
+# `update_lock_file.sh`) and `lexicon-install.toml` are removed per
+# RELEASE-02; an interactive bundle install menu is no longer wired in.
+
 set -euo pipefail
 
 export PATH="/usr/local/cargo/bin:${PATH}"
 
 LEXICON_ROOT="${LEXICON_ROOT:-/lexicon}"
 REPO_DIR="${REPO_DIR:-$LEXICON_ROOT}"
+RELEASE_SCRIPT="$REPO_DIR/automation/build_bundle_mza/build_release.sh"
+MZA_CONFIG="$REPO_DIR/automation/build_bundle_mza/mza_artifacts.toml"
 
 REQUIRED_PATHS=(
     "$REPO_DIR/Cargo.toml"
-    "$REPO_DIR/lexicon-install.toml"
     "$REPO_DIR/lexicon-cli"
     "$REPO_DIR/lexicon-bundle"
     "$REPO_DIR/lexicon-framework"
-    "$REPO_DIR/automation/build_bundle_install/build_bundle_install.sh"
-    "$REPO_DIR/automation/build_bundle_install/get_build_variables.sh"
-    "$REPO_DIR/automation/build_bundle_install/install.sh"
+    "$RELEASE_SCRIPT"
+    "$MZA_CONFIG"
     "$REPO_DIR/automation/build_bundle_mza/mza"
+    "$REPO_DIR/.gitmodules"
 )
 
 tc_echo() {
@@ -41,15 +51,15 @@ verify_repo() {
 run_build_pipeline() {
     verify_repo
     cd "$REPO_DIR"
-    tc_echo "Running build, bundle, install pipeline"
-    bash "$REPO_DIR/automation/build_bundle_install/build_bundle_install.sh" "$@"
-    tc_echo "Build pipeline completed successfully. Keeping container alive for further work."
+    tc_echo "Running locked, non-interactive MZA release pipeline"
+    bash "$RELEASE_SCRIPT" "$@"
+    tc_echo "Release pipeline completed successfully. Keeping container alive for further work."
     wait_for_work
 }
 
 if [ "$#" -gt 0 ]; then
     case "$1" in
-        build|bundle)
+        build|release|bundle)
             shift
             run_build_pipeline "$@"
             ;;

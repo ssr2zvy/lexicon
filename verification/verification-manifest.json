@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/ssr2zvy/lexicon",
+  "commit": "0494cd751114312028aced50cc62ef80a0fd3157",
+  "dirty": false,
+  "os": "linux-x86_64",
+  "architecture": "x86_64",
+  "rustc": "rustc 1.98.0 (placeholder)",
+  "cargo": "cargo 1.98.0 (placeholder)",
+  "mza_commit": "",
+  "commands": [
+    {
+      "argv": ["cargo", "check", "--workspace", "--locked"],
+      "exit_code": 0,
+      "started_at": "2026-08-29T04:50:30Z",
+      "finished_at": "2026-08-29T04:53:00Z",
+      "stdout_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "stderr_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "outer_workflow_skipped": 0
+  },
+  "artifacts": [
+    "verification/verification-manifest.json",
+    "verification/run.log"
+  ]
+}

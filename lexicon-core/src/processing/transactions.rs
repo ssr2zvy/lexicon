@@ -676,3 +676,111 @@ fn validate_transaction_against_session(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_directory_classifier_accepts_known_partial_and_finalized_shapes() {
+        let valid_partial = std::ffi::OsString::from(".partial-1700000000-abc");
+        match classify_raw_directory_name(&valid_partial) {
+            RawDirectoryClass::RecognizedPartial => {}
+            other => panic!("expected RecognizedPartial, got {other:?}"),
+        }
+
+        let malformed = std::ffi::OsString::from(".partial-abc");
+        match classify_raw_directory_name(&malformed) {
+            RawDirectoryClass::MalformedPartial => {}
+            other => panic!("expected MalformedPartial, got {other:?}"),
+        }
+
+        let finalized = std::ffi::OsString::from("1700000000-abc");
+        match classify_raw_directory_name(&finalized) {
+            RawDirectoryClass::FinalizedCandidate => {}
+            other => panic!("expected FinalizedCandidate, got {other:?}"),
+        }
+
+        let unrecognized = std::ffi::OsString::from("scratch");
+        match classify_raw_directory_name(&unrecognized) {
+            RawDirectoryClass::Unrecognized => {}
+            other => panic!("expected Unrecognized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn discovery_error_is_provenance_failure_for_provenance_variants_only() {
+        use std::io;
+        let prov =
+            ProcessingTransactionDiscoveryError::RawRootEnumeration(io::Error::other("seed"));
+        assert!(prov.is_provenance_failure());
+        assert!(prov.entry_path().is_none());
+
+        let not_prov = ProcessingTransactionDiscoveryError::RuntimeProtocolMismatch;
+        assert!(!not_prov.is_provenance_failure());
+        assert!(not_prov.provenance_error().is_none());
+
+        let symlink = ProcessingTransactionDiscoveryError::RawEntrySymlink {
+            entry_path: PathBuf::from("/tmp/raw/symlink"),
+        };
+        assert!(!symlink.is_provenance_failure());
+        assert_eq!(
+            symlink.entry_path(),
+            Some(std::path::Path::new("/tmp/raw/symlink"))
+        );
+    }
+
+    #[test]
+    fn catalog_iteration_is_total_and_order_preserving() {
+        use std::path::PathBuf;
+
+        let runtime = OwnedRuntimeIdentity::http_acquisition("proc-cat-source", 1);
+        let make = |suffix: &str| -> ProcessingHttpTransaction {
+            use crate::protocols::http::transaction::{
+                HttpAttemptIdentity, HttpRecordedOutcome, HttpTransactionIdentity, RecordedHeader,
+                RecordedHeaderCollection, RecordedHttpRequest, RecordedHttpResponse,
+                RecordedTransaction,
+            };
+            use crate::session::{ProjectIdentity, SessionIdentity, SessionState};
+            let project = ProjectIdentity::new("proc-cat-project").unwrap();
+            let session = SessionIdentity::new(format!("proc-cat-{suffix}")).unwrap();
+            let identity =
+                HttpTransactionIdentity::new().expect("transaction identity");
+            let attempt = HttpAttemptIdentity::new(1, 0, 0).expect("attempt");
+            let tx = RecordedTransaction::new(
+                identity,
+                attempt,
+                None,
+                None,
+                session.clone(),
+                1_700_000_000,
+                PathBuf::from(format!("/tmp/raw/{suffix}")),
+                RecordedHttpRequest::new(None, 0, None),
+                RecordedHttpResponse::new(
+                    Some(200),
+                    RecordedHeaderCollection::new(Vec::<RecordedHeader>::new()),
+                    PathBuf::from(format!("/tmp/raw/{suffix}/body")),
+                    0,
+                    None,
+                    1_700_000_000,
+                    HttpRecordedOutcome::Response,
+                ),
+            );
+            ProcessingHttpTransaction {
+                project,
+                acquisition_runtime: runtime.clone(),
+                acquisition_session: session,
+                acquisition_session_state: SessionState::Succeeded,
+                transaction: tx,
+            }
+        };
+
+        let items = vec![make("a"), make("b"), make("c")];
+        let catalog = ProcessingHttpTransactionCatalog::new(items.clone());
+        assert_eq!(catalog.len(), 3);
+        assert!(!catalog.is_empty());
+        assert_eq!(catalog.as_slice().len(), 3);
+        let collected: Vec<&ProcessingHttpTransaction> = catalog.iter().collect();
+        assert_eq!(collected.len(), 3);
+    }
+}

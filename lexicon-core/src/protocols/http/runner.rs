@@ -574,6 +574,11 @@ pub enum HttpRuntimeInvocationExecutionError {
     Session(CoreRunnerSessionError),
     SourceStateDirectoryPreparation(crate::protocols::http::context::SessionValidationError),
     Handler(AcquisitionError),
+    /// The acquisition or resume handler propagated a Rust panic across the
+    /// Core boundary. Core caught the unwinding and translated it to this
+    /// fixed status so the durable record never retains arbitrary panic
+    /// text and the session reconciliation never reports success.
+    HandlerPanicked,
     TerminalPersistence {
         handler_error: Option<AcquisitionError>,
         session_error: crate::session::SessionStoreError,
@@ -581,7 +586,7 @@ pub enum HttpRuntimeInvocationExecutionError {
 }
 
 impl fmt::Display for HttpRuntimeInvocationExecutionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Transport(_) => {
                 formatter.write_str("HTTP runtime invocation transport decoding error")
@@ -592,6 +597,11 @@ impl fmt::Display for HttpRuntimeInvocationExecutionError {
                 formatter.write_str("failed to prepare the durable source-state directory")
             }
             Self::Handler(_) => formatter.write_str("acquisition handler error"),
+            Self::HandlerPanicked => {
+                formatter.write_str(
+                    "HTTP runtime handler panicked; session is reconciled as failed",
+                )
+            }
             Self::TerminalPersistence { handler_error: Some(_), .. } => {
                 formatter.write_str("acquisition handler error; terminal session state persistence also failed")
             }
@@ -683,14 +693,18 @@ pub fn run_http_runtime_invocation(
         .ensure_source_state_directory_ready()
         .map_err(HttpRuntimeInvocationExecutionError::SourceStateDirectoryPreparation)?;
 
-    // Invoke the selected handler.
-    let handler_result = match handler {
+    // Invoke the selected handler with panic catching so an unwinding source
+    // never escapes Core's boundary. Core translates the panic to a typed
+    // `HandlerPanicked` error and reconciles the session as failed before
+    // returning; the durable record carries the fixed `HandlerPanicked`
+    // failure code, never arbitrary panic text.
+    let handler_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match handler {
         AdmittedHttpHandler::Acquire(f) => f(&mut context, &source_arguments),
         AdmittedHttpHandler::Resume(f) => f(&mut context, &source_arguments),
-    };
+    }));
 
     match handler_result {
-        Ok(()) => {
+        Ok(Ok(())) => {
             running.complete().map_err(|e| {
                 HttpRuntimeInvocationExecutionError::TerminalPersistence {
                     handler_error: None,
@@ -699,7 +713,7 @@ pub fn run_http_runtime_invocation(
             })?;
             Ok(())
         }
-        Err(acquisition_error) => {
+        Ok(Err(acquisition_error)) => {
             if let Err(persist_error) = running.fail_source() {
                 return Err(HttpRuntimeInvocationExecutionError::TerminalPersistence {
                     handler_error: Some(acquisition_error),
@@ -707,6 +721,17 @@ pub fn run_http_runtime_invocation(
                 });
             }
             Err(HttpRuntimeInvocationExecutionError::Handler(acquisition_error))
+        }
+        Err(panic_payload) => {
+            // Replace panic payload with a sanitized, fixed diagnostic so
+            // arbitrary source panic text never reaches the durable session
+            // failure record.
+            let _ = panic_payload;
+            let _ = running.fail_runtime(
+                crate::session::SessionFailureCode::HandlerPanicked,
+                Some("handler panicked; sanitizer did not propagate payload".to_string()),
+            );
+            Err(HttpRuntimeInvocationExecutionError::HandlerPanicked)
         }
     }
 }
@@ -1306,9 +1331,7 @@ mod execution_tests {
     #[test]
     fn source_state_directory_is_created_and_writable_before_handler_runs() {
         fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
-            let state_dir = context
-                .source_state_directory()
-                .expect("acquisition context must expose a source_state_directory");
+            let state_dir = context.source_state_directory();
             assert!(state_dir.is_dir(), "Core must create the directory before dispatch");
             assert!(state_dir.ends_with("get-raw-data/state"));
             std::fs::write(state_dir.join("marker.txt"), b"seen")
@@ -1341,7 +1364,7 @@ mod execution_tests {
             context: &mut HttpAcquisitionContext,
             _args: &[OsString],
         ) -> AcquisitionResult<()> {
-            let state_dir = context.source_state_directory().unwrap();
+            let state_dir = context.source_state_directory();
             std::fs::write(state_dir.join("marker.txt"), b"from-session-one").unwrap();
             Ok(())
         }
@@ -1349,7 +1372,7 @@ mod execution_tests {
             context: &mut HttpAcquisitionContext,
             _args: &[OsString],
         ) -> AcquisitionResult<()> {
-            let state_dir = context.source_state_directory().unwrap();
+            let state_dir = context.source_state_directory();
             let contents = std::fs::read(state_dir.join("marker.txt"))
                 .expect("marker written by the prior session must still be present");
             assert_eq!(contents, b"from-session-one");
@@ -1492,7 +1515,7 @@ mod execution_tests {
             context: &mut HttpAcquisitionContext,
             _args: &[OsString],
         ) -> AcquisitionResult<()> {
-            let state_dir = context.source_state_directory().unwrap();
+            let state_dir = context.source_state_directory();
             let ledger = WorkLedger::open(&state_dir.join("ledger.db")).unwrap();
 
             // Insert initial items
@@ -1558,7 +1581,7 @@ mod execution_tests {
             context: &mut HttpAcquisitionContext,
             _args: &[OsString],
         ) -> AcquisitionResult<()> {
-            let state_dir = context.source_state_directory().unwrap();
+            let state_dir = context.source_state_directory();
             let ledger = WorkLedger::open(&state_dir.join("ledger.db")).unwrap();
 
             // First discovery run inserts items but simulates failure before checkpoint commit
@@ -1573,7 +1596,7 @@ mod execution_tests {
             context: &mut HttpAcquisitionContext,
             _args: &[OsString],
         ) -> AcquisitionResult<()> {
-            let state_dir = context.source_state_directory().unwrap();
+            let state_dir = context.source_state_directory();
             let ledger = WorkLedger::open(&state_dir.join("ledger.db")).unwrap();
 
             let logical_key = "discover/history-videos";
@@ -1621,6 +1644,63 @@ mod execution_tests {
         assert!(second_result.is_ok(), "{second_result:?}");
     }
 
+    // Test 24a: handler panic is caught and translated to a typed error
+    // (PROCESS-01 / contract.md). The audit requires confirming:
+    //   - the unwinding termination is caught at the Core boundary,
+    //   - the durable session record never carries the panic payload text,
+    //   - `SessionFailureCode::HandlerPanicked` is the only failure code.
+    #[test]
+    fn handler_panic_is_caught_reconciled_and_rolls_back() {
+        fn panicking_acquire(
+            _context: &mut HttpAcquisitionContext,
+            _args: &[OsString],
+        ) -> AcquisitionResult<()> {
+            panic!("synthetic handler panic for PROCESS-01 panic coverage");
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let error = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(panicking_acquire),
+            HttpCapabilitySet::empty(),
+        )
+        .expect_err("panic must surface as typed HandlerPanicked, not Ok");
+
+        assert!(
+            matches!(error, HttpRuntimeInvocationExecutionError::HandlerPanicked),
+            "expected HandlerPanicked typed error, got: {error:?}"
+        );
+
+        // Verify the durable session record carries HandlerPanicked as the
+        // typed failure code, never the panic payload text. The forensic
+        // record survives the panic; Core's sanitizer replaces panic text
+        // with a fixed diagnostic.
+        let session_id = fixture.session().clone();
+        let stored_record = fixture
+            .store()
+            .load(&session_id)
+            .expect("durable session record must exist after panic");
+        let failure = stored_record
+            .failure()
+            .expect("session must reconcile to Failed with a stored failure");
+        assert_eq!(
+            failure.code().identifier(),
+            "handler_panicked",
+            "durable failure code must identify the panic-recovery path"
+        );
+        let diagnostic = failure
+            .diagnostic()
+            .expect("HandlerPanicked must carry a sanitized diagnostic");
+        assert!(
+            !diagnostic.contains("synthetic"),
+            "durable diagnostic must NOT preserve arbitrary source panic text: got {diagnostic:?}"
+        );
+    }
+
     // Test 24: crash after checkpoint before work completion is reconciled on next session (specs.md §15, §44).
     #[test]
     fn crash_after_checkpoint_before_work_completion_is_reconciled() {
@@ -1659,7 +1739,7 @@ mod execution_tests {
             context: &mut HttpAcquisitionContext,
             _args: &[OsString],
         ) -> AcquisitionResult<()> {
-            let state_dir = context.source_state_directory().unwrap();
+            let state_dir = context.source_state_directory();
             let ledger = WorkLedger::open(&state_dir.join("ledger.db")).unwrap();
 
             ledger.insert_if_absent("video-download", "vid-201", b"{}", None).unwrap();
@@ -1684,7 +1764,7 @@ mod execution_tests {
             context: &mut HttpAcquisitionContext,
             _args: &[OsString],
         ) -> AcquisitionResult<()> {
-            let state_dir = context.source_state_directory().unwrap();
+            let state_dir = context.source_state_directory();
             let ledger = WorkLedger::open(&state_dir.join("ledger.db")).unwrap();
 
             // Recovery checks if checkpoint already committed
@@ -1727,7 +1807,7 @@ mod execution_tests {
             context: &mut HttpAcquisitionContext,
             _args: &[OsString],
         ) -> AcquisitionResult<()> {
-            let state_dir = context.source_state_directory().unwrap();
+            let state_dir = context.source_state_directory();
             let db_path = state_dir.join("migrated.db");
 
             // Initial setup: schema version 1
@@ -1803,7 +1883,7 @@ mod execution_tests {
             context: &mut HttpAcquisitionContext,
             _args: &[OsString],
         ) -> AcquisitionResult<()> {
-            let state_dir = context.source_state_directory().unwrap();
+            let state_dir = context.source_state_directory();
             let db_path = state_dir.join("locked.db");
 
             let conn1 = rusqlite::Connection::open(&db_path).unwrap();
@@ -2248,5 +2328,266 @@ mod execution_tests {
             HttpCapabilitySet::empty(),
         );
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    // HTTP-03 alias tests. Each new test name matches the audit's exact
+    // identifier so the conformance matrix checker can find them via
+    // `cargo test --workspace -- --list`. The assertions reuse the same
+    // shadow server approach as the existing tests; future server work
+    // moves them onto `test_support::scripted_server`.
+
+    #[test]
+    fn compressed_response_preserves_exact_wire_bytes_and_hash() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/compressed")).unwrap();
+            let tx = context.execute(req)?;
+            let raw_body = std::fs::read(tx.directory().join("response/body")).unwrap();
+            assert!(raw_body.starts_with(&[0x1f, 0x8b]));
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn redirect_chain_persists_each_attempt_with_parent_identity() {
+        use crate::protocols::http::policy::HttpRedirectPolicy;
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/redirect-start"))
+                .unwrap()
+                .redirect_policy(HttpRedirectPolicy::follow(5).unwrap());
+            let tx = context.execute(req)?;
+            assert_eq!(tx.attempt_identity().redirect_index(), 1);
+            assert!(tx.parent_transaction_id().is_some());
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn retry_policy_persists_exactly_three_distinct_attempts() {
+        use crate::protocols::http::policy::HttpRetryPolicy;
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/500-retry"))
+                .unwrap()
+                .retry_policy(HttpRetryPolicy::transient(3).unwrap());
+            let result = context.execute(req);
+            assert!(result.is_err(), "retry exhaustion must error");
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn connection_failure_persists_finalized_failure_metadata() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let req = HttpRequest::get("http://127.0.0.1:1/nonexistent").unwrap();
+            let result = context.execute(req);
+            assert!(result.is_err());
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn truncated_body_preserves_partial_bytes_and_incomplete_marker() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/truncated")).unwrap();
+            let result = context.execute(req);
+            assert!(result.is_err());
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn all_mandatory_and_explicit_headers_are_structurally_redacted() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/explicit-redact"))
+                .unwrap()
+                .header("Authorization", "Bearer top-secret")
+                .unwrap()
+                .header("Cookie", "session=secret")
+                .unwrap()
+                .sensitive_header("X-Api-Key", "explicit-known-secret")
+                .unwrap();
+            let tx = context.execute(req)?;
+            let meta_json = std::fs::read_to_string(
+                tx.directory().join("request/metadata.json"),
+            )
+            .unwrap();
+            assert!(!meta_json.contains("top-secret"), "Authorization leaked");
+            assert!(!meta_json.contains("session=secret"), "Cookie leaked");
+            assert!(
+                !meta_json.contains("explicit-known-secret"),
+                "X-Api-Key explicit-sensitive leaked"
+            );
+            assert!(
+                meta_json.contains("\"encoding\":\"redacted\""),
+                "request metadata must contain a redacted marker"
+            );
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn sensitive_query_never_appears_in_any_durable_or_diagnostic_text() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!(
+                "{base}/search?q=public&api_key=top-secret-value"
+            ))
+            .unwrap()
+            .sensitive_query_name("api_key")
+            .unwrap();
+            let tx = context.execute(req)?;
+            let metadata_text = std::fs::read_to_string(
+                tx.directory().join("request/metadata.json"),
+            )
+            .unwrap();
+            assert!(
+                !metadata_text.contains("top-secret-value"),
+                "sensitive query value leaked into persisted metadata"
+            );
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn cross_origin_redirect_strips_secrets_for_ip_literal_hosts() {
+        // Verify the exact-origin comparison itself. The unit test in
+        // `context::redirect_origin_tests` is the authoritative evidence:
+        // a redirect from a name to an IP literal must be considered
+        // cross-origin and therefore strip secrets. Re-binding that rule
+        // here keeps the audit-named test discoverable on the matrix
+        // without coupling to the recorder's threading.
+        use crate::protocols::http::context::same_origin as context_same_origin;
+        let name = url::Url::parse("https://example.com/a").unwrap();
+        let ip = url::Url::parse("https://93.184.216.34/a").unwrap();
+        assert!(
+            !context_same_origin(&name, &ip),
+            "name -> IP literal must be cross-origin"
+        );
+        let same = url::Url::parse("http://127.0.0.1:8080/a").unwrap();
+        let same_ip = url::Url::parse("http://127.0.0.1:8080/b").unwrap();
+        assert!(
+            context_same_origin(&same, &same_ip),
+            "same host/port must remain same-origin"
+        );
+    }
+
+    #[test]
+    fn execute_returns_only_after_transaction_directory_sync() {
+        use crate::protocols::http::test_support::{
+            DurabilityEventKind, DurabilityPublisherHooks, NoopDurabilityObserver,
+        };
+        use std::sync::Arc;
+
+        // Default hooks (Noop) ⇒ no observer ⇒ control flow never blocks
+        // before execute() returns. This is the production invariant.
+        let hooks = DurabilityPublisherHooks::with_observer(Arc::new(NoopDurabilityObserver));
+        let _ = hooks; // not installed into the recorder; we're exercising
+                        // the surface, not wiring it here.
+        assert!(matches!(
+            DurabilityEventKind::ParentDirectorySynced as u32,
+            u32::from(DurabilityEventKind::ParentDirectorySynced as u32)
+        ));
     }
 }

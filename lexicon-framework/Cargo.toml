@@ -8,8 +8,20 @@ lexicon-core = { path = "../lexicon-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-toml = "0.8"
 tempfile = "3"
+thiserror = "1"
+toml = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+  "Win32_System_Console",
+  "Win32_System_Threading",
+] }
 
 [lib]
 path = "src/lib.rs"

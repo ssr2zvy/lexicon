@@ -1,6 +1,7 @@
 pub mod binding;
 pub mod context;
 pub mod error;
+pub mod handoff;
 pub mod lease;
 pub mod model;
 pub mod store;
@@ -20,6 +21,12 @@ pub use error::{
     CoreRunnerSessionError, RuntimeContextDecodingError, RuntimeContextEncodingError,
     RuntimeContextError, SessionDecodingError, SessionEncodingError, SessionLeaseError,
     SessionStoreError, SessionTransitionError,
+};
+pub use handoff::{
+    HANDOFF_DIGEST_BYTES, HANDOFF_SCHEMA_VERSION, HANDOFF_TOKEN_BYTES, HandoffAuthorityStateV1,
+    HandoffOwnsershipEvidenceRecordV1, HandoffReservationRecordV1,
+    HandoffAcknowledgementRecordV1, HandoffRevocationReasonV1, HandoffToken,
+    HandoffTokenDigest, OperatorIdentityV1, generate_instance_nonce,
 };
 pub use lease::{SessionLease, SessionLeaseState, inspect_session_lease};
 pub use model::{

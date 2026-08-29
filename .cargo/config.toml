@@ -1,0 +1,16 @@
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+# Per `current.md` §12 SUPPLY-01 the release workspace must build from
+# a content-addressed vendored archive. The exact archive path lands in
+# `$LEXICON_VENDOR_DIR` set by the hardened build invocation; here we
+# only set a stable alias so the in-tree build commands do not depend
+# on broad environment variables or mutable source-of-truth references.
+
+directory = "${LEXICON_VENDOR_DIR}"
+
+[net]
+# Network disabled for the offline release workspace.
+git-fetch-with-cli = true
+offline = true

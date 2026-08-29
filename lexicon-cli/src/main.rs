@@ -1,12 +1,19 @@
-mod cli;
+// CLI-01: the public Lexicon executable is named `lexicon` (per the
+// `[[bin]]` table in Cargo.toml) and uses typed exit codes.
+
+use std::process::ExitCode;
 
 use clap::Parser;
-use cli::{Cli, dispatch};
 
-fn main() {
+pub use lexicon_cli_lib::{Cli, CliError, dispatch};
+
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    if let Err(err) = dispatch(cli) {
-        eprintln!("[lexicon] ERROR: {err}");
-        std::process::exit(1);
+    match dispatch(cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[lexicon] ERROR: {error}");
+            error.exit_code()
+        }
     }
 }

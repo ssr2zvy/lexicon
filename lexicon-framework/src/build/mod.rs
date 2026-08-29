@@ -30,6 +30,8 @@ fn is_safe_executable_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with("/") && !name.starts_with("\\")
 }
 
+pub mod cargo_adapter;
+pub mod core_dependency;
 pub mod processing_runtime_manifest;
 pub mod runtime_bundle_admission;
 pub mod runtime_manifest;
@@ -37,6 +39,15 @@ pub mod runtime_probe;
 pub mod runtime_staging;
 pub mod runtime_verification;
 
+pub use cargo_adapter::{
+    CargoExecutionError, CargoExecutor, CargoInvocation, CargoInvocationKind, CargoOutput,
+    CommandInvocationError, FakeCargoExecutor, FakeCargoResponse, ProductionCargoExecutor,
+    generate_workspace_lockfile, read_metadata_locked,
+};
+pub use core_dependency::{
+    CoreDependencyError, CoreMetadataError, RequiredCoreDependency,
+    validate_lexicon_core_dependency_table, verify_lexicon_core_metadata,
+};
 pub use processing_runtime_manifest::{
     ProcessingRuntimeManifestConstructionError, ProcessingRuntimeManifestDecodingError,
     ProcessingRuntimeManifestEncodingError, ProcessingRuntimeManifestV1,

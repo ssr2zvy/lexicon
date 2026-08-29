@@ -1,37 +1,43 @@
-# Generic container file (works with Docker or Podman) that installs a
-# pre-built Lexicon bundle tar.xz and keeps running so you can exec into it.
+# Generic container file (Docker or Podman) for the Lexicon runtime image.
 #
-# BUNDLE_TAR must be a path *relative to the build context* pointing at a
-# lexicon-bundle-*.tar.xz produced by automation/build_bundle_mza/mza, e.g.:
+# This Containerfile is INTENTIONALLY INERT under the current milestone.
+# Per current.md §11 MZA-02 the produced target installer is the *only*
+# authoritative install surface; the installer API MZA exposes is the
+# blocker recorded in §3. Until MZA publishes and pins a Protocol 1
+# installer API that owns install / upgrade / uninstall / command
+# registration / platform integration, this container cannot invoke a
+# real installer without inventing one — which the audit explicitly
+# forbids.
 #
-#   podman build -f containerization/lexicon-container/Containerfile \
-#     --build-arg BUNDLE_TAR=artifacts/lexicon_bundle/custom/cargo-bundler-v0.1.0/0.1.0-LOCALSNAPSHOT/x86_64-unknown-linux-musl/lexicon-bundle-0.1.0-LOCALSNAPSHOT-x86_64-unknown-linux-musl.tar.xz \
-#     -t lexicon-local-image .
+# Once MZA's accepted installer API exists, this file will:
 #
-# The build context must be the repo root (trailing `.`) so that path resolves.
-FROM debian:bookworm-slim
+#   1. accept INSTALLER_PATH as a build arg pointing at the artifact the
+#      pinned `automation/build_bundle_mza/build_release.sh` produces,
+#   2. COPY that artifact in, and
+#   3. run it with the *exact upstream install argument and binary
+#      name* — never reconstructing installation via shell copies.
+#
+# Concretely (placeholder, not yet pinned):
 
-ARG BUNDLE_TAR
+# FROM debian:bookworm-slim
+#
+# ARG INSTALLER_PATH
+#
+# RUN test -n "$INSTALLER_PATH" || { echo "INSTALLER_PATH build-arg is required: a path (relative to the build context) to the MZA-produced installer binary." >&2; exit 1; }
+#
+# RUN apt-get update \
+#     && apt-get install -y --no-install-recommends ca-certificates \
+#     && rm -rf /var/lib/apt/lists/*
+#
+# COPY ${INSTALLER_PATH} /tmp/lexicon-installer
+# RUN chmod +x /tmp/lexicon-installer \
+#     && /tmp/lexicon-installer --install
+#
+# COPY containerization/lexicon-container/entrypoint.sh /usr/local/bin/entrypoint.sh
+# RUN chmod +x /usr/local/bin/entrypoint.sh
+#
+# ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
-RUN test -n "$BUNDLE_TAR" || { echo "BUNDLE_TAR build-arg is required: a path (relative to the build context) to a lexicon-bundle-*.tar.xz" >&2; exit 1; }
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends xz-utils ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY ${BUNDLE_TAR} /tmp/lexicon-bundle.tar.xz
-
-# The archive contains a single top-level lexicon-bundle-<version>/ directory
-# (not a flat lexicon-bundle binary), so extract then locate it by name.
-# --install bypasses the interactive menu entirely, so this never blocks on stdin during the build.
-RUN mkdir -p /opt/lexicon-bundle \
-    && tar -xJf /tmp/lexicon-bundle.tar.xz -C /opt/lexicon-bundle \
-    && rm /tmp/lexicon-bundle.tar.xz \
-    && BUNDLE_DIR="$(find /opt/lexicon-bundle -mindepth 1 -maxdepth 1 -type d | head -n 1)" \
-    && chmod +x "$BUNDLE_DIR/lexicon-bundle" \
-    && "$BUNDLE_DIR/lexicon-bundle" --install
-
-COPY containerization/lexicon-container/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# Marker comment export so test containers that scan the bundle configuration
+# can detect the deferred state.
+# lexicon-container/Containerfile status: blocked-on-mza-installer-api

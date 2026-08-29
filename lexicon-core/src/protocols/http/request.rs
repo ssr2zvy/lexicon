@@ -53,6 +53,10 @@ pub(crate) struct FinalizedHttpRequest {
     pub(crate) retry_policy: HttpRetryPolicy,
     pub(crate) redirect_policy: HttpRedirectPolicy,
     pub(crate) sensitive_query_names: HashSet<String>,
+    /// Header names (lower-cased) the source marked as explicitly sensitive.
+    /// These propagate into response recording and admission so the same name
+    /// is structurally redacted in either direction (HTTP-01).
+    pub(crate) sensitive_header_names: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +247,13 @@ impl HttpRequest {
             sensitive_query_names.insert(name.clone());
         }
 
+        let mut sensitive_header_names = HashSet::new();
+        for header in &self.headers {
+            if header.sensitive {
+                sensitive_header_names.insert(header.name.to_ascii_lowercase());
+            }
+        }
+
         let redacted_url = redact_url(&url, &sensitive_query_names);
 
         let headers = self
@@ -270,6 +281,7 @@ impl HttpRequest {
             retry_policy: self.retry_policy,
             redirect_policy: self.redirect_policy,
             sensitive_query_names,
+            sensitive_header_names,
         })
     }
 

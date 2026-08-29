@@ -1,6 +1,9 @@
 pub mod error;
 pub mod model;
 
+#[cfg(test)]
+mod tests;
+
 pub use error::{
     HttpCheckpointAdmissionError, HttpCheckpointCommitError, HttpCheckpointDecodingError,
     HttpCheckpointEncodingError, HttpCheckpointKeyError, HttpCheckpointLookupError,

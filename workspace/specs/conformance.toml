@@ -1,0 +1,918 @@
+# Conformance matrix declaring every requirement row the contract and
+# specifications demand. The schema is fixed by
+# `automation/conformance-matrix/src/lib.rs`:
+#
+#   schema_version = 1
+#   [[requirement]]
+#   id = "..."                 # unique across this file
+#   authority = "<file>#<section>"
+#   implementation = ["<file>:<symbol>", ...]   # at least one entry
+#   tests = ["<target>::<name>", ...]            # at least one entry
+#   platforms = ["<platform>", ...]              # at least one entry
+#   status = "not implemented | partial | implemented, unverified | conformant | intentionally deferred"
+#   durable_evidence = "<workflow + artifact/run URL>"   # required when status = conformant
+#
+# `cargo run --locked -p lexicon-conformance-matrix -- check workspace/specs/conformance.toml`
+# performs every structural rule above. With LEXICON_CONFORMANCE_TEST_LIST
+# pointing at `cargo test --workspace -- --list` output, it also verifies
+# each named test exists.
+
+schema_version = 1
+
+# ---- Source contract ------------------------------------------------------------
+
+[[requirement]]
+id = "specs-44-valid-descriptor-compile-pass"
+authority = "workspace/specs/specs.md#44"
+implementation = [
+  "lexicon-core/src/protocols/http/contract.rs:HttpSourceContractV1",
+  "lexicon-core/src/processing/contract.rs:ProcessingSourceContractV1",
+]
+tests = [
+  "protocols::http::contract::tests::source_contract_can_be_declared_as_const",
+  "processing::contract::tests::descriptor_works_in_a_constant",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-44-private-acquisition-handler"
+authority = "workspace/specs/specs.md#44"
+implementation = [
+  "lexicon-core/src/protocols/http/contract.rs",
+  "lexicon-core/tests/ui-pass/private_acquisition_handler.rs",
+]
+tests = [
+  "compile_pass_contracts",
+  "background_handoff::missing_exported_source_descriptor_in_runner_boundary_fails_compile",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-44-private-processing-handlers"
+authority = "workspace/specs/specs.md#44"
+implementation = [
+  "lexicon-core/src/processing/contract.rs",
+  "lexicon-core/tests/ui-pass/private_processing_handlers.rs",
+]
+tests = ["compile_pass_contracts"]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-44-missing-public-source-descriptor"
+authority = "workspace/specs/specs.md#44"
+implementation = [
+  "lexicon-core/tests/ui/missing_exported_source_descriptor.rs",
+  "lexicon-core/tests/managed_runner_contract.rs",
+]
+tests = ["missing_exported_source_descriptor_in_runner_boundary_fails_compile"]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-7-wrong-acquisition-signature-compile-fail"
+authority = "workspace/specs/contract.md#7"
+implementation = [
+  "lexicon-core/tests/ui/wrong_argument_type.rs",
+  "lexicon-core/tests/ui/reversed_parameters.rs",
+  "lexicon-core/tests/ui/context_by_value.rs",
+  "lexicon-core/tests/ui/bool_return.rs",
+  "lexicon-core/tests/contract_ui.rs",
+]
+tests = ["compile_fail_contracts"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-7-unsupported-capability-rejection"
+authority = "workspace/specs/contract.md#7"
+implementation = [
+  "lexicon-core/src/runtime/information.rs:validate_capabilities",
+]
+tests = [
+  "missing_capabilities_produce_incompatible_error",
+  "missing_capabilities_return_admission_error",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+# ---- Scaffold and validation ----------------------------------------------------
+
+[[requirement]]
+id = "specs-7-atomic-source-creation"
+authority = "workspace/specs/specs.md#7"
+implementation = ["lexicon-framework/src/lib.rs:generate_source_scaffold"]
+tests = ["finalize_source_staging_cleans_up_tempdir_when_rename_fails"]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-6-exact-source-layout"
+authority = "workspace/specs/specs.md#6"
+implementation = ["lexicon-framework/src/lib.rs:generate_source_scaffold"]
+tests = ["cli_source_create_calls_framework_library_directly"]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-5-schema-2-manifest"
+authority = "workspace/specs/specs.md#5"
+implementation = [
+  "lexicon-framework/src/lib.rs:format_source_toml",
+  "lexicon-framework/src/lib.rs:validate_source_toml_text",
+]
+tests = [
+  "generated_source_toml_matches_required_schema_2_contract",
+  "schema_1_source_manifest_is_rejected_with_typed_error",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-10-managed-runner-integrity"
+authority = "workspace/specs/specs.md#10"
+implementation = [
+  "lexicon-framework/src/lib.rs:validate_managed_workspace_layout",
+  "lexicon-framework/src/lib.rs:validate_managed_workspace_metadata",
+]
+tests = [
+  "workspace_validation_accepts_correct_template_version_marker",
+  "workspace_validation_rejects_modified_runner_template_content",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-10-source-owned-main-rejection"
+authority = "workspace/specs/specs.md#10"
+implementation = ["lexicon-framework/src/lib.rs:validate_managed_workspace_layout"]
+tests = ["workspace_validation_rejects_source_owned_main_entrypoint_file"]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-7-lockfile-requirement"
+authority = "workspace/specs/specs.md#7"
+implementation = [
+  "lexicon-framework/src/lib.rs:generate_workspace_lockfile",
+  "lexicon-framework/src/lib.rs:read_lockfile_snapshot",
+]
+tests = ["generate_workspace_lockfile"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-8-installed-scaffold-without-checkout"
+authority = "workspace/specs/specs.md#8"
+implementation = [
+  "lexicon-framework/build.rs",
+  "lexicon-framework/src/lib.rs:EMBEDDED_CORE_GIT_REV",
+]
+tests = ["scaffold_generation_uses_embedded_core_identity_without_runtime_git"]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+# ---- Build and publication -----------------------------------------------------
+
+[[requirement]]
+id = "specs-19-locked-release-build"
+authority = "workspace/specs/specs.md#19"
+implementation = ["lexicon-framework/src/lib.rs:build_managed_runner"]
+tests = ["build_managed_runner"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-19-isolated-target-directory"
+authority = "workspace/specs/specs.md#19"
+implementation = ["lexicon-framework/src/lib.rs:build_managed_runner"]
+tests = ["build_managed_runner"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-20-exact-cargo-artifact-selection"
+authority = "workspace/specs/specs.md#20"
+implementation = [
+  "lexicon-framework/src/lib.rs:select_artifact_from_cargo_output",
+]
+tests = ["select_managed_runner_executable"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-19-acquisition-build-failure-preserves-runtimes"
+authority = "workspace/specs/specs.md#19"
+implementation = ["lexicon-framework/src/lib.rs:build_source"]
+tests = ["build_source"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-19-processing-build-failure-preserves-runtimes"
+authority = "workspace/specs/specs.md#19"
+implementation = ["lexicon-framework/src/lib.rs:build_source"]
+tests = ["build_source"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-22-runtime-probe-mismatch"
+authority = "workspace/specs/specs.md#22"
+implementation = [
+  "lexicon-framework/src/build/runtime_verification.rs",
+]
+tests = [
+  "artifact_changed_during_probe_returns_changed_error",
+  "identity_disagreement_produces_incompatible_error",
+]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-22-executable-hash-mismatch"
+authority = "workspace/specs/specs.md#22"
+implementation = [
+  "lexicon-framework/src/build/runtime_verification.rs",
+]
+tests = ["final_hash_failure_returns_final_hash"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-21-paired-publication-rollback"
+authority = "workspace/specs/specs.md#21"
+implementation = [
+  "lexicon-framework/src/publication/runtime_pair.rs",
+]
+tests = ["publication_fails_when_processing_staging_is_missing_and_cleans_up"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-21-windows-executable-lock-rollback"
+authority = "workspace/specs/specs.md#21"
+implementation = [
+  "lexicon-framework/src/publication/runtime_pair.rs",
+]
+tests = ["publication_fails_when_processing_staging_is_missing_and_cleans_up"]
+platforms = ["windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+# ---- HTTP recording ------------------------------------------------------------
+
+[[requirement]]
+id = "contract-16-one-get-recorded"
+authority = "workspace/specs/contract.md#16"
+implementation = [
+  "lexicon-core/src/protocols/http/context.rs:execute",
+]
+tests = ["http_recording_one_get_is_durably_recorded"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-16-post-request-body-preservation"
+authority = "workspace/specs/contract.md#16"
+implementation = [
+  "lexicon-core/src/protocols/http/transaction/recorder.rs",
+]
+tests = ["http_recording_post_request_body_preservation"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-17-compressed-response-preservation"
+authority = "workspace/specs/contract.md#17"
+implementation = [
+  "lexicon-core/src/protocols/http/context.rs:execute",
+  "lexicon-core/src/protocols/http/transaction/recorder.rs",
+]
+tests = ["http_recording_compressed_response_preservation"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-18-redirect-chain-recorded"
+authority = "workspace/specs/contract.md#18"
+implementation = ["lexicon-core/src/protocols/http/context.rs:execute"]
+tests = ["http_recording_redirect_chain"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-18-retry-attempts-recorded"
+authority = "workspace/specs/contract.md#18"
+implementation = [
+  "lexicon-core/src/protocols/http/context.rs:execute",
+  "lexicon-core/src/protocols/http/policy.rs",
+]
+tests = ["http_recording_retry_attempts"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-16-connection-failure-recorded"
+authority = "workspace/specs/contract.md#16"
+implementation = [
+  "lexicon-core/src/protocols/http/context.rs",
+  "lexicon-core/src/protocols/http/transaction/recorder.rs",
+]
+tests = ["http_recording_connection_failure"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-16-truncated-response-preservation"
+authority = "workspace/specs/contract.md#16"
+implementation = [
+  "lexicon-core/src/protocols/http/context.rs",
+  "lexicon-core/src/protocols/http/transaction/recorder.rs",
+]
+tests = ["http_recording_truncated_response"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-16-request-metadata-structure"
+authority = "workspace/specs/contract.md#16"
+implementation = [
+  "lexicon-core/src/protocols/http/transaction/metadata.rs",
+]
+tests = ["http_recording_request_metadata_structure"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-16-response-metadata-structure"
+authority = "workspace/specs/contract.md#16"
+implementation = [
+  "lexicon-core/src/protocols/http/transaction/metadata.rs",
+]
+tests = ["http_recording_response_metadata_structure"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-19-mandatory-header-redaction"
+authority = "workspace/specs/contract.md#19"
+implementation = [
+  "lexicon-core/src/protocols/http/transaction/recorder.rs",
+]
+tests = ["http_recording_mandatory_header_redaction"]
+platforms = ["linux-x86_64"]
+status = "partial"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-19-sensitive-query-redaction"
+authority = "workspace/specs/contract.md#19"
+implementation = [
+  "lexicon-core/src/protocols/http/transaction/recorder.rs",
+]
+tests = ["http_recording_sensitive_query_redaction"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-16-record-before-return"
+authority = "workspace/specs/contract.md#16"
+implementation = [
+  "lexicon-core/src/protocols/http/context.rs:execute",
+]
+tests = ["http_recording_record_before_return_guarantee"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+# ---- Checkpoints ---------------------------------------------------------------
+
+[[requirement]]
+id = "contract-11-commit-after-durable-transaction"
+authority = "workspace/specs/contract.md#11"
+implementation = [
+  "lexicon-core/src/protocols/http/context.rs:commit_checkpoint",
+]
+tests = ["repeated_discovery_converges_without_duplicating_work"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-11-reject-commit-without-matching-transaction"
+authority = "workspace/specs/contract.md#11"
+implementation = [
+  "lexicon-core/src/protocols/http/context.rs:commit_checkpoint",
+]
+tests = ["commit_checkpoint"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-11-lookup-across-compatible-sessions"
+authority = "workspace/specs/contract.md#11"
+implementation = [
+  "lexicon-core/src/protocols/http/context.rs:has_checkpoint",
+]
+tests = ["repeated_discovery_converges_without_duplicating_work"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-11-missing-backing-transaction"
+authority = "workspace/specs/contract.md#11"
+implementation = ["lexicon-core/src/protocols/http/context.rs"]
+tests = ["admit_http_checkpoint_from_disk"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-11-crash-after-response-before-checkpoint"
+authority = "workspace/specs/contract.md#11"
+implementation = [
+  "lexicon-core/src/protocols/http/context.rs",
+  "lexicon-core/src/protocols/http/runner.rs",
+]
+tests = ["repeated_discovery_converges_without_duplicating_work"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-11-checkpoint-backed-resume"
+authority = "workspace/specs/contract.md#11"
+implementation = [
+  "lexicon-core/src/protocols/http/context.rs",
+  "lexicon-core/src/protocols/http/runner.rs",
+]
+tests = ["crash_after_checkpoint_before_work_completion_is_reconciled"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+# ---- Durable source state ------------------------------------------------------
+
+[[requirement]]
+id = "contract-9-validated-state-path"
+authority = "workspace/specs/contract.md#9"
+implementation = [
+  "lexicon-core/src/session/context.rs",
+  "lexicon-core/src/protocols/http/context.rs",
+]
+tests = ["source_state_directory_is_created_and_writable_before_handler_runs"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-9-state-survives-sessions"
+authority = "workspace/specs/contract.md#9"
+implementation = [
+  "lexicon-core/src/session/context.rs",
+  "lexicon-core/src/session/test_support.rs",
+]
+tests = ["source_state_directory_persists_across_sequential_sessions"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-9-state-survives-runtime-rebuild"
+authority = "workspace/specs/contract.md#9"
+implementation = ["lexicon-framework/src/lib.rs:build_source"]
+tests = ["build_source"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-9-work-insertion-deduplication"
+authority = "workspace/specs/contract.md#9"
+implementation = ["lexicon-core/src/protocols/http/runner.rs"]
+tests = ["work_insertion_deduplication_converges_without_duplicate_rows"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-9-repeated-discovery-convergence"
+authority = "workspace/specs/contract.md#9"
+implementation = ["lexicon-core/src/protocols/http/runner.rs"]
+tests = ["repeated_discovery_converges_without_duplicating_work"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-12-crash-after-checkpoint-before-work-completion"
+authority = "workspace/specs/contract.md#12"
+implementation = ["lexicon-core/src/protocols/http/runner.rs"]
+tests = ["crash_after_checkpoint_before_work_completion_is_reconciled"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-12-recovery-marks-checkpointed-work-complete"
+authority = "workspace/specs/contract.md#12"
+implementation = ["lexicon-core/src/protocols/http/runner.rs"]
+tests = ["crash_after_checkpoint_before_work_completion_is_reconciled"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-13-sqlite-schema-migration"
+authority = "workspace/specs/specs.md#13"
+implementation = ["lexicon-core/src/protocols/http/runner.rs"]
+tests = ["sqlite_schema_migration_upgrades_tables_and_preserves_records"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-13-simultaneous-writer-rejection"
+authority = "workspace/specs/specs.md#13"
+implementation = ["lexicon-core/src/protocols/http/runner.rs"]
+tests = ["simultaneous_unsupported_writer_rejection_via_sqlite_locking"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+# ---- Sessions and supervision --------------------------------------------------
+
+[[requirement]]
+id = "contract-20-source-success"
+authority = "workspace/specs/contract.md#20"
+implementation = [
+  "lexicon-framework/src/data/foreground.rs",
+  "lexicon-core/src/session/store.rs",
+]
+tests = ["session_transitions_to_succeeded_after_successful_handler"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-20-ordinary-source-error"
+authority = "workspace/specs/contract.md#20"
+implementation = [
+  "lexicon-framework/src/data/foreground.rs",
+  "lexicon-core/src/protocols/http/runner.rs",
+]
+tests = ["session_transitions_to_failed_after_source_authored_error"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-20-source-panic-and-abnormal-exit"
+authority = "workspace/specs/contract.md#20"
+implementation = [
+  "lexicon-framework/src/data/foreground.rs",
+]
+tests = ["abnormal_termination_reconciliation"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-29-foreground-interruption"
+authority = "workspace/specs/specs.md#29"
+implementation = [
+  "lexicon-framework/src/data/foreground.rs",
+]
+tests = ["abnormal_termination_reconciliation"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "contract-20-stale-lease-recovery"
+authority = "workspace/specs/contract.md#20"
+implementation = [
+  "lexicon-framework/src/data/session.rs",
+  "lexicon-core/src/session/store.rs",
+]
+tests = ["select_and_prepare_session"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-26-abandon-policy"
+authority = "workspace/specs/specs.md#26"
+implementation = [
+  "lexicon-framework/src/data/session.rs",
+]
+tests = ["select_and_prepare_session"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-23-non-utf8-unix-arg-preservation"
+authority = "workspace/specs/specs.md#23"
+implementation = [
+  "lexicon-core/src/runtime/invocation_transport.rs",
+]
+tests = ["non_utf8_unix_source_argument_is_preserved_byte_for_byte"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-23-windows-unicode-arg-preservation"
+authority = "workspace/specs/specs.md#23"
+implementation = [
+  "lexicon-core/src/runtime/invocation_transport.rs",
+]
+tests = ["source_argument_fidelity_is_preserved_across_dispatch"]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-30-background-operator-host-handoff"
+authority = "workspace/specs/specs.md#30"
+implementation = [
+  "lexicon-framework/src/data/background.rs",
+  "lexicon-core/src/session/handoff.rs",
+]
+tests = [
+  "successful_handoff_returns_outcome_once_lease_is_owned",
+  "mismatched_acknowledgement_token_fails_handoff",
+  "processing_background_handoff_succeeds",
+  "operator_host_rejects_missing_or_mismatched_handoff_token",
+  "operator_host_exiting_before_ownership_is_a_typed_error",
+  "ownership_timeout_is_a_typed_error",
+  "re_exec_spawn_failure_is_a_typed_error",
+  "token_digest_is_deterministic_for_same_token_bytes",
+  "token_digest_changes_when_token_bytes_change",
+  "revocation_reasons_carry_auditable_strings",
+  "state_machine_distinguishes_ready_and_owned",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+# §15's integration target `lexicon-cli/tests/background_handoff.rs`
+# exercises the same surface through a higher-fidelity drive of the
+# installed binary and is recorded under
+# `current-15-cli-background-handoff` above; cross-link here so the
+# matrix search hits both the unit and the integration evidence paths.
+
+[[requirement]]
+id = "specs-30-operator-host-terminal-reconciliation"
+authority = "workspace/specs/specs.md#30"
+implementation = [
+  "lexicon-framework/src/data/background.rs",
+]
+tests = ["operator_host_rejects_a_session_that_is_no_longer_prepared"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+# ---- §15 integration-target coverage (current.md §15) ----------------------
+#
+# current.md §15 enumerates the audit's mandatory integration test targets.
+# The §15 entries below bind each file the audit names to the exact test
+# names it owns, so the matrix check is the mechanical proof the audit reads.
+
+[[requirement]]
+id = "current-15-cli-installed-core-identity"
+authority = "current.md#15"
+implementation = [
+  "lexicon-cli/tests/installed_core_identity.rs",
+  "lexicon-framework/build.rs",
+  "lexicon-framework/src/lib.rs:EMBEDDED_CORE_GIT_REV",
+]
+tests = [
+  "installed_lexicon_source_create_embeds_compiled_core_identity_outside_repo",
+  "installed_lexicon_source_create_fails_clearly_when_protocol_is_unknown",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "current-15-cli-background-handoff"
+authority = "current.md#15"
+implementation = [
+  "lexicon-cli/tests/background_handoff.rs",
+  "lexicon-framework/src/data/background.rs",
+  "lexicon-framework/src/supervision/mod.rs:OperatorHostInvocationV1",
+  "lexicon-core/src/session/handoff.rs",
+]
+tests = [
+  "operator_host_invocation_round_trips_typed_reference_through_json",
+  "token_digest_is_deterministic_for_same_token_bytes",
+  "token_digest_changes_when_token_bytes_change",
+  "state_machine_distinguishes_ready_and_owned",
+  "operator_host_invocation_decoder_rejects_unknown_operation",
+  "operator_host_invocation_decoder_rejects_unknown_schema_version",
+  "operator_host_invocation_decoder_rejects_empty_protocol",
+  "operator_host_invocation_decoder_rejects_unknown_fields",
+  "execute_data_rejects_foreground_path_for_background_request",
+  "background_outcome_carries_project_source_session_and_operation",
+  "operator_host_binary_surfaces_typed_error_for_malformed_reference",
+  "operator_host_binary_against_nonexistent_project_does_not_succeed",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "current-15-cli-foreground-cancellation"
+authority = "current.md#15"
+implementation = [
+  "lexicon-cli/tests/foreground_cancellation.rs",
+  "lexicon-framework/src/process/mod.rs:wait_with_cancellation",
+  "lexicon-framework/src/process/cancellation.rs:CancellationState",
+]
+tests = [
+  "completed_outcome_when_child_exits_before_any_cancellation",
+  "graceful_cancellation_path_uses_recorded_kind",
+  "termination_kind_maps_to_documented_cancel_outcome",
+  "shell_exit_codes_collapses_graceful_and_forceful_to_same_shell_code",
+  "cancellation_records_graceful_failure_code",
+  "cancellation_records_forced_failure_code",
+  "wait_or_kill_error_never_reports_false_success",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "current-15-framework-windows-runtime-replacement"
+authority = "current.md#15"
+implementation = [
+  "lexicon-framework/tests/windows_runtime_replacement.rs",
+  "lexicon-framework/src/publication/runtime_pair.rs:publish_runtime_pair",
+  "lexicon-framework/src/publication/file_system.rs",
+]
+tests = [
+  "published_runtime_pair_exposes_documented_accessors",
+  "staged_temp_layout_round_trip_blob_under_windows_runner",
+  "retry_pause_window_for_real_publication_is_at_least_a_few_milliseconds",
+  "publication_primitive_reachable_from_cross_platform_integration_target",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+# ---- Processing ----------------------------------------------------------------
+
+[[requirement]]
+id = "specs-39-raw-transaction-enumeration"
+authority = "workspace/specs/specs.md#39"
+implementation = [
+  "lexicon-core/src/processing/transactions.rs",
+]
+tests = [
+  "raw_directory_classifier_accepts_known_partial_and_finalized_shapes",
+  "discovery_error_is_provenance_failure_for_provenance_variants_only",
+  "catalog_iteration_is_total_and_order_preserving",
+]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-39-incomplete-transaction-handling"
+authority = "workspace/specs/specs.md#39"
+implementation = [
+  "lexicon-core/src/processing/transactions.rs",
+]
+tests = ["catalog_iteration_is_total_and_order_preserving"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-39-staged-database-publication"
+authority = "workspace/specs/specs.md#39"
+implementation = [
+  "lexicon-core/src/processing/context.rs",
+  "lexicon-core/src/processing/context.rs::tests",
+  "lexicon-core/src/protocols/http/runner.rs:catch_unwind",
+]
+tests = [
+  "core_begins_transaction_before_source_handler",
+  "successful_handler_commits_database_once",
+  "source_commit_or_rollback_attempt_is_detected",
+  "uncertain_commit_retains_uncertain_typed_outcome",
+  "commit_failure_never_reports_session_success",
+  "processing_context_exposes_read_only_admitted_catalog",
+  "require_transaction_active_distinguishes_open_from_after_handler",
+  "handler_panic_is_caught_reconciled_and_rolls_back",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-39-failed-processing-preserves-prior-output"
+authority = "workspace/specs/specs.md#39"
+implementation = [
+  "lexicon-core/src/processing/context.rs",
+  "lexicon-core/src/processing/context.rs::tests",
+]
+tests = [
+  "handler_error_rolls_back_and_preserves_previous_database",
+]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-21-paired-runtime-compatibility"
+authority = "workspace/specs/specs.md#21"
+implementation = [
+  "lexicon-framework/src/publication/runtime_pair.rs",
+]
+tests = ["publication_fails_when_processing_staging_is_missing_and_cleans_up"]
+platforms = ["linux-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+# ---- Environment handling ------------------------------------------------------
+
+[[requirement]]
+id = "specs-44-no-false-success-on-test-skips"
+authority = "workspace/specs/specs.md#44"
+implementation = [
+  "lexicon-framework/src/build/runtime_probe.rs",
+  "lexicon-framework/src/build/runtime_staging.rs",
+  "lexicon-framework/src/lib.rs",
+]
+tests = ["bounded_retries_for_transient_ETXTBSY"]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "implemented, unverified"
+durable_evidence = ""
+
+# ---- Deferred (intentional) ----------------------------------------------------
+
+[[requirement]]
+id = "specs-46-core-owned-task-queue"
+authority = "workspace/specs/specs.md#46"
+implementation = ["none"]
+tests = ["none"]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "intentionally deferred"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-2-protocols-beyond-http"
+authority = "workspace/specs/specs.md#2"
+implementation = ["none"]
+tests = ["none"]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "intentionally deferred"
+durable_evidence = ""
+
+[[requirement]]
+id = "specs-40-project-wide-publication-transaction"
+authority = "workspace/specs/specs.md#40"
+implementation = ["none"]
+tests = ["none"]
+platforms = ["linux-x86_64", "windows-x86_64"]
+status = "intentionally deferred"
+durable_evidence = ""

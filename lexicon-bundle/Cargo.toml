@@ -4,4 +4,8 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
 [dependencies]

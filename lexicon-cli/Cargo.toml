@@ -3,6 +3,13 @@ name = "lexicon-cli"
 version = "0.1.0-LOCALSNAPSHOT"
 edition = "2024"
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lexicon"
+path = "src/main.rs"
+
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

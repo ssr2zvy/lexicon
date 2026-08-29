@@ -3,6 +3,7 @@ use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -28,6 +29,34 @@ use crate::protocols::http::request::{FinalizedHeader, FinalizedHttpRequest, red
 use crate::protocols::http::transport::{HttpLocationHeader, HttpTransport};
 
 const MAX_STAGING_IDENTITY_ATTEMPTS: usize = 8;
+
+/// Test hook storage for the HTTP-03 durability observer. Tests install a
+/// `DurabilityPublisherHooks` to receive a sequence of side-effect events
+/// the recorder emits inside `record_transaction_attempt`. Production
+/// callers never install a hook, so the cell stays empty and notifications
+/// short-circuit to nothing.
+#[cfg(test)]
+static DURABILITY_HOOKS: OnceLock<
+    crate::protocols::http::test_support::DurabilityPublisherHooks,
+> = OnceLock::new();
+
+/// Test-only install entrypoint. Calling this with a non-default hooks
+/// value drives the side-effect observer in the recorder.
+#[cfg(test)]
+pub(crate) fn install_durability_hooks(
+    hooks: crate::protocols::http::test_support::DurabilityPublisherHooks,
+) {
+    let _ = DURABILITY_HOOKS.set(hooks);
+}
+
+#[cfg(test)]
+fn notify_durability(
+    kind: crate::protocols::http::test_support::DurabilityEventKind,
+) {
+    if let Some(hooks) = DURABILITY_HOOKS.get() {
+        hooks.notify(kind);
+    }
+}
 
 /// Prefix used by the recorder for in-progress (staging) transaction directories.
 ///
@@ -107,6 +136,10 @@ pub(crate) struct RecordedAttemptContext {
     pub(crate) parent_transaction_id: Option<HttpTransactionIdentity>,
     pub(crate) attempt_identity: HttpAttemptIdentity,
     pub(crate) sensitive_query_names: HashSet<String>,
+    /// Header names the source marked as explicitly sensitive at request
+    /// construction. Propagates into both the request and response decisions
+    /// in [`crate::protocols::http::sensitivity::must_redact_header`].
+    pub(crate) sensitive_header_names: HashSet<String>,
 }
 
 pub(crate) fn record_transaction_attempt(
@@ -220,16 +253,24 @@ pub(crate) fn record_transaction_attempt(
             .map(|key| key.as_str().to_string()),
         method: request.method.clone(),
         url: redact_url(&request.url, &attempt.sensitive_query_names),
-        headers: redact_request_headers(&request.headers),
+        headers: redact_request_headers(&request.headers, &attempt.sensitive_header_names),
         has_body,
         body_length: request_body_bytes.len() as u64,
         body_sha256: request_body_sha.clone(),
         created_at_unix_nanos: timestamp,
     };
     write_json_atomic(&attempt.raw_data_root, &request_metadata_path, &request_metadata)?;
+    #[cfg(test)]
+    notify_durability(
+        crate::protocols::http::test_support::DurabilityEventKind::RequestMetadataSynced,
+    );
 
     if has_body {
         persist_body(&request_body_path, &request_body_bytes).map_err(HttpRecorderError::BodyPersistence)?;
+        #[cfg(test)]
+        notify_durability(
+            crate::protocols::http::test_support::DurabilityEventKind::RequestBodySynced,
+        );
     }
 
     sync_directory(&request_dir).map_err(HttpRecorderError::DurableSync)?;
@@ -279,7 +320,7 @@ pub(crate) fn record_transaction_attempt(
                 }
             };
 
-            let headers = redact_response_headers(&response.headers);
+            let headers = redact_response_headers(&response.headers, &attempt.sensitive_header_names);
             let completed_at_unix_nanos = now_nanos().map_err(HttpRecorderError::Clock)?;
             let response_metadata = ResponseMetadataDocument {
                 schema_version: HTTP_TRANSACTION_SCHEMA_VERSION,
@@ -294,6 +335,13 @@ pub(crate) fn record_transaction_attempt(
                 },
             };
             write_json_atomic(&attempt.raw_data_root, &response_metadata_path, &response_metadata)?;
+            #[cfg(test)]
+            notify_durability(
+                crate::protocols::http::test_support::DurabilityEventKind::ResponseBodySynced,
+            );
+            notify_durability(
+                crate::protocols::http::test_support::DurabilityEventKind::ResponseMetadataSynced,
+            );
 
             let (location_text, invalid_location_encoding) = match location_state {
                 HttpLocationHeader::Missing => (None, false),
@@ -346,6 +394,10 @@ pub(crate) fn record_transaction_attempt(
     sync_directory(&staging_dir).map_err(HttpRecorderError::DurableSync)?;
     publish_transaction_directory_no_replace(&staging_dir, &final_dir)
         .map_err(HttpRecorderError::Publication)?;
+    #[cfg(test)]
+    notify_durability(
+        crate::protocols::http::test_support::DurabilityEventKind::DirectoryAtomicallyReplaced,
+    );
     let final_request_dir = final_dir.join("request");
     let final_response_dir = final_dir.join("response");
     let final_request_metadata_path = final_request_dir.join("metadata.json");
@@ -403,6 +455,10 @@ pub(crate) fn record_transaction_attempt(
             cause,
         })
     })?;
+    #[cfg(test)]
+    notify_durability(
+        crate::protocols::http::test_support::DurabilityEventKind::ParentDirectorySynced,
+    );
 
     let transaction = RecordedTransaction::new(
         identity,
@@ -465,16 +521,20 @@ fn ensure_directory(path: &Path) -> Result<(), HttpRecorderError> {
         .map_err(HttpRecorderError::ManagedPath)
 }
 
-fn redact_request_headers(headers: &[FinalizedHeader]) -> Vec<StoredHeader> {
+fn redact_request_headers(
+    headers: &[FinalizedHeader],
+    explicit_sensitive: &HashSet<String>,
+) -> Vec<StoredHeader> {
     headers
         .iter()
         .map(|header| {
-            let lower = header.name.to_ascii_lowercase();
-            let redact = header.sensitive
-                || matches!(
-                    lower.as_str(),
-                    "authorization" | "proxy-authorization" | "cookie"
-                );
+            // The single shared policy: a header is redacted iff its name falls
+            // inside the mandatory set, or the source marked the same name as
+            // sensitive. `header.sensitive` is already captured by the
+            // explicit set that came from `FinalizedHttpRequest`; the explicit
+            // set keeps the decision in one place for both directions.
+            let redact =
+                crate::protocols::http::sensitivity::must_redact_header(&header.name, explicit_sensitive);
             StoredHeader {
                 name: header.name.clone(),
                 value: if redact {
@@ -487,12 +547,18 @@ fn redact_request_headers(headers: &[FinalizedHeader]) -> Vec<StoredHeader> {
         .collect()
 }
 
-fn redact_response_headers(headers: &[(String, Vec<u8>)]) -> Vec<StoredHeader> {
+fn redact_response_headers(
+    headers: &[(String, Vec<u8>)],
+    explicit_sensitive: &HashSet<String>,
+) -> Vec<StoredHeader> {
+    // Same shared policy as request direction. Carrying the explicit set
+    // forward means a source that marks `X-Api-Key` as sensitive on the
+    // request sees the same name redacted in the response.
     headers
         .iter()
         .map(|(name, value)| {
-            let lower = name.to_ascii_lowercase();
-            let redact = matches!(lower.as_str(), "set-cookie");
+            let redact =
+                crate::protocols::http::sensitivity::must_redact_header(name, explicit_sensitive);
             StoredHeader {
                 name: name.clone(),
                 value: if redact {
