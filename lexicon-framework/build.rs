@@ -1,14 +1,25 @@
 use std::path::Path;
 use std::process::Command;
 
+fn is_valid_git_rev(s: &str) -> bool {
+    s.len() == 40
+        && s.chars().all(|c| c.is_ascii_hexdigit())
+        && !s.chars().all(|c| c == '0')
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=LEXICON_EMBEDDED_CORE_REV");
 
     if let Ok(rev) = std::env::var("LEXICON_EMBEDDED_CORE_REV") {
         let trimmed = rev.trim();
-        if !trimmed.is_empty() {
+        if is_valid_git_rev(trimmed) {
             println!("cargo:rustc-env=LEXICON_EMBEDDED_CORE_REV={trimmed}");
             return;
+        } else {
+            panic!(
+                "lexicon-framework/build.rs: LEXICON_EMBEDDED_CORE_REV was set to '{trimmed}', \
+                 which is not a valid 40-character non-zero hexadecimal Git commit SHA."
+            );
         }
     }
 
@@ -31,14 +42,28 @@ fn main() {
                 .trim()
                 .to_string()
         }
-        _ => "0000000000000000000000000000000000000000".to_string(),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            panic!(
+                "lexicon-framework/build.rs: `git rev-parse HEAD` failed: {stderr}\n\
+                 When building outside a Git repository, provide the exact 40-character Core \
+                 Git commit SHA via the LEXICON_EMBEDDED_CORE_REV environment variable."
+            );
+        }
+        Err(err) => {
+            panic!(
+                "lexicon-framework/build.rs: Failed to execute `git`: {err}\n\
+                 When building without Git installed, provide the exact 40-character Core \
+                 Git commit SHA via the LEXICON_EMBEDDED_CORE_REV environment variable."
+            );
+        }
     };
 
-    let effective_rev = if rev.is_empty() {
-        "0000000000000000000000000000000000000000".to_string()
-    } else {
-        rev
-    };
+    if !is_valid_git_rev(&rev) {
+        panic!(
+            "lexicon-framework/build.rs: Resolved Git revision '{rev}' is not a valid 40-character hexadecimal SHA."
+        );
+    }
 
-    println!("cargo:rustc-env=LEXICON_EMBEDDED_CORE_REV={effective_rev}");
+    println!("cargo:rustc-env=LEXICON_EMBEDDED_CORE_REV={rev}");
 }
