@@ -2225,8 +2225,22 @@ fn format_discovery_markdown(source_name: &str) -> String {
 /// constant rather than inspecting `CARGO_MANIFEST_DIR` or running `git` at runtime.
 pub const EMBEDDED_CORE_GIT_REV: &str = env!("LEXICON_EMBEDDED_CORE_REV");
 
+pub(crate) fn validate_embedded_core_git_rev() -> Result<&'static str, &'static str> {
+    if EMBEDDED_CORE_GIT_REV.len() != 40 {
+        return Err("embedded Core Git revision must be exactly 40 characters");
+    }
+    if !EMBEDDED_CORE_GIT_REV.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("embedded Core Git revision must be valid hexadecimal");
+    }
+    if EMBEDDED_CORE_GIT_REV.chars().all(|c| c == '0') {
+        return Err("embedded Core Git revision cannot be all zeros");
+    }
+    Ok(EMBEDDED_CORE_GIT_REV)
+}
+
 fn format_workspace_cargo_toml(operation_name: &str, members: &[&str]) -> String {
-    let rev = EMBEDDED_CORE_GIT_REV;
+    let rev = validate_embedded_core_git_rev()
+        .unwrap_or_else(|e| panic!("invalid embedded Core Git revision: {e}"));
     let mut out = String::new();
     out.push_str("[workspace]\n");
     out.push_str("resolver = \"2\"\n");

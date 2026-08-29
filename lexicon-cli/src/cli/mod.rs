@@ -361,4 +361,48 @@ mod tests {
         let result = with_test_cwd(project_root, || super::dispatch(cli));
         assert!(result.is_ok(), "build on empty project should succeed: {result:?}");
     }
+
+    #[test]
+    fn dispatch_init_and_source_create_uses_embedded_core_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent_path = temp.path();
+
+        // 1. Dispatch `lexicon init <parent> test-project`
+        let init_cli = Cli::try_parse_from([
+            "lexicon",
+            "init",
+            parent_path.to_str().unwrap(),
+            "test-project",
+        ])
+        .unwrap();
+        let init_res = super::dispatch(init_cli);
+        assert!(init_res.is_ok(), "init failed: {init_res:?}");
+
+        let project_dir = parent_path.join("test-project");
+        assert!(project_dir.join("lexicon.toml").is_file());
+
+        // 2. Dispatch `lexicon source create my-src --protocol http` inside the new project
+        let create_cli = Cli::try_parse_from([
+            "lexicon",
+            "source",
+            "create",
+            "my-src",
+            "--protocol",
+            "http",
+        ])
+        .unwrap();
+        let create_res = with_test_cwd(&project_dir, || super::dispatch(create_cli));
+        assert!(create_res.is_ok(), "source create failed: {create_res:?}");
+
+        let protocol_dir = project_dir.join("sources/my-src/http");
+        assert!(protocol_dir.join("source.toml").is_file());
+
+        let acq_cargo = fs::read_to_string(protocol_dir.join("get-raw-data/Cargo.toml")).unwrap();
+        assert!(acq_cargo.contains(lexicon_framework::EMBEDDED_CORE_GIT_REV));
+        assert!(protocol_dir.join("get-raw-data/Cargo.lock").is_file());
+
+        let proc_cargo = fs::read_to_string(protocol_dir.join("process-data/Cargo.toml")).unwrap();
+        assert!(proc_cargo.contains(lexicon_framework::EMBEDDED_CORE_GIT_REV));
+        assert!(protocol_dir.join("process-data/Cargo.lock").is_file());
+    }
 }
