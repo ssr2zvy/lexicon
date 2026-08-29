@@ -583,6 +583,10 @@ pub enum ForegroundDataExecutionError {
     OperatorHostExitedBeforeOwnership { exit_code: Option<i32> },
     /// Timed out waiting for the operator-host process to acquire the session lease.
     OperatorHostOwnershipTimeout,
+    /// Operator-host handoff acknowledgement contained mismatched session, token, or PID.
+    OperatorHostAcknowledgementMismatch(String),
+    /// Operator-host handoff failed authorization checks (missing or mismatched intent token).
+    OperatorHostUnauthorizedHandoff(String),
     /// Project root discovery failed (no `lexicon.toml` found or nested project).
     ProjectDiscovery(ProjectDiscoveryError),
     /// Project configuration (`lexicon.toml`) is invalid or malformed.
@@ -721,6 +725,14 @@ impl fmt::Display for ForegroundDataExecutionError {
             ),
             Self::OperatorHostOwnershipTimeout => f.write_str(
                 "timed out waiting for the operator-host process to acquire session ownership",
+            ),
+            Self::OperatorHostAcknowledgementMismatch(details) => write!(
+                f,
+                "operator-host acknowledgement verification failed: {details}"
+            ),
+            Self::OperatorHostUnauthorizedHandoff(details) => write!(
+                f,
+                "operator-host handoff authorization failed: {details}"
             ),
             Self::ProjectDiscovery(e) => write!(f, "project discovery failed: {e}"),
             Self::ProjectConfiguration(e) => write!(f, "project configuration error: {e}"),

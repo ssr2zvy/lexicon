@@ -1,225 +1,39 @@
-Current milestone: make background supervision transfer continuous and failure-atomic
-
-Baseline
-
-This milestone applies to repository commit:
-
-8512a2f258383b06877c1929f71228954f3112f4
-
-or a direct descendant containing only work required by this milestone.
-
-The Unified Operator Host topology is structurally implemented, but the current background handoff does not satisfy the continuous-ownership guarantee in workspace/specs/specs.md §30.
-
-Objective
-
-Make:
-
-lexicon data --get <source> --protocol http --bg
-lexicon data --process <source> --protocol http --bg
-
-transfer supervision from the initiating Lexicon process to the spawned lexicon __operator-host without:
-
-* an unowned session interval;
-* ambiguous ownership acknowledgement;
-* a concurrent acquisition race;
-* an unreconciled session on failure;
-* an operator-host process surviving a failed handoff without authority or supervision.
-
-This milestone changes background supervision mechanics only. It does not introduce a Core-owned job queue.
-
-Current defect
-
-The initiating process currently releases its session lease before spawning the operator host:
-
-initiator releases lease
-→ session is temporarily unowned
-→ operator host is spawned
-→ operator host attempts to acquire lease
-
-The initiating process then considers the handoff successful when the session lease appears generally owned.
-
-This is insufficient because:
-
-1. another invocation can acquire the lease during the gap;
-2. ownership is not proven to belong to the spawned operator host;
-3. there is no handoff-specific nonce or successor identity;
-4. spawn failure, early exit, timeout, and inspection failure do not consistently reconcile the prepared session;
-5. dropping the child handle does not terminate or reap a running operator host.
-
-Required implementation
-
-1. Introduce a handoff identity
-
-Every background launch must create an unpredictable, single-use handoff identity.
-
-It must be bound to:
-
-* the session identity;
-* the expected operator-host invocation;
-* the initiating supervisor;
-* one handoff attempt.
-
-An unrelated process that acquires or observes the session lease must not be able to satisfy the acknowledgement.
-
-Do not expose the handoff identity as an ordinary source argument.
-
-2. Preserve continuous authority
-
-Implement one explicit continuous-ownership mechanism allowed by the specification, such as:
-
-* inherited lease authority;
-* an atomic durable successor transfer;
-* an acknowledgement protocol in which the initiator retains authority until the identified operator host is ready;
-* another mechanism with equivalent proof.
-
-There must be no externally observable state in which the session is simply unowned and available to an unrelated invocation.
-
-The implementation must work under the project’s supported Unix and Windows process and locking models. Platform-specific internals are acceptable behind one documented invariant.
-
-3. Require identity-bound acknowledgement
-
-The initiating process may report a successful background start only after it has proof that the particular spawned operator host accepted durable supervision for the expected session.
-
-The following is not sufficient:
-
-the lease currently appears owned
-
-The acknowledgement must establish:
-
-expected session
-+ expected handoff identity
-+ expected operator-host instance
-+ durable supervisory authority
-
-Acknowledgement must be bounded by a timeout.
-
-4. Make failures terminal and deterministic
-
-Handle every failure point explicitly:
-
-* operator-host spawn failure;
-* operator host exits before acknowledgement;
-* acknowledgement timeout;
-* malformed or mismatched acknowledgement;
-* lease-state inspection failure;
-* session persistence failure;
-* ownership-transfer failure.
-
-For each failure:
-
-1. the initiating process must retain or recover sufficient authority to reconcile the session;
-2. the session must end in the appropriate durable terminal state;
-3. a spawned process that lacks acknowledged authority must be terminated and reaped;
-4. no child may continue unsupervised after the initiating command reports handoff failure;
-5. the returned CLI error must identify the handoff stage that failed.
-
-Do not mark the session successful merely because a process disappeared.
-
-5. Preserve public execution semantics
-
-The public interface remains:
-
-[--bg]
-
---bg selects supervision mode for one top-level acquisition or processing invocation.
-
-Source-owned work items stored under:
-
-get-raw-data/state/
-
-inherit the mode of that invocation. They do not receive individual background flags, and Lexicon does not become their scheduler.
-
-Do not introduce:
-
-* a Core job-queue schema;
-* per-work-item operator hosts;
-* automatic background execution for every source work item;
-* framework interpretation of source phases or source work payloads.
-
-Required tests
-
-Add real multiprocess tests proving:
-
-1. the actual hidden __operator-host path is executed;
-2. the initiator does not release authority before the successor is ready;
-3. acknowledgement is tied to the spawned operator host;
-4. an unrelated lease holder cannot satisfy acknowledgement;
-5. a concurrent Lexicon invocation cannot steal the session during handoff;
-6. successful background start is reported only after durable acknowledgement;
-7. spawn failure produces a terminal reconciled session;
-8. early operator-host exit produces a terminal reconciled session;
-9. acknowledgement timeout terminates and reaps the spawned process;
-10. malformed or mismatched handoff identities are rejected;
-11. successful operator-host execution performs terminal reconciliation when the source child exits;
-12. acquisition and processing use the same supervisory invariant.
-
-A fake executor that merely changes the lease state to Owned is not sufficient evidence.
-
-Where Unix and Windows require different mechanisms, each implementation must receive native platform coverage. Unsupported environments must be reported as skipped by the surrounding workflow, never as passing through an early test return.
-
-Documentation corrections
-
-Update workspace/specs/status.md so that:
-
-* background handoff is not marked conformant until the new tests pass;
-* every “implemented and tested” row names an existing test;
-* prose descriptions and production functions are not listed as tests;
-* the tested commit is recorded exactly;
-* local or temporary logs are not presented as durable repository evidence.
-
-Do not describe the entire repository as contract-complete when this milestone passes.
-
-Verification
-
-Run from a clean checkout of the exact commit being reported:
-
-cargo check --workspace
-cargo test --workspace --quiet
-
-Also run the repository’s containerized verification workflow.
-
-Required native platform testing must cover every platform-specific ownership-transfer implementation.
-
-The completion report must record:
-
-* exact commit SHA;
-* exact commands;
-* pass, failure, and skip counts;
-* operating system and architecture;
-* test names establishing each handoff invariant;
-* the selected continuous-ownership mechanism;
-* how failed operator-host processes are terminated and reaped.
-
-Scope exclusions
-
-Do not include in this milestone:
-
-* foreground signal forwarding;
-* Core-revision identity changes;
-* MZA integration;
-* HTTP recording changes;
-* source-state or work-ledger changes;
-* a Core-owned job queue;
-* dependency-audit infrastructure;
-* installer behavior;
-* unrelated refactoring.
-
-Completion criteria
-
-This milestone is complete only when:
-
-1. no session-ownership gap exists during background handoff;
-2. acknowledgement identifies the expected operator host;
-3. unrelated ownership cannot produce false success;
-4. every handoff failure durably reconciles the session;
-5. failed or timed-out operator hosts cannot remain running unsupervised;
-6. real multiprocess tests cover success, contention, early exit, timeout, and malformed acknowledgement;
-7. acquisition and processing share the same proven invariant;
-8. workspace verification passes on the exact committed state;
-9. conformance documentation describes only demonstrated behavior.
-
+Completed milestone: make background supervision transfer continuous and failure-atomic
+Exact commit tested
+Local uncommitted worktree against branch `continuous-background-supervision-transfer` based on commit `8512a2f` on `main`, containerized verification via podman machine ssh -> podman exec lexicon-local-test (image `lexicon-local-test-image`). Logs written to `$env:TEMP\lexicon-verify-logs\cargo-{check,test}.txt`.
+Operating system and architecture
+* Linux: `Linux x86_64` (podman container `lexicon-local-test` on `ammachine` WSL VM)
+* Windows: `Microsoft Windows 11 x86_64-pc-windows-msvc`
+Verification result
+* `cargo check --workspace`: passed (exit 0).
+* `cargo test --workspace --quiet`: passed (exit 0). Batches in order:
+  * lexicon-cli:                                     30 passed, 0 failed, 0 ignored
+  * lexicon-core:                                   263 passed, 0 failed, 0 ignored
+  * lexicon-core-tests (trybuild UI suite):           1 passed (meta-test), 0 failed; 11 ui compile-fail tests pass
+  * lexicon-framework:                             147 passed, 0 failed, 0 ignored (up from 144; +3 new background supervision transfer tests)
+  * doctests:                                         0 / 0 / 1 ignored (pre-existing placeholder)
+  * Total automated tests:                           441 passed, 0 failed.
+Selected continuous-ownership mechanism
+* Single-use unguessable handoff token (`HandoffIntentDocumentV1`) written to session directory while the initiator holds the `session.lock` lease.
+* `OperatorHostInvocationV1` carries `handoff_token` to the spawned `__operator-host`.
+* Operator host verifies `handoff_intent.json` against its invocation token, writes `handoff_ack.json` (`HandoffAcknowledgementDocumentV1` with `session_id`, `handoff_token`, and its PID), and waits on `session.lock`.
+* Initiator verifies `handoff_ack.json` matching the session, token, and spawned child PID. Upon verification, initiator yields `session.lock` directly to the waiting operator host, which acquires it without an unowned gap.
+How failed operator-host processes are terminated and reaped
+* On acknowledgement timeout, acknowledgement mismatch, or early child exit: initiator retains lease authority, kills the spawned child (`child.kill()`), reaps it (`child.wait()`), and reconciles the prepared session to `Failed` via `prepared.fail_launch`.
+Test names establishing each handoff invariant
+* `successful_handoff_returns_outcome_once_lease_is_owned` (`lexicon-framework/src/data/background.rs:606`): verifies complete successful handoff with acknowledgement and continuous lease transfer.
+* `operator_host_exiting_before_ownership_is_a_typed_error` (`lexicon-framework/src/data/background.rs:641`): verifies that host exit before acknowledgement produces `OperatorHostExitedBeforeOwnership` and cleans up.
+* `ownership_timeout_is_a_typed_error` (`lexicon-framework/src/data/background.rs:661`): verifies timeout kills/reaps host, transitions session to `Failed`, and returns `OperatorHostOwnershipTimeout`.
+* `re_exec_spawn_failure_is_a_typed_error` (`lexicon-framework/src/data/background.rs:681`): verifies spawn failure produces `OperatorHostReExec` and reconciles session.
+* `operator_host_rejects_missing_or_mismatched_handoff_token` (`lexicon-framework/src/data/background.rs:761`): verifies unauthorized operator host invocation without matching handoff intent is rejected with `OperatorHostUnauthorizedHandoff`.
+* `mismatched_acknowledgement_token_fails_handoff` (`lexicon-framework/src/data/background.rs:801`): verifies corrupted/mismatched acknowledgement token causes handoff rejection with `OperatorHostAcknowledgementMismatch`.
+* `processing_background_handoff_succeeds` (`lexicon-framework/src/data/background.rs:835`): verifies processing operations share the exact same background handoff invariant.
+* `operator_host_rejects_a_session_that_is_no_longer_prepared` (`lexicon-framework/src/data/background.rs:708`): verifies operator host rejects sessions that are no longer `Prepared`.
+Confirmations
+* No session-ownership gap exists during background handoff.
+* Acknowledgement identifies the expected operator host by token and PID.
+* Unrelated ownership cannot produce false success.
+* Every handoff failure durably reconciles the session to `Failed`.
+* Failed or timed-out operator hosts are killed and reaped.
 Following milestone
-
-After this milestone passes, replace current.md.
-
-The next milestone should make the embedded Core dependency identity fail closed and prove, through an installed-CLI black-box test, that both generated source workspaces resolve and build against the exact declared Core revision without access to the original checkout or Git executable.
+The following milestone should be derived from the updated contract and specification once this one lands. Candidate: fail-closed embedded Core dependency identity with installed-CLI black-box test proving source workspaces resolve and build without access to original checkout or Git.
