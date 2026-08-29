@@ -1838,4 +1838,415 @@ mod execution_tests {
         );
         assert!(result.is_ok(), "{result:?}");
     }
+
+    // -----------------------------------------------------------------------
+    // Comprehensive HTTP Recording Behavioral Tests (specs.md §44)
+    // -----------------------------------------------------------------------
+
+    static HTTP_RECORDING_TEST_URL: OnceLock<String> = OnceLock::new();
+
+    fn ensure_recording_test_server() -> &'static str {
+        HTTP_RECORDING_TEST_URL.get_or_init(|| {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if let Ok(mut stream) = stream {
+                        let mut buffer = [0; 2048];
+                        let n = stream.read(&mut buffer).unwrap_or(0);
+                        let req_text = String::from_utf8_lossy(&buffer[..n]);
+
+                        if req_text.contains("/redirect-start") {
+                            let response = format!(
+                                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/redirect-target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                        } else if req_text.contains("/500-retry") {
+                            let response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\nConnection: close\r\n\r\nerror";
+                            let _ = stream.write_all(response.as_bytes());
+                        } else if req_text.contains("/truncated") {
+                            let response = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial-10";
+                            let _ = stream.write_all(response.as_bytes());
+                        } else if req_text.contains("/compressed") {
+                            let body: [u8; 10] = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03];
+                            let header = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(header.as_bytes());
+                            let _ = stream.write_all(&body);
+                        } else {
+                            let body = "recorded-response-body";
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                        }
+                        let _ = stream.flush();
+                    }
+                }
+            });
+            format!("http://127.0.0.1:{port}")
+        })
+    }
+
+    // Test 27: one GET request is durably recorded and returns 200 response (specs.md §44).
+    #[test]
+    fn http_recording_one_get_is_durably_recorded() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/get-endpoint")).unwrap();
+            let tx = context.execute(req)?;
+            assert_eq!(tx.response_status(), Some(200));
+            assert!(tx.directory().join("response/body").is_file());
+            let body = std::fs::read_to_string(tx.response().body_path()).unwrap();
+            assert_eq!(body, "recorded-response-body");
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 28: POST request body bytes are preserved exactly on disk (specs.md §44).
+    #[test]
+    fn http_recording_post_request_body_preservation() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let post_payload = b"{\"event\":\"user_action\",\"id\":42}";
+            let req = HttpRequest::post(format!("{base}/post-endpoint"))
+                .unwrap()
+                .body_bytes(post_payload.as_slice());
+            let tx = context.execute(req)?;
+            let saved_body = std::fs::read(tx.directory().join("request/body")).unwrap();
+            assert_eq!(saved_body, post_payload);
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 29: compressed response entity bytes are preserved on disk before decoding (specs.md §36, §44).
+    #[test]
+    fn http_recording_compressed_response_preservation() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/compressed")).unwrap();
+            let tx = context.execute(req)?;
+            let raw_body = std::fs::read(tx.directory().join("response/body")).unwrap();
+            // Verify gzip header magic bytes [0x1f, 0x8b] are preserved on disk
+            assert!(raw_body.starts_with(&[0x1f, 0x8b]));
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 30: redirect chain recording (specs.md §44).
+    #[test]
+    fn http_recording_redirect_chain() {
+        use crate::protocols::http::policy::HttpRedirectPolicy;
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/redirect-start"))
+                .unwrap()
+                .redirect_policy(HttpRedirectPolicy::follow(5).unwrap());
+            let tx = context.execute(req)?;
+            assert_eq!(tx.response_status(), Some(200));
+            assert_eq!(tx.attempt_identity().redirect_index(), 1);
+            assert!(tx.parent_transaction_id().is_some());
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 31: independently recorded retry attempts (specs.md §44).
+    #[test]
+    fn http_recording_retry_attempts() {
+        use crate::protocols::http::policy::HttpRetryPolicy;
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/500-retry"))
+                .unwrap()
+                .retry_policy(HttpRetryPolicy::transient(3).unwrap());
+            let result = context.execute(req);
+            // Retry policy exhausts attempts and returns RetryExhausted error carrying the last transaction
+            assert!(result.is_err());
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 32: connection failure is recorded as a transport failure transaction (specs.md §38, §44).
+    #[test]
+    fn http_recording_connection_failure() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            // Port 1 is reserved and not listening -> immediate connection failure
+            let req = HttpRequest::get("http://127.0.0.1:1/nonexistent").unwrap();
+            let result = context.execute(req);
+            assert!(result.is_err());
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 33: truncated response preservation (specs.md §38, §44).
+    #[test]
+    fn http_recording_truncated_response() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/truncated")).unwrap();
+            let result = context.execute(req);
+            assert!(result.is_err(), "truncated response must return an execution error");
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 34: request metadata validation (specs.md §44).
+    #[test]
+    fn http_recording_request_metadata_structure() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/meta-check"))
+                .unwrap()
+                .header("X-Custom-Header", "custom-value")
+                .unwrap();
+            let tx = context.execute(req)?;
+            let meta_json = std::fs::read_to_string(tx.directory().join("request/metadata.json")).unwrap();
+            assert!(meta_json.contains("\"method\":\"GET\""));
+            assert!(meta_json.contains("\"schema_version\":1"));
+            assert!(meta_json.contains("\"X-Custom-Header\""));
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 35: response metadata validation (specs.md §44).
+    #[test]
+    fn http_recording_response_metadata_structure() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/resp-meta")).unwrap();
+            let tx = context.execute(req)?;
+            let meta_json = std::fs::read_to_string(tx.directory().join("response/metadata.json")).unwrap();
+            assert!(meta_json.contains("\"status\":200"));
+            assert!(meta_json.contains("\"body_sha256\""));
+            assert!(meta_json.contains("\"schema_version\":1"));
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 36: mandatory case-insensitive header redaction (specs.md §37, §44).
+    #[test]
+    fn http_recording_mandatory_header_redaction() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/redact-headers"))
+                .unwrap()
+                .header("Authorization", "Bearer top-secret-token")
+                .unwrap()
+                .header("cookie", "session_id=confidential")
+                .unwrap();
+            let tx = context.execute(req)?;
+            let meta_json = std::fs::read_to_string(tx.directory().join("request/metadata.json")).unwrap();
+            assert!(!meta_json.contains("top-secret-token"), "secret leaked in metadata");
+            assert!(!meta_json.contains("confidential"), "cookie leaked in metadata");
+            assert!(meta_json.contains("\"encoding\":\"redacted\""));
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 37: sensitive query parameter redaction (specs.md §37, §44).
+    #[test]
+    fn http_recording_sensitive_query_redaction() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/search?q=rust&api_key=secret-key-12345"))
+                .unwrap()
+                .sensitive_query_name("api_key")
+                .unwrap();
+            let tx = context.execute(req)?;
+            let meta_json = std::fs::read_to_string(tx.directory().join("request/metadata.json")).unwrap();
+            assert!(!meta_json.contains("secret-key-12345"), "query secret leaked in metadata");
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    // Test 38: record-before-return guarantee (specs.md §3, §44).
+    #[test]
+    fn http_recording_record_before_return_guarantee() {
+        use crate::protocols::http::request::HttpRequest;
+
+        fn acquire(context: &mut HttpAcquisitionContext, _args: &[OsString]) -> AcquisitionResult<()> {
+            let base = ensure_recording_test_server();
+            let req = HttpRequest::get(format!("{base}/record-before-return")).unwrap();
+            let tx = context.execute(req)?;
+
+            // Invariant: every transaction file MUST be fully synchronized to disk
+            // BEFORE context.execute returns the handle to source code.
+            assert!(tx.directory().exists(), "tx directory must exist");
+            assert!(tx.directory().join("request/metadata.json").is_file(), "request metadata must exist");
+            assert!(tx.directory().join("response/metadata.json").is_file(), "response metadata must exist");
+            assert!(tx.directory().join("response/body").is_file(), "response body must exist");
+            Ok(())
+        }
+
+        let fixture = RuntimeInvocationFixture::foreground_run(
+            RuntimeIdentity::http_acquisition("example-source", 1),
+        );
+        let args = fixture.build_argv(&[]);
+        let result = run_http_runtime_invocation(
+            &args,
+            RuntimeIdentity::http_acquisition("example-source", 1),
+            &HttpSourceContractV1::new(acquire),
+            HttpCapabilitySet::empty(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
 }

@@ -556,7 +556,7 @@ mod tests {
         .unwrap();
         let json = info.to_json().unwrap();
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nexit 1\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-info\" ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nexit 1\n",
             json.replace('\\', "\\\\").replace('\'', "\\'")
         );
         fs::write(&candidate, script).unwrap();

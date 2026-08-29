@@ -390,7 +390,7 @@ pub(crate) struct SourceOperationVersions {
 /// live for `'static`; literals for the Core-owned contract identifier are
 /// converted with `.to_string()` at the construction site.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SourceManifestError {
+pub enum SourceManifestError {
     UnsupportedSchemaVersion { actual: u32 },
     MissingSourceSection,
     MissingSourceField { field: &'static str },
@@ -2220,36 +2220,13 @@ fn format_discovery_markdown(source_name: &str) -> String {
     out
 }
 
-fn current_lexicon_git_rev() -> Result<String, String> {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or_else(|| {
-            "failed to resolve workspace root for generated dependency pin".to_owned()
-        })?;
-
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .arg("rev-parse")
-        .arg("HEAD")
-        .output()
-        .map_err(|error| format!("failed to resolve the repository revision: {error}"))?;
-
-    if !output.status.success() {
-        return Err(
-            "failed to resolve the repository revision for generated Cargo manifests".to_owned(),
-        );
-    }
-
-    String::from_utf8(output.stdout)
-        .map(|value| value.trim().to_owned())
-        .map_err(|error| format!("generated revision is not valid UTF-8: {error}"))
-}
+/// The immutable Core Git revision resolved and embedded at Lexicon build time
+/// via `build.rs` per specs.md §8. Scaffold generation consumes this embedded
+/// constant rather than inspecting `CARGO_MANIFEST_DIR` or running `git` at runtime.
+pub const EMBEDDED_CORE_GIT_REV: &str = env!("LEXICON_EMBEDDED_CORE_REV");
 
 fn format_workspace_cargo_toml(operation_name: &str, members: &[&str]) -> String {
-    let rev = current_lexicon_git_rev().unwrap_or_else(|error| {
-        panic!("failed to resolve the current repository revision for generated manifests: {error}")
-    });
+    let rev = EMBEDDED_CORE_GIT_REV;
     let mut out = String::new();
     out.push_str("[workspace]\n");
     out.push_str("resolver = \"2\"\n");
@@ -2262,7 +2239,7 @@ fn format_workspace_cargo_toml(operation_name: &str, members: &[&str]) -> String
     out.push_str(
         "lexicon_core = { package = \"lexicon-core\", git = \"https://github.com/ssr2zvy/lexicon\", rev = \"",
     );
-    out.push_str(&rev);
+    out.push_str(rev);
     out.push_str("\" }\n");
     let _ = operation_name;
     out
@@ -3187,7 +3164,7 @@ mod tests {
 
     use super::commands::{build_all, init, source_create};
     use super::{
-        BuildAllError, BuiltManagedRunner, MANAGED_RUNNER_TEMPLATE_VERSION,
+        BuildAllError, BuiltManagedRunner, EMBEDDED_CORE_GIT_REV, MANAGED_RUNNER_TEMPLATE_VERSION,
         ManagedRunnerArtifactSelectionError, ManagedRunnerBuildError, ManagedSourceBuildError,
         ManagedWorkspaceMetadataError, ManagedWorkspaceValidationError, SourceManifestError,
         configured_sources_directory, discover_build_targets, finalize_source_staging,
@@ -3500,6 +3477,31 @@ runtime_protocol = 1
         assert!(manifest.contains(
             "lexicon_core = { package = \"lexicon-core\", git = \"https://github.com/ssr2zvy/lexicon\", rev = \""
         ));
+        assert!(manifest.contains(EMBEDDED_CORE_GIT_REV));
+    }
+
+    #[test]
+    fn scaffold_generation_uses_embedded_core_identity_without_runtime_git() {
+        let parent_dir = unique_test_dir("lexicon-scaffold-embedded-");
+        let parent = parent_dir.path().to_path_buf();
+        let init_result = init(&parent, "embedded-core-proj").unwrap();
+
+        let create_result = with_test_cwd(&init_result.project_directory, || {
+            source_create("test-source", "http")
+        })
+        .unwrap();
+
+        let acq_cargo = fs::read_to_string(
+            create_result.protocol_dir.join("get-raw-data/Cargo.toml"),
+        )
+        .unwrap();
+        assert!(acq_cargo.contains(&format!("rev = \"{EMBEDDED_CORE_GIT_REV}\"")));
+
+        let proc_cargo = fs::read_to_string(
+            create_result.protocol_dir.join("process-data/Cargo.toml"),
+        )
+        .unwrap();
+        assert!(proc_cargo.contains(&format!("rev = \"{EMBEDDED_CORE_GIT_REV}\"")));
     }
 
     #[test]

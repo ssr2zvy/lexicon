@@ -472,7 +472,7 @@ mod tests {
             fixture_runtime_info_json(RuntimeIdentity::http_acquisition("example-source", 1));
         let shell_json = String::from_utf8(json.clone()).unwrap();
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nexit 1\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-info\" ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nexit 1\n",
             shell_json.replace('\\', "\\\\").replace('\'', "\\'")
         );
         make_executable_script(&candidate, &script);
@@ -531,7 +531,7 @@ mod tests {
     fn final_hash_failure_returns_final_hash() {
         let dir = tempfile::tempdir().unwrap();
         let candidate = dir.path().join("runtime-final-hash");
-        let script = "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{\"schema_version\":1,\"identity\":{\"source\":\"example-source\",\"version\":1,\"protocol\":\"http-acquisition\"},\"source\":{\"protocol\":\"http\",\"name\":\"example-source\",\"descriptor\":{\"contract_version\":1},\"acquire\":null,\"resume\":null},\"available_capabilities\":[]}'\n  exit 0\nfi\nexit 1\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-info\" ]; then\n  printf '%s\\n' '{\"schema_version\":1,\"identity\":{\"source\":\"example-source\",\"version\":1,\"protocol\":\"http-acquisition\"},\"source\":{\"protocol\":\"http\",\"name\":\"example-source\",\"descriptor\":{\"contract_version\":1},\"acquire\":null,\"resume\":null},\"available_capabilities\":[]}'\n  exit 0\nfi\nexit 1\n";
         make_executable_script(&candidate, script);
 
         let before = hash_runtime_executable(&candidate).unwrap();
@@ -578,7 +578,7 @@ mod tests {
     fn artifact_changed_during_probe_returns_changed_error() {
         let dir = tempfile::tempdir().unwrap();
         let candidate = dir.path().join("runtime-changed");
-        let script = "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{\"schema_version\":1,\"identity\":{\"source\":\"example-source\",\"version\":1,\"protocol\":\"http-acquisition\"},\"source\":{\"protocol\":\"http\",\"name\":\"example-source\",\"descriptor\":{\"contract_version\":1},\"acquire\":null,\"resume\":null},\"available_capabilities\":[]}'\n  exit 0\nfi\nexit 1\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-info\" ]; then\n  printf '%s\\n' '{\"schema_version\":1,\"identity\":{\"source\":\"example-source\",\"version\":1,\"protocol\":\"http-acquisition\"},\"source\":{\"protocol\":\"http\",\"name\":\"example-source\",\"descriptor\":{\"contract_version\":1},\"acquire\":null,\"resume\":null},\"available_capabilities\":[]}'\n  exit 0\nfi\nexit 1\n";
         make_executable_script(&candidate, script);
 
         let expected = RuntimeIdentity::http_acquisition("example-source", 1);
@@ -639,7 +639,7 @@ mod tests {
         ));
         let shell_json = String::from_utf8(json.clone()).unwrap();
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{0}'\n  exit 0\nfi\nexit 1\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-info\" ]; then\n  printf '%s\\n' '{0}'\n  exit 0\nfi\nexit 1\n",
             shell_json
         );
         make_executable_script(&candidate, &script);
@@ -698,7 +698,7 @@ mod tests {
         ));
         let shell_json = String::from_utf8(output).unwrap();
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{0}'\n  exit 0\nfi\nexit 1\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-info\" ]; then\n  printf '%s\\n' '{0}'\n  exit 0\nfi\nexit 1\n",
             shell_json
         );
         make_executable_script(&candidate, &script);
@@ -727,7 +727,7 @@ mod tests {
     fn processing_final_hash_failure_returns_final_hash() {
         let dir = tempfile::tempdir().unwrap();
         let candidate = dir.path().join("processing-final-hash");
-        let script = "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{\"schema_version\":1,\"identity\":{\"source\":\"example-source\",\"protocol\":\"http\",\"operation\":\"processing\",\"source_contract_version\":1},\"descriptor\":{\"contract_version\":1}}'\n  exit 0\nfi\nexit 1\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-info\" ]; then\n  printf '%s\\n' '{\"schema_version\":1,\"identity\":{\"source\":\"example-source\",\"protocol\":\"http\",\"operation\":\"processing\",\"source_contract_version\":1},\"descriptor\":{\"contract_version\":1}}'\n  exit 0\nfi\nexit 1\n";
         make_executable_script(&candidate, script);
 
         let before = hash_runtime_executable(&candidate).unwrap();
@@ -779,7 +779,7 @@ mod tests {
     fn processing_artifact_changed_during_probe_returns_changed_error() {
         let dir = tempfile::tempdir().unwrap();
         let candidate = dir.path().join("processing-changed");
-        let script = "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-information-v1\" ]; then\n  printf '%s\\n' '{\"schema_version\":1,\"identity\":{\"source\":\"example-source\",\"protocol\":\"http\",\"operation\":\"processing\",\"source_contract_version\":1},\"descriptor\":{\"contract_version\":1}}'\n  exit 0\nfi\nexit 1\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"--lexicon-runtime-info\" ]; then\n  printf '%s\\n' '{\"schema_version\":1,\"identity\":{\"source\":\"example-source\",\"protocol\":\"http\",\"operation\":\"processing\",\"source_contract_version\":1},\"descriptor\":{\"contract_version\":1}}'\n  exit 0\nfi\nexit 1\n";
         make_executable_script(&candidate, script);
 
         let expected = RuntimeIdentity::http_processing("example-source", 1);

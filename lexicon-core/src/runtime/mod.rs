@@ -3,7 +3,8 @@ pub mod information;
 pub mod invocation;
 pub mod invocation_transport;
 
-pub const RUNTIME_INFORMATION_PROBE_ARGUMENT: &str = "--lexicon-runtime-information-v1";
+/// The normative command-line argument for probing runtime information per specs.md §22.
+pub const RUNTIME_INFORMATION_PROBE_ARGUMENT: &str = "--lexicon-runtime-info";
 
 pub use identity::{
     OwnedRuntimeIdentity, RuntimeIdentifierError, RuntimeIdentity, RuntimeOperation,

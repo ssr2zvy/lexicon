@@ -379,7 +379,7 @@ mod tests {
             OsString::from(example_envelope().to_json().unwrap()),
             OsString::from("--"),
             OsString::from("alpha"),
-            OsString::from("--lexicon-runtime-information-v1"),
+            OsString::from("--lexicon-runtime-info"),
             OsString::from("gamma"),
         ])
         .unwrap();
@@ -395,7 +395,7 @@ mod tests {
         assert!(!message.contains("example-project"));
         assert!(!message.contains("session-123"));
         assert!(!message.contains("alpha"));
-        assert!(!message.contains("--lexicon-runtime-information-v1"));
+        assert!(!message.contains("--lexicon-runtime-info"));
         assert!(!message.contains("{\"schema_version\""));
     }
 
