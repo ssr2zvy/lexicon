@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Deserialize;
+use serde::{de::Error as _, Deserialize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

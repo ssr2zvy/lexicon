@@ -1191,7 +1191,7 @@ fn is_redirect_status(status: u16) -> bool {
 /// port-or-known-default all match. We deliberately avoid `Url::domain()`:
 /// IP literals have no registrable domain and would be misclassified as
 /// same-origin when in fact they should not be.
-fn same_origin(left: &url::Url, right: &url::Url) -> bool {
+pub(crate) fn same_origin(left: &url::Url, right: &url::Url) -> bool {
     left.scheme() == right.scheme()
         && left.host_str() == right.host_str()
         && left.port_or_known_default() == right.port_or_known_default()
