@@ -693,6 +693,7 @@ name = "lexicon-cli"
 version = "0.1.0-LOCALSNAPSHOT"
 dependencies = [
  "clap",
+ "lexicon-core",
  "lexicon-framework",
  "serde",
  "serde_json",

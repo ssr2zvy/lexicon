@@ -1,6 +1,5 @@
 use std::env;
 use std::fmt;
-use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -846,7 +845,7 @@ fn initialize_project(parent_path: &Path, project_name: &str) -> Result<PathBuf,
         .tempdir_in(&canonical_parent)
         .map_err(|error| format!("failed to create temporary project: {error}"))?;
 
-    fs::create_dir(staging.path().join("sources"))
+    std::fs::create_dir(staging.path().join("sources"))
         .map_err(|error| format!("failed to create sources directory: {error}"))?;
 
     let config = toml::Value::Table({
@@ -870,12 +869,12 @@ fn initialize_project(parent_path: &Path, project_name: &str) -> Result<PathBuf,
     let toml_text = toml::to_string_pretty(&config)
         .map_err(|error| format!("failed to serialize project config: {error}"))?;
 
-    fs::write(staging.path().join("lexicon.toml"), toml_text)
+    std::fs::write(staging.path().join("lexicon.toml"), toml_text)
         .map_err(|error| format!("failed to write lexicon.toml: {error}"))?;
 
     let staging_path = staging.keep();
-    if let Err(error) = fs::rename(&staging_path, &project_directory) {
-        let _ = fs::remove_dir_all(&staging_path);
+    if let Err(error) = std::fs::rename(&staging_path, &project_directory) {
+        let _ = std::fs::remove_dir_all(&staging_path);
         return Err(format!(
             "failed to finalize project '{}': {error}",
             project_directory.display()
@@ -909,7 +908,7 @@ fn generate_source_scaffold(
         ));
     }
 
-    fs::create_dir_all(&source_root)
+    std::fs::create_dir_all(&source_root)
         .map_err(|error| format!("failed to create {}: {error}", source_root.display()))?;
 
     let staging = tempfile::Builder::new()
@@ -938,7 +937,7 @@ fn generate_source_scaffold(
 
     for directory in &directories {
         let path = staging_path.join(directory);
-        fs::create_dir_all(&path)
+        std::fs::create_dir_all(&path)
             .map_err(|error| format!("failed to create directory {}: {error}", path.display()))?;
     }
 
@@ -1026,14 +1025,14 @@ fn generate_source_scaffold(
     for (relative_path, contents) in &files {
         let path = staging_path.join(relative_path);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
+            std::fs::create_dir_all(parent).map_err(|error| {
                 format!(
                     "failed to create parent directory for {}: {error}",
                     path.display()
                 )
             })?;
         }
-        fs::write(&path, contents)
+        std::fs::write(&path, contents)
             .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
     }
 
@@ -1220,12 +1219,12 @@ fn build_source(
 
     let get_runtime_dir = protocol_root.join("get-raw-data/runtime");
     let process_runtime_dir = protocol_root.join("process-data/runtime");
-    fs::create_dir_all(&get_runtime_dir).map_err(|error| {
+    std::fs::create_dir_all(&get_runtime_dir).map_err(|error| {
         ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
             format!("failed to create {}: {error}", get_runtime_dir.display()),
         ))
     })?;
-    fs::create_dir_all(&process_runtime_dir).map_err(|error| {
+    std::fs::create_dir_all(&process_runtime_dir).map_err(|error| {
         ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
             format!(
                 "failed to create {}: {error}",
@@ -1294,7 +1293,7 @@ fn discover_build_targets() -> Result<Vec<(String, String)>, BuildAllError> {
         });
     }
 
-    let mut source_entries = fs::read_dir(&sources_root)
+    let mut source_entries = std::fs::read_dir(&sources_root)
         .map_err(BuildAllError::CurrentDirectory)?
         .collect::<Result<Vec<_>, std::io::Error>>()
         .map_err(BuildAllError::CurrentDirectory)?;
@@ -1316,7 +1315,7 @@ fn discover_build_targets() -> Result<Vec<(String, String)>, BuildAllError> {
             });
         }
 
-        let mut protocol_entries = fs::read_dir(&source_path)
+        let mut protocol_entries = std::fs::read_dir(&source_path)
             .map_err(BuildAllError::CurrentDirectory)?
             .collect::<Result<Vec<_>, std::io::Error>>()
             .map_err(BuildAllError::CurrentDirectory)?;
@@ -1349,7 +1348,7 @@ fn discover_build_targets() -> Result<Vec<(String, String)>, BuildAllError> {
                 });
             }
 
-            let manifest_contents = fs::read_to_string(&manifest_path)
+            let manifest_contents = std::fs::read_to_string(&manifest_path)
                 .map_err(BuildAllError::CurrentDirectory)?;
             validate_source_toml_text(&manifest_contents, &source_name, &protocol_name)
                 .map_err(|error| BuildAllError::InvalidSourceManifest {
@@ -1389,7 +1388,7 @@ fn load_source_metadata(
         ));
     }
 
-    let contents = fs::read_to_string(path)
+    let contents = std::fs::read_to_string(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     validate_source_toml_text(&contents, expected_name, expected_protocol)
         .map_err(|error| format!("{}: {}", path.display(), error))
@@ -1540,7 +1539,7 @@ fn read_lockfile_snapshot(lockfile: &Path) -> Result<Vec<u8>, ManagedSourceBuild
             lockfile.to_path_buf(),
         ));
     }
-    fs::read(lockfile).map_err(|error| {
+    std::fs::read(lockfile).map_err(|error| {
         ManagedSourceBuildError::WorkspaceValidation(ManagedWorkspaceValidationError::LegacyLayout(
             format!("failed to read {}: {error}", lockfile.display()),
         ))
@@ -1862,9 +1861,15 @@ pub fn select_managed_runner_executable(
     workspace_manifest: &Path,
     expected_package_name: &str,
     expected_binary_name: &str,
+    expected_target_directory: &Path,
 ) -> Result<PathBuf, ManagedRunnerArtifactSelectionError> {
     let package_id = resolve_managed_package_id(workspace_manifest, expected_package_name)?;
-    select_artifact_from_cargo_output(cargo_output, &package_id, expected_binary_name)
+    select_artifact_from_cargo_output(
+        cargo_output,
+        &package_id,
+        expected_binary_name,
+        expected_target_directory,
+    )
 }
 
 pub fn move_to_backup(path: &Path) -> Result<PathBuf, String> {
@@ -1877,7 +1882,7 @@ pub fn move_to_backup(path: &Path) -> Result<PathBuf, String> {
             .as_nanos()
     );
     let backup = path.parent().unwrap().join(unique);
-    fs::rename(path, &backup)
+    std::fs::rename(path, &backup)
         .map_err(|error| format!("failed to create backup for {}: {error}", path.display()))?;
     Ok(backup)
 }
@@ -1892,15 +1897,15 @@ fn finalize_source_staging(staging: tempfile::TempDir, source_dir: &Path) -> Res
     })?;
 
     if !source_parent.exists() {
-        fs::create_dir_all(source_parent)
+        std::fs::create_dir_all(source_parent)
             .map_err(|error| format!("failed to create {}: {error}", source_parent.display()))?;
     }
 
-    let rename_result = fs::rename(&staging_path, source_dir);
+    let rename_result = std::fs::rename(&staging_path, source_dir);
 
     if let Err(error) = rename_result {
-        let _ = fs::remove_dir_all(&staging_path);
-        let _ = fs::remove_dir(source_parent);
+        let _ = std::fs::remove_dir_all(&staging_path);
+        let _ = std::fs::remove_dir(source_parent);
         drop(staging);
         return Err(format!(
             "failed to rename {} to {}: {error}",
@@ -2034,7 +2039,7 @@ fn visit_descendants(
     found: &mut Option<PathBuf>,
     current: &Path,
 ) -> Result<(), ProjectRootDiscoveryError> {
-    let mut entries = fs::read_dir(current)
+    let mut entries = std::fs::read_dir(current)
         .map_err(|source| ProjectRootDiscoveryError::CurrentDirectoryMetadata {
             path: current.to_path_buf(),
             source,
@@ -2089,7 +2094,7 @@ fn resolve_project_directory(project_root: &Path, configured: &str) -> Result<Pa
         match component {
             Component::Normal(name) => {
                 let next = resolved.join(name);
-                match fs::symlink_metadata(&next) {
+                match std::fs::symlink_metadata(&next) {
                     Ok(metadata) if metadata.file_type().is_symlink() => {
                         let target = next.canonicalize().map_err(|error| {
                             format!("failed to resolve '{}': {error}", next.display())
@@ -2158,7 +2163,7 @@ pub(crate) fn load_project_config(
     project_root: &Path,
 ) -> Result<ProjectConfigData, ProjectConfigLoadError> {
     let config_path = project_root.join("lexicon.toml");
-    let contents = fs::read_to_string(&config_path)
+    let contents = std::fs::read_to_string(&config_path)
         .map_err(|source| ProjectConfigLoadError::Read {
             path: config_path.clone(),
             source,
@@ -2739,7 +2744,7 @@ fn validate_managed_workspace_layout(
         ));
     }
 
-    let contents = fs::read_to_string(&manifest_path).map_err(|error| {
+    let contents = std::fs::read_to_string(&manifest_path).map_err(|error| {
         ManagedWorkspaceValidationError::ManifestParseFailed(format!(
             "failed to read {}: {error}",
             manifest_path.display()
@@ -2823,7 +2828,7 @@ fn validate_managed_workspace_layout(
     }
 
     let impl_doc: toml::Value =
-        toml::from_str(&fs::read_to_string(&impl_manifest).map_err(|error| {
+        toml::from_str(&std::fs::read_to_string(&impl_manifest).map_err(|error| {
             ManagedWorkspaceValidationError::ManifestParseFailed(format!(
                 "failed to read {}: {error}",
                 impl_manifest.display()
@@ -2911,7 +2916,7 @@ fn validate_managed_workspace_layout(
     }
 
     let runner_doc: toml::Value =
-        toml::from_str(&fs::read_to_string(&runner_manifest).map_err(|error| {
+        toml::from_str(&std::fs::read_to_string(&runner_manifest).map_err(|error| {
             ManagedWorkspaceValidationError::ManifestParseFailed(format!(
                 "failed to read {}: {error}",
                 runner_manifest.display()
@@ -3082,7 +3087,7 @@ fn validate_managed_workspace_layout(
         ));
     }
 
-    let runner_src = fs::read_to_string(&runner_main).map_err(|error| {
+    let runner_src = std::fs::read_to_string(&runner_main).map_err(|error| {
         ManagedWorkspaceValidationError::ManifestParseFailed(format!(
             "failed to read {}: {error}",
             runner_main.display()
@@ -3123,7 +3128,7 @@ fn validate_managed_workspace_layout(
     }
 
     if impl_manifest.exists()
-        && fs::read_to_string(&impl_manifest)
+        && std::fs::read_to_string(&impl_manifest)
             .map(|text| text.contains("src/main.rs"))
             .unwrap_or(false)
     {
@@ -3270,9 +3275,9 @@ mod tests {
         let binary_name = impl_name.clone();
         let impl_dir = root.join(format!("{operation_name}-impl/src"));
         let runner_dir = root.join("lexicon-runner/src");
-        fs::create_dir_all(&impl_dir).unwrap();
-        fs::create_dir_all(&runner_dir).unwrap();
-        fs::write(
+        std::fs::create_dir_all(&impl_dir).unwrap();
+        std::fs::create_dir_all(&runner_dir).unwrap();
+        std::fs::write(
             root.join("Cargo.toml"),
             format_workspace_cargo_toml(
                 operation_name,
@@ -3280,18 +3285,18 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::write(root.join("Cargo.lock"), "# lockfile\n").unwrap();
-        fs::write(
+        std::fs::write(root.join("Cargo.lock"), "# lockfile\n").unwrap();
+        std::fs::write(
             root.join(format!("{operation_name}-impl/Cargo.toml")),
             format_implementation_cargo_toml(&impl_name),
         )
         .unwrap();
-        fs::write(
+        std::fs::write(
             root.join(format!("{operation_name}-impl/src/lib.rs")),
             "pub fn placeholder() {}\n",
         )
         .unwrap();
-        fs::write(
+        std::fs::write(
             root.join("lexicon-runner/Cargo.toml"),
             format_runner_cargo_toml(
                 &runner_name,
@@ -3306,7 +3311,7 @@ mod tests {
         } else {
             format_processing_managed_runner_main(source_name)
         };
-        fs::write(root.join("lexicon-runner/src/main.rs"), main).unwrap();
+        std::fs::write(root.join("lexicon-runner/src/main.rs"), main).unwrap();
     }
 
     #[test]
@@ -3558,13 +3563,13 @@ runtime_protocol = 1
         })
         .unwrap();
 
-        let acq_cargo = fs::read_to_string(
+        let acq_cargo = std::fs::read_to_string(
             create_result.protocol_dir.join("get-raw-data/Cargo.toml"),
         )
         .unwrap();
         assert!(acq_cargo.contains(&format!("rev = \"{EMBEDDED_CORE_GIT_REV}\"")));
 
-        let proc_cargo = fs::read_to_string(
+        let proc_cargo = std::fs::read_to_string(
             create_result.protocol_dir.join("process-data/Cargo.toml"),
         )
         .unwrap();
@@ -3580,7 +3585,7 @@ runtime_protocol = 1
 
         let symlink_path = root.join("sources");
         std::os::unix::fs::symlink(&outside, &symlink_path).unwrap();
-        fs::write(
+        std::fs::write(
             root.join("lexicon.toml"),
             "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n",
         )
@@ -3599,7 +3604,7 @@ runtime_protocol = 1
 
         let link = root.join("link");
         std::os::unix::fs::symlink(&outside, &link).unwrap();
-        fs::write(
+        std::fs::write(
             root.join("lexicon.toml"),
             "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"link/nonexistent-child\"\n",
         )
@@ -3617,13 +3622,13 @@ runtime_protocol = 1
         let root_dir = unique_test_dir("lexicon-nested-root-");
         let root = root_dir.path().to_path_buf();
         let nested = root.join("tools/inner");
-        fs::create_dir_all(&nested).unwrap();
-        fs::write(
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
             root.join("lexicon.toml"),
             "schema_version = 1\n[project]\nname = \"outer\"\nsources_directory = \"sources\"\n",
         )
         .unwrap();
-        fs::write(
+        std::fs::write(
             nested.join("lexicon.toml"),
             "schema_version = 1\n[project]\nname = \"inner\"\nsources_directory = \"sources\"\n",
         )
@@ -3646,26 +3651,26 @@ runtime_protocol = 1
         let raw = root.join("data/raw");
         let processed = root.join("data/processed");
         let nested = root.join("data/nested-project");
-        fs::create_dir_all(&raw).unwrap();
-        fs::create_dir_all(&processed).unwrap();
-        fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&raw).unwrap();
+        std::fs::create_dir_all(&processed).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
 
-        fs::write(
+        std::fs::write(
             root.join("lexicon.toml"),
             "schema_version = 1\n[project]\nname = \"outer\"\nsources_directory = \"sources\"\n",
         )
         .unwrap();
-        fs::write(
+        std::fs::write(
             raw.join("lexicon.toml"),
             "schema_version = 1\n[project]\nname = \"raw\"\nsources_directory = \"sources\"\n",
         )
         .unwrap();
-        fs::write(
+        std::fs::write(
             processed.join("lexicon.toml"),
             "schema_version = 1\n[project]\nname = \"processed\"\nsources_directory = \"sources\"\n",
         )
         .unwrap();
-        fs::write(
+        std::fs::write(
             nested.join("lexicon.toml"),
             "schema_version = 1\n[project]\nname = \"nested\"\nsources_directory = \"sources\"\n",
         )
@@ -3957,10 +3962,10 @@ runtime_protocol = 1
             "const LEXICON_MANAGED_RUNNER_TEMPLATE_VERSION: u32 = {};\n\n",
             MANAGED_RUNNER_TEMPLATE_VERSION
         );
-        let source = fs::read_to_string(&runner_main)
+        let source = std::fs::read_to_string(&runner_main)
             .unwrap()
             .replace(&marker, "");
-        fs::write(&runner_main, source).unwrap();
+        std::fs::write(&runner_main, source).unwrap();
 
         let result = validate_managed_workspace_layout(
             root_dir.path(),
@@ -3999,10 +4004,10 @@ runtime_protocol = 1
         let root_dir = unique_test_dir("lexicon-workspace-modified-template-");
         write_valid_managed_workspace(root_dir.path(), "example-source", "get-raw-data");
         let runner_main = root_dir.path().join("lexicon-runner/src/main.rs");
-        let source = fs::read_to_string(&runner_main)
+        let source = std::fs::read_to_string(&runner_main)
             .unwrap()
             .replace("ExitCode::SUCCESS", "ExitCode::from(0)");
-        fs::write(&runner_main, source).unwrap();
+        std::fs::write(&runner_main, source).unwrap();
 
         let result = validate_managed_workspace_layout(
             root_dir.path(),
@@ -4023,7 +4028,7 @@ runtime_protocol = 1
     fn workspace_validation_rejects_source_owned_main_entrypoint_file() {
         let root_dir = unique_test_dir("lexicon-workspace-legacy-main-file-");
         write_valid_managed_workspace(root_dir.path(), "example-source", "get-raw-data");
-        fs::write(
+        std::fs::write(
             root_dir.path().join("get-raw-data-impl/src/main.rs"),
             "fn main() {}\n",
         )
@@ -4160,7 +4165,7 @@ runtime_protocol = 1
     fn framework_source_create_fails_with_error_not_exit_for_bad_protocol() {
         let temp_dir = unique_test_dir("lexicon-fw-sc-");
         let temp = temp_dir.path().to_path_buf();
-        fs::write(
+        std::fs::write(
             temp.join("lexicon.toml"),
             "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n",
         )
@@ -4181,8 +4186,8 @@ runtime_protocol = 1
         let root = root_dir.path().to_path_buf();
         let sources_dir = root.join("sources");
         let source_dir = sources_dir.join("example-source");
-        fs::create_dir_all(&sources_dir).unwrap();
-        fs::write(
+        std::fs::create_dir_all(&sources_dir).unwrap();
+        std::fs::write(
             root.join("lexicon.toml"),
             "schema_version = 1\n[project]\nname = \"demo\"\nsources_directory = \"sources\"\n",
         )
@@ -4193,9 +4198,9 @@ runtime_protocol = 1
             .tempdir_in(&sources_dir)
             .unwrap();
         let staging_path = staging.path().to_path_buf();
-        fs::write(staging_path.join("source.toml"), "schema_version = 1\n").unwrap();
-        fs::create_dir_all(&source_dir).unwrap();
-        fs::write(source_dir.join("existing.txt"), "preserve-me\n").unwrap();
+        std::fs::write(staging_path.join("source.toml"), "schema_version = 1\n").unwrap();
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("existing.txt"), "preserve-me\n").unwrap();
 
         let result = finalize_source_staging(staging, &source_dir);
 
@@ -4269,7 +4274,7 @@ runtime_protocol = 1
 
         with_test_cwd(&init_result.project_directory, || {
             source_create("valid-source", "http").unwrap();
-            fs::write(init_result.project_directory.join("sources/junk.txt"), "junk").unwrap();
+            std::fs::write(init_result.project_directory.join("sources/junk.txt"), "junk").unwrap();
 
             let result = discover_build_targets();
             assert!(matches!(
@@ -4287,7 +4292,7 @@ runtime_protocol = 1
 
         with_test_cwd(&init_result.project_directory, || {
             source_create("valid-source", "http").unwrap();
-            fs::write(
+            std::fs::write(
                 init_result.project_directory.join("sources/valid-source/notes.txt"),
                 "notes",
             )
@@ -4309,7 +4314,7 @@ runtime_protocol = 1
 
         with_test_cwd(&init_result.project_directory, || {
             source_create("valid-source", "http").unwrap();
-            fs::create_dir_all(
+            std::fs::create_dir_all(
                 init_result.project_directory.join("sources/valid-source/browser"),
             )
             .unwrap();
@@ -4334,7 +4339,7 @@ runtime_protocol = 1
             let manifest_path = init_result
                 .project_directory
                 .join("sources/valid-source/http/source.toml");
-            fs::write(
+            std::fs::write(
                 &manifest_path,
                 "schema_version = 1\n[source]\nname = \"valid-source\"\nprotocol = \"http\"\n",
             )
@@ -4358,7 +4363,7 @@ runtime_protocol = 1
         let init_result = init(&parent, "no-proto-proj").unwrap();
 
         with_test_cwd(&init_result.project_directory, || {
-            fs::create_dir_all(init_result.project_directory.join("sources/empty-source")).unwrap();
+            std::fs::create_dir_all(init_result.project_directory.join("sources/empty-source")).unwrap();
 
             let result = discover_build_targets();
             assert!(matches!(

@@ -60,12 +60,6 @@ pub enum DurableFileError {
     Sync(std::io::Error),
 }
 
-impl std::fmt::Display for DurableFileError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self}")
-    }
-}
-
 /// Atomically create `path`, write `bytes`, and fsync the new file. The
 /// `create_new(true)` open mode refuses to clobber an existing file
 /// (a leftover from a crashed scaffold); the typed error surfaces that

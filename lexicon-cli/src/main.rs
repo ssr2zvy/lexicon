@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-pub use lexicon_cli_lib::{Cli, CliError, dispatch};
+pub use lexicon_cli::{Cli, CliError, dispatch};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();

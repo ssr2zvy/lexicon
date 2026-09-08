@@ -75,10 +75,10 @@ pub enum CoreDependencyError {
         actual: Vec<String>,
     },
     /// The `package` field is missing or does not equal the canonical name.
-    #[error("`lexicon_core.package` must equal exactly `{REQUIRED}`")]
+    #[error("`lexicon_core.package` must equal exactly `{REQUIRED_CORE_PACKAGE}`")]
     PackageMismatch,
     /// The `git` field is missing or does not equal the canonical URL.
-    #[error("`lexicon_core.git` must equal exactly `{REQUIRED}`")]
+    #[error("`lexicon_core.git` must equal exactly `{REQUIRED_CORE_GIT_URL}`")]
     GitUrlMismatch,
     /// The `rev` field is missing, malformed, or disagrees with the
     /// embedded Core git revision.

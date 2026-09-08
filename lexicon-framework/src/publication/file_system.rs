@@ -128,8 +128,8 @@ impl ScriptedPublicationFileSystem {
         let mut guard = self.inner.lock().expect("poisoning");
         if let Some(index) = guard.script.iter().position(|entry| match entry.matches {
             ScriptMatcher::Any => true,
-            ScriptMatcher::FirstMethod(m) => m == &method,
-            ScriptMatcher::FirstRenameFrom { from_match } => {
+            ScriptMatcher::FirstMethod(m) => m == method,
+            ScriptMatcher::FirstRenameFrom { ref from_match } => {
                 method == "rename"
                     && from.is_some_and(|p| p.to_string_lossy() == *from_match)
             }

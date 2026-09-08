@@ -121,7 +121,7 @@ impl lexicon_framework::process::SupervisedChild for FakeSupervisedChild {
 fn fake_exit_status(code: Option<i32>) -> std::process::ExitStatus {
     use std::os::unix::process::ExitStatusExt;
     match code {
-        Some(code) => std::process::ExitStatus::from_raw(code),
+        Some(code) => std::process::ExitStatus::from_raw((code as i32) << 8),
         None => std::process::ExitStatus::from_raw(0),
     }
 }

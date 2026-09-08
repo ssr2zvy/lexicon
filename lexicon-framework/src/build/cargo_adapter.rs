@@ -1,10 +1,8 @@
-//! BUILD-02 public surface over [`cargo_executor`].
-pub use cargo_executor::{
+//! BUILD-02 public surface over [`super::cargo_executor`].
+pub use super::cargo_executor::{
     CargoExecutionError, CargoExecutor, CargoInvocation, CargoInvocationKind, CargoOutput,
     FakeCargoExecutor, FakeCargoResponse, ProductionCargoExecutor,
 };
-
-mod cargo_executor;
 
 use std::path::PathBuf;
 use thiserror::Error;
