@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use lexicon_conformance_matrix::{
-    ConformanceFile, MatrixError, check, flatten_test_index, parse_cargo_test_list,
+    ConformanceFile, check, flatten_test_index, parse_cargo_test_list,
 };
 
 fn main() -> ExitCode {
@@ -93,10 +93,4 @@ fn load_test_index(path: &str) -> Result<BTreeSet<String>, std::io::Error> {
     let text = std::fs::read_to_string(path)?;
     let pairs = parse_cargo_test_list(&text);
     Ok(flatten_test_index(pairs.iter()))
-}
-
-impl From<MatrixError> for std::io::Error {
-    fn from(value: MatrixError) -> Self {
-        std::io::Error::new(std::io::ErrorKind::Other, value.to_string())
-    }
 }

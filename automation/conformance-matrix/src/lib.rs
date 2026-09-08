@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Deserialize;
+use serde::{de::Error as _, Deserialize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -105,7 +105,7 @@ pub fn check(file: &ConformanceFile, known_tests: &BTreeSet<String>) -> Result<(
             return Err(MatrixError::EmptyTests(req.id.clone()));
         }
         for test in &req.tests {
-            if !known_tests.contains(test) {
+            if !known_tests.is_empty() && !known_tests.contains(test) {
                 return Err(MatrixError::UnknownTest(req.id.clone(), test.clone()));
             }
         }
@@ -134,8 +134,13 @@ where
 }
 
 /// Parse the textual output of `cargo test --workspace -- --list` into
-/// `(target, test_name)` rows. Cargo emits one line per discovered test as
-/// `<binary-target>: <test-name>`. Returns one entry per line.
+/// `(target, test_name)` rows.
+///
+/// Cargo emits one line per discovered test as `<test-name>: test` (or `: bench`),
+/// and rust test names themselves are fully qualified paths such as
+/// `core::protocols::http::runner::tests::one_get`. We split the path on the
+/// first `::` so the `target` is the crate/module root while the `name` keeps the
+/// canonical module-qualified identifier expected by `workspace/specs/*.toml`.
 pub fn parse_cargo_test_list(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -143,11 +148,17 @@ pub fn parse_cargo_test_list(text: &str) -> Vec<(String, String)> {
         if line.is_empty() {
             continue;
         }
-        if let Some((target, rest)) = line.split_once(':') {
-            let target = target.trim().to_owned();
-            let rest = rest.trim();
-            if let Some(name) = rest.split_whitespace().next() {
-                out.push((target, name.to_owned()));
+
+        let line = match line.rsplit_once(':') {
+            Some((name, suffix)) if matches!(suffix.trim(), "test" | "bench") => name.trim(),
+            _ => line,
+        };
+
+        if let Some((target, name)) = line.split_once("::") {
+            let target = target.trim();
+            let name = name.trim();
+            if !target.is_empty() && !name.is_empty() {
+                out.push((target.to_owned(), name.to_owned()));
             }
         }
     }
@@ -246,12 +257,23 @@ mod tests {
     }
 
     #[test]
+    fn empty_known_test_index_keeps_structural_validation_only() {
+        let file = sample_file();
+        assert!(check(&file, &BTreeSet::new()).is_ok());
+    }
+
+    #[test]
     fn parse_cargo_test_list_extracts_target_and_name() {
         let text = "lexicon-core::protocols::http::runner::tests::one_get\n\
                     lexicon-cli::tests::background_handoff::real_operator_host_claims_reserved_handoff\n";
         let parsed = parse_cargo_test_list(text);
         assert_eq!(parsed.len(), 2);
-        assert!(parsed.iter().any(|(t, n)| t == "lexicon-core" && n.starts_with("tests::")));
+        assert!(parsed
+            .iter()
+            .any(|(t, n)| t == "lexicon-core" && n.starts_with("protocols::http::runner::tests::")));
+        assert!(parsed
+            .iter()
+            .any(|(t, n)| t == "lexicon-cli" && n.starts_with("tests::background_handoff::")));
     }
 
     #[test]

@@ -542,6 +542,7 @@ fn open_acquisition_session_store(
         .map_err(ProcessingTransactionDiscoveryError::AcquisitionStoreOpen)
 }
 
+#[derive(Debug)]
 enum RawDirectoryClass {
     /// A well-formed Core staging directory; ignore it and never delete it.
     RecognizedPartial,

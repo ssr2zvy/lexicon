@@ -339,6 +339,7 @@ pub(crate) fn record_transaction_attempt(
             notify_durability(
                 crate::protocols::http::test_support::DurabilityEventKind::ResponseBodySynced,
             );
+            #[cfg(test)]
             notify_durability(
                 crate::protocols::http::test_support::DurabilityEventKind::ResponseMetadataSynced,
             );

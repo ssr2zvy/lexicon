@@ -12,7 +12,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus};
 
-use crate::process::{CancellationKind, SupervisedChild, unix_signal_send};
+use crate::process::{CancellationKind, SupervisedChild};
 
 /// Launch a child in a new process group.
 pub fn launch(

@@ -157,7 +157,7 @@ fn run_listener(
                     "HTTP/1.1 {status} OK\r\nContent-Length: {announced_len}\r\nConnection: close\r\n\r\n"
                 );
                 let _ = stream.write_all(response.as_bytes());
-                let payload = vec![b'X'; truncate_to.min(*announced_len)];
+                let payload = vec![b'X'; (*truncate_to).min(*announced_len)];
                 let _ = stream.write_all(&payload);
                 let _ = stream.flush();
                 state.truncated_observed.fetch_add(1, Ordering::SeqCst);
@@ -172,7 +172,7 @@ fn run_listener(
                     body_prefix.len()
                 );
                 let _ = stream.write_all(response.as_bytes());
-                let take = close_after_bytes.min(body_prefix.len());
+                let take = (*close_after_bytes).min(body_prefix.len());
                 let _ = stream.write_all(&body_prefix[..take]);
                 let _ = stream.flush();
                 let _ = stream.shutdown(std::net::Shutdown::Both);

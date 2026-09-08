@@ -30,6 +30,8 @@
 //!    running it foreground. This is the precise behavior the audit
 //!    demands from `ForegroundDataExecutionError::BackgroundModeUnsupported`.
 
+use std::path::PathBuf;
+
 use lexicon_core::session::{SessionIdentity, generate_session_id};
 use lexicon_framework::data::{
     BackgroundHandoffOutcome, DataOperation, ForegroundDataExecutionError,

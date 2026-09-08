@@ -31,6 +31,7 @@ fn is_safe_executable_name(name: &str) -> bool {
 }
 
 pub mod cargo_adapter;
+pub mod cargo_executor;
 pub mod core_dependency;
 pub mod processing_runtime_manifest;
 pub mod runtime_bundle_admission;

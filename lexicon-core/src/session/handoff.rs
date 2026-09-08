@@ -213,7 +213,7 @@ pub fn generate_instance_nonce() -> String {
 }
 
 fn rand_fill(out: &mut [u8; HANDOFF_TOKEN_BYTES]) {
-    getrandom::getrandom(out).expect("CSPRNG failure");
+    getrandom::fill(out).expect("CSPRNG failure");
 }
 
 #[cfg(test)]

@@ -10,6 +10,8 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use sha2::Digest;
+
 use crate::protocols::http::checkpoint::error::{
     HttpCheckpointCommitError, HttpCheckpointLookupError,
 };
@@ -43,8 +45,8 @@ fn checkpoint_partial_commit_is_some_only_when_fresh_payload_accepted() {
 #[test]
 fn committed_checkpoint_exposes_identity_through_accessors() {
     use crate::runtime::{
-        OwnedRuntimeIdentity, ProjectRuntimeIdentity, RuntimeIdentity,
-        RuntimeOperation, RuntimeProtocol, SessionInvocationIdentity,
+        OwnedRuntimeIdentity, RuntimeIdentity, RuntimeOperation, RuntimeProtocol,
+        SessionInvocationIdentity,
     };
 
     let project =
@@ -52,10 +54,7 @@ fn committed_checkpoint_exposes_identity_through_accessors() {
     let runtime = OwnedRuntimeIdentity::http_acquisition("ckpt-committed-source", 1);
     let session = SessionInvocationIdentity::new("ckpt-committed-session").unwrap();
     let key = HttpLogicalRequestKey::new("ckpt/logical/key").unwrap();
-    let key_sha = format!(
-        "{:x}",
-        sha2::Sha256::digest(key.as_str().as_bytes())
-    );
+    let key_sha = format!("{:x}", sha2::Sha256::digest(key.as_str().as_bytes()));
     let identity =
         crate::protocols::http::transaction::HttpTransactionIdentity::new().unwrap();
     let attempt = crate::protocols::http::transaction::HttpAttemptIdentity::new(
@@ -87,11 +86,7 @@ fn committed_checkpoint_exposes_identity_through_accessors() {
     assert_eq!(checkpoint.checkpoint_path(), path);
     assert_eq!(checkpoint.committed_at_unix_nanos(), 1_700_000_000);
 
-    let _ = (
-        ProjectRuntimeIdentity::new("ckpt-committed-project"),
-        RuntimeOperation::Acquisition,
-        RuntimeProtocol::Http,
-    );
+    let _ = (RuntimeOperation::Acquisition, RuntimeProtocol::Http);
 }
 
 #[test]
@@ -103,8 +98,8 @@ fn committed_lookup_error_displays_without_panic() {
     // when an integration test finds it through an opaque error.
     let variants = [
         Lookup::UnmanagedContext,
-        Lookup::OperationRoot("op-root".to_owned()),
-        Lookup::SessionStoreOpen(std::io::Error::other("seed")),
+        Lookup::OperationRoot(crate::session::SessionStoreError::Io(std::io::Error::other("seed"))),
+        Lookup::SessionStoreOpen(crate::session::SessionStoreError::Io(std::io::Error::other("seed"))),
     ];
     for variant in variants.iter() {
         let _ = format!("{variant}");

@@ -620,6 +620,7 @@ impl std::error::Error for HttpRuntimeInvocationExecutionError {
             Self::Session(e) => Some(e),
             Self::SourceStateDirectoryPreparation(e) => Some(e),
             Self::Handler(e) => Some(e),
+            Self::HandlerPanicked => None,
             Self::TerminalPersistence { session_error, .. } => Some(session_error),
         }
     }
@@ -2585,9 +2586,9 @@ mod execution_tests {
         let hooks = DurabilityPublisherHooks::with_observer(Arc::new(NoopDurabilityObserver));
         let _ = hooks; // not installed into the recorder; we're exercising
                         // the surface, not wiring it here.
-        assert!(matches!(
+        assert_eq!(
             DurabilityEventKind::ParentDirectorySynced as u32,
-            u32::from(DurabilityEventKind::ParentDirectorySynced as u32)
-        ));
+            DurabilityEventKind::ParentDirectorySynced as u32
+        );
     }
 }

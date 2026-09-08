@@ -396,7 +396,7 @@ impl Drop for ProcessingContext {
 #[doc = "PROCESS-01 Core-owned SQLite transaction failpoint coverage \
 (current.md §11 PROCESS-01)."]
 mod tests {
-    use super::error::ProcessingTransactionBoundaryPhase;
+    use crate::processing::error::ProcessingTransactionBoundaryPhase;
     use super::{ProcessingContext, ProcessingDatabaseState};
 
     #[test]
@@ -533,7 +533,7 @@ mod tests {
         let typed_error = commit_result.err();
         assert!(
             matches!(
-                typed_error.map(|e| format!("{e:?}")),
+                typed_error.as_ref().map(|e| format!("{e:?}")),
                 Some(s) if s.contains("TransactionNotActive")
                     || s.contains("AlreadyCommitted")
                     || s.contains("AlreadyRolledBack")
